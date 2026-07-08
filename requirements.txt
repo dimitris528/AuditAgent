@@ -1,0 +1,8 @@
+# AuditAgent.ai — production dependencies (Streamlit Cloud)
+# Pinned to the exact versions the app is developed and tested against.
+
+streamlit==1.58.0        # PWA front-end (app.py); needs >=1.47 for width="stretch"
+openai==2.2.0            # GPT-4o Vision invoice extraction (extractor.py)
+pdfplumber==0.11.10      # PDF text extraction fallback path (extractor.py)
+requests==2.34.2         # Airtable REST client (airtable_client.py, airtable_publisher.py)
+python-dotenv==1.1.1     # .env loading (config.py)

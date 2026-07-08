@@ -1,0 +1,12 @@
+# Native Streamlit theme — keeps BaseWeb widgets (dropdown popovers, date
+# picker, dataframe) on-palette where CSS injection can't reach.
+[theme]
+base = "dark"
+primaryColor = "#00E676"
+backgroundColor = "#121214"
+secondaryBackgroundColor = "#1C1C1E"
+textColor = "#FFFFFF"
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false
