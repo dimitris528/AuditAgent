@@ -1,34 +1,34 @@
 """
 Airtable data layer for the AI Document Auditor Micro-SaaS.
 
-EVERY read is filtered by the caller's UserId (the tenant key), so one tenant
-can never see or touch another tenant's data.
+EVERY read is filtered by the caller's Username (the tenant key), so one
+tenant can never see or touch another tenant's data.
 
-Required Airtable schema (create these in your base before running the bot):
+Required Airtable schema (create these in your base before running the app):
 
   Projects table  (env AIRTABLE_PROJECTS_TABLE, default "Projects")
-      Name          Single line text    - project name
-      UserId   Single line text    - owner's user id  (tenant key)
+      Name          Single line text    - category/project name
+      Username      Single line text    - owner's username  (tenant key)
       Status        Single select       - options: "Active", "Completed"
-      ClosedDate    Date                - set when the project is closed
+      ClosedDate    Date                - set when the category is archived
 
   Transactions table  (env AIRTABLE_TRANSACTIONS_TABLE, default "Transactions")
-      UserId   Single line text    - owner's user id  (tenant key)
-      Project       Single line text    - project name this row belongs to
-      Type          Single select       - options: "Expense", "Revenue"
-      Amount        Number              - numeric value, no currency symbol
-      Description   Single line text    - free text / materials summary
-      Provider      Single line text    - supplier (invoices only)
-      Date          Date                - invoice date, ISO "YYYY-MM-DD" (optional)
-      Source        Single select       - options: "Invoice", "Manual"
+      Username      Single line text    - owner's username  (tenant key)
+      Category      Single line text    - category name this row belongs to
+      Amount        Number              - SIGNED: revenue positive, expense
+                                          negative (the app displays abs())
+      Date          Date                - ISO "YYYY-MM-DD" (optional)
+      Description   Single line text    - free notes / supplier (optional)
       FileHash      Single line text    - SHA-256 of the uploaded file; the
                                           per-tenant duplicate-receipt guard
-      (Airtable's built-in createdTime is used for monthly/annual grouping.)
+      The save payload NEVER contains any key outside these six columns —
+      enforced by _TRANSACTION_COLUMNS below — so a failed write can only
+      mean one of the six is missing/renamed in the base.
 
   Users table  (env AIRTABLE_USERS_TABLE, default "Users")
-      UserId              Single line text  - tenant key (phone number / username)
+      Username            Single line text  - tenant key (login name)
+      Password            Text              - login password for this user
       SubscriptionStatus  Single select     - options: "Active", "Expired"
-      PIN                 Text or Number    - 4-digit login PIN for this user
 """
 
 import re
@@ -45,6 +45,12 @@ from config import (
 )
 
 API_ROOT = "https://api.airtable.com/v0"
+
+# The ONLY columns a Transactions write may carry (case-sensitive — they must
+# match the Airtable base exactly).
+_TRANSACTION_COLUMNS = frozenset(
+    {"Username", "Amount", "Date", "Category", "FileHash", "Description"}
+)
 
 
 class AirtableError(RuntimeError):
@@ -71,13 +77,44 @@ def _sanitize(value):
     return str(value).replace("'", "")
 
 
+def _api_error_detail(resp):
+    """Extract Airtable's structured error (type + message) from a response.
+
+    Airtable reports schema problems here — e.g. UNKNOWN_FIELD_NAME names the
+    exact column that broke the write — so surface it verbatim instead of the
+    raw JSON blob.
+    """
+    try:
+        err = resp.json().get("error")
+    except ValueError:
+        return resp.text
+    if isinstance(err, dict):
+        etype = err.get("type") or "UNKNOWN"
+        message = err.get("message") or ""
+        return f"{etype} — {message}".strip(" —")
+    return str(err) if err else resp.text
+
+
 def _request(method, table, **kwargs):
     try:
         resp = requests.request(method, _url(table), headers=_headers(), timeout=30, **kwargs)
     except requests.exceptions.RequestException as exc:
         raise AirtableError(f"Network error talking to Airtable: {exc}") from exc
     if resp.status_code >= 400:
-        raise AirtableError(f"Airtable API error {resp.status_code}: {resp.text}")
+        detail = _api_error_detail(resp)
+        sent_fields = ""
+        payload = kwargs.get("json")
+        if isinstance(payload, dict):
+            fields = payload.get("fields") or {}
+            if not fields and payload.get("records"):
+                fields = payload["records"][0].get("fields", {})
+            if fields:
+                sent_fields = f" | στάλθηκαν οι στήλες: {sorted(fields)}"
+        print(f"[ERROR] Airtable {method} '{table}' failed "
+              f"({resp.status_code}): {detail}{sent_fields}")
+        raise AirtableError(
+            f"Airtable {resp.status_code} στον πίνακα «{table}»: {detail}{sent_fields}"
+        )
     return resp.json()
 
 
@@ -106,26 +143,26 @@ def _delete_records(table, record_ids):
 
 
 # --- Users ------------------------------------------------------------------
-def get_user_record(user_id):
+def get_user_record(username):
     """Return the tenant's Users-table fields dict, or None when no row exists.
 
-    Used by the login gate to verify the 4-digit PIN and read the
+    Used by the login gate to verify the Password column and read the
     SubscriptionStatus in a single Airtable round-trip.
     Raises AirtableError on API failures, including a missing Users table.
     """
-    formula = f"{{UserId}}='{_sanitize(user_id)}'"
+    formula = f"{{Username}}='{_sanitize(username)}'"
     records = _select(AIRTABLE_USERS_TABLE, formula)
     return records[0]["fields"] if records else None
 
 
-def get_subscription_status(user_id):
+def get_subscription_status(username):
     """Return the tenant's SubscriptionStatus ("Active" / "Expired").
 
     Returns None when the tenant has no row in the Users table — the app
     treats anything other than an existing row with "Active" as access denied.
     Raises AirtableError on API failures, including a missing Users table.
     """
-    formula = f"{{UserId}}='{_sanitize(user_id)}'"
+    formula = f"{{Username}}='{_sanitize(username)}'"
     records = _select(AIRTABLE_USERS_TABLE, formula)
     if not records:
         return None
@@ -133,25 +170,25 @@ def get_subscription_status(user_id):
 
 
 # --- Projects -------------------------------------------------------------
-def create_project(user_id, name):
-    fields = {"Name": name, "UserId": user_id, "Status": "Active"}
+def create_project(username, name):
+    fields = {"Name": name, "Username": username, "Status": "Active"}
     return _request("POST", AIRTABLE_PROJECTS_TABLE, json={"fields": fields, "typecast": True})
 
 
-def get_active_projects(user_id):
-    formula = f"AND({{UserId}}='{_sanitize(user_id)}', {{Status}}='Active')"
+def get_active_projects(username):
+    formula = f"AND({{Username}}='{_sanitize(username)}', {{Status}}='Active')"
     return _select(AIRTABLE_PROJECTS_TABLE, formula)
 
 
-def get_completed_projects(user_id):
-    formula = f"AND({{UserId}}='{_sanitize(user_id)}', {{Status}}='Completed')"
+def get_completed_projects(username):
+    formula = f"AND({{Username}}='{_sanitize(username)}', {{Status}}='Completed')"
     return _select(AIRTABLE_PROJECTS_TABLE, formula)
 
 
-def find_active_project(user_id, name):
+def find_active_project(username, name):
     """Return the caller's active project whose name matches (case-insensitive), or None."""
     target = (name or "").strip().lower()
-    for rec in get_active_projects(user_id):
+    for rec in get_active_projects(username):
         if (rec["fields"].get("Name") or "").strip().lower() == target:
             return rec
     return None
@@ -212,38 +249,47 @@ def to_iso_date(value):
 
 
 # --- Transactions ---------------------------------------------------------
-def create_transaction(user_id, project, amount, type_="Expense",
-                       description=None, provider=None, date=None, source="Manual",
-                       file_hash=None):
+def create_transaction(username, category, amount,
+                       description=None, date=None, file_hash=None):
+    """Save one transaction row.
+
+    `amount` is SIGNED: positive = revenue (Έσοδο), negative = expense
+    (Έξοδο). The payload is restricted to the six schema columns and any
+    accidental extra key raises BEFORE the API call, so a save can never
+    fail because of a stray field name.
+    """
     fields = {
-        "UserId": user_id,
-        "Project": project,
-        "Type": type_,
+        "Username": username,
+        "Category": category,
         "Amount": amount,
-        "Source": source,
     }
     if description:
         fields["Description"] = description
-    if provider:
-        fields["Provider"] = provider
     if file_hash:
         fields["FileHash"] = file_hash
     # Airtable's Date column rejects non-ISO strings with a 422, so normalize
-    # here — every caller (web app, bot) is covered. An unparseable date is
-    # dropped rather than allowed to fail the whole save.
+    # here — every caller is covered. An unparseable date is dropped rather
+    # than allowed to fail the whole save.
     iso_date = to_iso_date(date)
     if iso_date:
         fields["Date"] = iso_date
-    return _request("POST", AIRTABLE_TRANSACTIONS_TABLE, json={"fields": fields, "typecast": True})
+
+    unexpected = set(fields) - _TRANSACTION_COLUMNS
+    if unexpected:
+        raise AirtableError(
+            f"Εσωτερικό σφάλμα: μη έγκυρες στήλες στο payload: {sorted(unexpected)}"
+        )
+    return _request("POST", AIRTABLE_TRANSACTIONS_TABLE,
+                    json={"fields": fields, "typecast": True})
 
 
-def find_transaction_by_hash(user_id, file_hash):
+def find_transaction_by_hash(username, file_hash):
     """Return this tenant's first transaction carrying the given FileHash,
-    or None. Scoped to UserId so one tenant's receipt never blocks another's.
+    or None. Scoped to Username so one tenant's receipt never blocks another's.
     """
     if not file_hash:
         return None
-    formula = (f"AND({{UserId}}='{_sanitize(user_id)}', "
+    formula = (f"AND({{Username}}='{_sanitize(username)}', "
                f"{{FileHash}}='{_sanitize(file_hash)}')")
     records = _select(AIRTABLE_TRANSACTIONS_TABLE, formula)
     return records[0] if records else None
@@ -254,14 +300,14 @@ def delete_transaction(record_id):
     return _delete_records(AIRTABLE_TRANSACTIONS_TABLE, [record_id])
 
 
-def get_transactions(user_id, project=None):
-    """All transactions for this user id, optionally narrowed to one project."""
-    formula = f"{{UserId}}='{_sanitize(user_id)}'"
+def get_transactions(username, category=None):
+    """All transactions for this username, optionally narrowed to one category."""
+    formula = f"{{Username}}='{_sanitize(username)}'"
     records = _select(AIRTABLE_TRANSACTIONS_TABLE, formula)
-    if project is not None:
-        target = project.strip().lower()
+    if category is not None:
+        target = category.strip().lower()
         records = [r for r in records
-                   if (r["fields"].get("Project") or "").strip().lower() == target]
+                   if (r["fields"].get("Category") or "").strip().lower() == target]
     return records
 
 
@@ -280,7 +326,7 @@ def cleanup_old_closed_projects(retention_years=2, today=None):
     Scans the Projects table for rows whose Status is "Completed" and whose
     ClosedDate is older than `retention_years` from today, deletes them, and
     cascades the delete to each project's Transactions (matched on the same
-    tenant's UserId + project Name). Returns (projects_deleted,
+    tenant's Username + Category name). Returns (projects_deleted,
     transactions_deleted).
     """
     cutoff = _subtract_years(today or date.today(), retention_years)
@@ -301,12 +347,12 @@ def cleanup_old_closed_projects(retention_years=2, today=None):
 
         project_ids.append(proj["id"])
 
-        # Cascade: delete this tenant's transactions for this project name.
-        user_id = fields.get("UserId")
+        # Cascade: delete this tenant's transactions for this category name.
+        username = fields.get("Username")
         name = fields.get("Name")
-        if user_id and name:
-            formula = (f"AND({{UserId}}='{_sanitize(user_id)}', "
-                       f"{{Project}}='{_sanitize(name)}')")
+        if username and name:
+            formula = (f"AND({{Username}}='{_sanitize(username)}', "
+                       f"{{Category}}='{_sanitize(name)}')")
             transaction_ids += [t["id"] for t in
                                 _select(AIRTABLE_TRANSACTIONS_TABLE, formula)]
 
