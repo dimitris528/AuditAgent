@@ -54,6 +54,12 @@ from extractor import extract_invoice_data
 RETENTION_YEARS = 2
 UPLOAD_TYPES = ["pdf", "jpg", "jpeg", "png", "webp"]
 
+# Debug switch: when True, a failed login prints the EXACT failure reason on
+# screen — including the stored Password cell and the raw Airtable API error.
+# ⚠️ This leaks credentials to whoever is looking at the screen; set it to
+# False before real tenants use the app.
+LOGIN_DEBUG = True
+
 st.set_page_config(
     page_title="AuditAgent.ai",
     page_icon="🧾",
@@ -587,13 +593,48 @@ def login_screen():
             try:
                 record = db.get_user_record(username)
             except db.AirtableError as exc:
+                # Case 3: API-level failure (bad PAT, missing table, column
+                # name mismatch inside the {Username} formula, network, …).
                 print(f"[WARN] Login lookup failed for {username!r}: {exc}")
-                st.error("Ο έλεγχος του λογαριασμού σας απέτυχε προσωρινά. "
-                         "Παρακαλώ δοκιμάστε ξανά σε λίγο.")
+                if LOGIN_DEBUG:
+                    st.error(f"🐞 DEBUG — Σφάλμα Airtable API κατά το login:\n\n{exc}")
+                else:
+                    st.error("Ο έλεγχος του λογαριασμού σας απέτυχε προσωρινά. "
+                             "Παρακαλώ δοκιμάστε ξανά σε λίγο.")
                 return
-            if record is None or not _password_matches(record.get("Password"), password):
-                st.error("❌ Το Όνομα Χρήστη ή ο Κωδικός Πρόσβασης είναι "
-                         "εσφαλμένα.")
+            if record is None:
+                # Case 1: the {Username} filter matched no row at all.
+                if LOGIN_DEBUG:
+                    st.error(
+                        f"🐞 DEBUG — Δεν βρέθηκε καμία γραμμή στον πίνακα Users "
+                        f"με Username = {username!r}. Ελέγξτε ότι η στήλη "
+                        f"λέγεται ακριβώς 'Username' (διάκριση πεζών/κεφαλαίων) "
+                        f"και ότι η τιμή του κελιού δεν έχει κενά."
+                    )
+                else:
+                    st.error("❌ Το Όνομα Χρήστη ή ο Κωδικός Πρόσβασης είναι "
+                             "εσφαλμένα.")
+                return
+            stored_password = record.get("Password")
+            if not _password_matches(stored_password, password):
+                # Case 2: row found, password mismatch. repr() exposes hidden
+                # whitespace, and the type shows Text-vs-Number cell issues.
+                if LOGIN_DEBUG:
+                    st.error(
+                        f"🐞 DEBUG — Η γραμμή του χρήστη βρέθηκε, αλλά ο "
+                        f"κωδικός δεν ταιριάζει.\n\n"
+                        f"- Πληκτρολογήθηκε: {password!r} "
+                        f"(type: {type(password).__name__})\n"
+                        f"- Επιστράφηκε από το Airtable: {stored_password!r} "
+                        f"(type: {type(stored_password).__name__})\n"
+                        f"- Στήλες που επέστρεψε η γραμμή: {sorted(record)}\n\n"
+                        f"Σημείωση: αν το 'Password' λείπει από τις στήλες, το "
+                        f"Airtable παραλείπει τα κενά κελιά — ή η στήλη έχει "
+                        f"άλλο όνομα, ή το κελί είναι άδειο."
+                    )
+                else:
+                    st.error("❌ Το Όνομα Χρήστη ή ο Κωδικός Πρόσβασης είναι "
+                             "εσφαλμένα.")
                 return
         # Credentials verified — reuse the same Users row for the
         # subscription verdict so login stays a single Airtable call.
