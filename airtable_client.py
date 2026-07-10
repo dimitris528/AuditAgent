@@ -21,9 +21,15 @@ Required Airtable schema (create these in your base before running the app):
       Description   Single line text    - free notes / supplier (optional)
       FileHash      Single line text    - SHA-256 of the uploaded file; the
                                           per-tenant duplicate-receipt guard
-      The save payload NEVER contains any key outside these six columns —
+                                          (AI scanning path only)
+      Type          Single select       - "Έσοδο" / "Έξοδο" label (optional;
+                                          manual entries only — the sign of
+                                          Amount stays the source of truth)
+      Source        Single select       - e.g. "Manual" (optional; manual
+                                          entries only)
+      The save payload NEVER contains any key outside these columns —
       enforced by _TRANSACTION_COLUMNS below — so a failed write can only
-      mean one of the six is missing/renamed in the base.
+      mean one of them is missing/renamed in the base.
 
   Users table  (env AIRTABLE_USERS_TABLE, default "Users")
       Username            Single line text  - tenant key (login name)
@@ -47,9 +53,12 @@ from config import (
 API_ROOT = "https://api.airtable.com/v0"
 
 # The ONLY columns a Transactions write may carry (case-sensitive — they must
-# match the Airtable base exactly).
+# match the Airtable base exactly). Type and Source are optional labels the
+# manual-entry flow sends; the analytics still derive revenue/expense from
+# the sign of Amount.
 _TRANSACTION_COLUMNS = frozenset(
-    {"Username", "Amount", "Date", "Category", "FileHash", "Description"}
+    {"Username", "Amount", "Date", "Category", "FileHash", "Description",
+     "Type", "Source"}
 )
 
 
@@ -250,13 +259,16 @@ def to_iso_date(value):
 
 # --- Transactions ---------------------------------------------------------
 def create_transaction(username, category, amount,
-                       description=None, date=None, file_hash=None):
+                       description=None, date=None, file_hash=None,
+                       type_=None, source=None):
     """Save one transaction row.
 
     `amount` is SIGNED: positive = revenue (Έσοδο), negative = expense
-    (Έξοδο). The payload is restricted to the six schema columns and any
-    accidental extra key raises BEFORE the API call, so a save can never
-    fail because of a stray field name.
+    (Έξοδο) — the analytics read the sign, not the Type column. `type_`
+    ("Έσοδο"/"Έξοδο") and `source` (e.g. "Manual") are optional labels,
+    written only when provided. The payload is restricted to the schema
+    columns and any accidental extra key raises BEFORE the API call, so a
+    save can never fail because of a stray field name.
     """
     fields = {
         "Username": username,
@@ -267,6 +279,10 @@ def create_transaction(username, category, amount,
         fields["Description"] = description
     if file_hash:
         fields["FileHash"] = file_hash
+    if type_:
+        fields["Type"] = type_
+    if source:
+        fields["Source"] = source
     # Airtable's Date column rejects non-ISO strings with a 422, so normalize
     # here — every caller is covered. An unparseable date is dropped rather
     # than allowed to fail the whole save.

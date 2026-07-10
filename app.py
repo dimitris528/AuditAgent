@@ -5,7 +5,9 @@ Presentation layer only differs from the classic build; the multi-tenant,
 cached Airtable logic and the data-retention hooks are unchanged:
     1. Multi-tenant login (Username + Password, both checked against the
        Users table in ONE Airtable round-trip). The subscription verdict is
-       cached in st.session_state and re-verified only on "Ανανέωση".
+       cached in st.session_state and re-verified only on "Ανανέωση" or after
+       a browser refresh. Logins survive refreshes via a server-side token
+       store mirrored into the ?session= query param (see _session_store).
     2. Executive dashboard: revenue / expenses / net profit KPI cards, plus
        an "Αρχειοθέτηση Κατηγορίας" action that archives a category. The UI
        speaks generic business Greek ("Κατηγορίες") for retail merchants and
@@ -17,6 +19,9 @@ cached Airtable logic and the data-retention hooks are unchanged:
        Each upload's SHA-256 lands in the Transactions FileHash column and is
        re-checked (per tenant) before every save to reject duplicate receipts.
        A "✍️ Χειροκίνητη Καταχώρηση" expander covers document-less entries.
+       Every successful save clears the data caches and reruns immediately,
+       so dashboard/recap analytics update without a manual refresh; the
+       confirmation arrives as a toast.
     4. Smart-period recap (current month / quarter / year / custom range) of
        archived categories, plus the period's individual transactions with a
        confirm-then-delete control on each row.
@@ -41,7 +46,9 @@ import difflib
 import hashlib
 import html
 import os
+import secrets
 import tempfile
+import time
 from datetime import date
 
 import streamlit as st
@@ -53,12 +60,9 @@ from extractor import extract_invoice_data
 
 RETENTION_YEARS = 2
 UPLOAD_TYPES = ["pdf", "jpg", "jpeg", "png", "webp"]
-
-# Debug switch: when True, a failed login prints the EXACT failure reason on
-# screen — including the stored Password cell and the raw Airtable API error.
-# ⚠️ This leaks credentials to whoever is looking at the screen; set it to
-# False before real tenants use the app.
-LOGIN_DEBUG = True
+# A login survives browser refreshes for this long (sliding window, renewed
+# on every restored page load).
+SESSION_TTL_SECONDS = 12 * 3600
 
 st.set_page_config(
     page_title="AuditAgent.ai",
@@ -122,6 +126,13 @@ html, body, .stApp, .stApp * {
 /* Chrome: hide menu/footer/toolbar, keep the header bar (mobile sidebar toggle) */
 #MainMenu, footer, [data-testid="stToolbar"], [data-testid="stDecoration"] { display: none; }
 header[data-testid="stHeader"] { background: transparent; }
+/* Native sidebar toggle (collapse arrow / hamburger): NEVER hide it, and
+   force it on even in builds that only reveal it on hover. Covers every
+   testid Streamlit has used for the control. */
+[data-testid="stSidebarCollapse"], [data-testid="stSidebarCollapseButton"],
+[data-testid="stSidebarCollapsedControl"], [data-testid="stExpandSidebarButton"] {
+    display: flex !important; visibility: visible !important; opacity: 1 !important;
+}
 .block-container { padding-top: 2.2rem; max-width: 46rem; }
 
 h1, h2, h3, h4, [data-testid="stMarkdownContainer"] h4 {
@@ -541,6 +552,63 @@ def _empty_state(text):
 
 
 # --------------------------------------------------------------------------
+# Session persistence (login survives a browser refresh)
+# --------------------------------------------------------------------------
+# st.session_state alone dies on F5 — Streamlit starts a brand-new session on
+# every browser refresh. So a successful login also mints an opaque random
+# token, kept server-side (token -> username, TTL) and mirrored into the URL
+# as ?session=…; the refreshed page finds the token in its query params and
+# silently re-hydrates st.session_state. Only the unguessable token ever
+# appears in the URL — never the username or password.
+@st.cache_resource(show_spinner=False)
+def _session_store():
+    """Server-side {token: {"username", "expires"}} map, shared across
+    Streamlit sessions in this server process."""
+    return {}
+
+
+def _issue_session_token(username):
+    store = _session_store()
+    now = time.time()
+    for stale in [t for t, entry in store.items() if entry["expires"] < now]:
+        store.pop(stale, None)
+    token = secrets.token_urlsafe(32)
+    store[token] = {"username": username, "expires": now + SESSION_TTL_SECONDS}
+    st.query_params["session"] = token
+    return token
+
+
+def _revoke_session_token():
+    token = (st.session_state.get("session_token")
+             or st.query_params.get("session"))
+    if token:
+        _session_store().pop(token, None)
+    if "session" in st.query_params:
+        del st.query_params["session"]
+
+
+def _restore_session():
+    """After a browser refresh, log the user back in from the URL token."""
+    if st.session_state.get("username"):
+        return
+    token = st.query_params.get("session")
+    if not token:
+        return
+    entry = _session_store().get(token)
+    now = time.time()
+    if not entry or entry["expires"] < now:
+        # Expired or revoked — drop the dead token so login starts clean.
+        _session_store().pop(token, None)
+        del st.query_params["session"]
+        return
+    entry["expires"] = now + SESSION_TTL_SECONDS  # sliding renewal
+    st.session_state["username"] = entry["username"]
+    st.session_state["session_token"] = token
+    # The subscription verdict is NOT restored — subscription_gate re-checks
+    # it once against Airtable, so a refresh can't outlive a cancelled plan.
+
+
+# --------------------------------------------------------------------------
 # Login (tenant context + password check)
 # --------------------------------------------------------------------------
 def _password_matches(stored, typed):
@@ -571,9 +639,8 @@ def login_screen():
             username = st.text_input(
                 "Όνομα Χρήστη (Username)",
                 placeholder="π.χ. mystore",
-                help="Αυτό είναι το κλειδί του λογαριασμού σας — το ίδιο "
-                     "Username που είναι αποθηκευμένο με τα δεδομένα σας "
-                     "στο Airtable.",
+                help="👤 Εισάγετε το μοναδικό όνομα χρήστη που σας έχει "
+                     "παραχωρηθεί από τον διαχειριστή.",
             )
             password = st.text_input(
                 "Κωδικός Πρόσβασης (Password)",
@@ -593,63 +660,34 @@ def login_screen():
             try:
                 record = db.get_user_record(username)
             except db.AirtableError as exc:
-                # Case 3: API-level failure (bad PAT, missing table, column
-                # name mismatch inside the {Username} formula, network, …).
                 print(f"[WARN] Login lookup failed for {username!r}: {exc}")
-                if LOGIN_DEBUG:
-                    st.error(f"🐞 DEBUG — Σφάλμα Airtable API κατά το login:\n\n{exc}")
-                else:
-                    st.error("Ο έλεγχος του λογαριασμού σας απέτυχε προσωρινά. "
-                             "Παρακαλώ δοκιμάστε ξανά σε λίγο.")
+                st.error("Ο έλεγχος του λογαριασμού σας απέτυχε προσωρινά. "
+                         "Παρακαλώ δοκιμάστε ξανά σε λίγο.")
                 return
-            if record is None:
-                # Case 1: the {Username} filter matched no row at all.
-                if LOGIN_DEBUG:
-                    st.error(
-                        f"🐞 DEBUG — Δεν βρέθηκε καμία γραμμή στον πίνακα Users "
-                        f"με Username = {username!r}. Ελέγξτε ότι η στήλη "
-                        f"λέγεται ακριβώς 'Username' (διάκριση πεζών/κεφαλαίων) "
-                        f"και ότι η τιμή του κελιού δεν έχει κενά."
-                    )
-                else:
-                    st.error("❌ Το Όνομα Χρήστη ή ο Κωδικός Πρόσβασης είναι "
-                             "εσφαλμένα.")
-                return
-            stored_password = record.get("Password")
-            if not _password_matches(stored_password, password):
-                # Case 2: row found, password mismatch. repr() exposes hidden
-                # whitespace, and the type shows Text-vs-Number cell issues.
-                if LOGIN_DEBUG:
-                    st.error(
-                        f"🐞 DEBUG — Η γραμμή του χρήστη βρέθηκε, αλλά ο "
-                        f"κωδικός δεν ταιριάζει.\n\n"
-                        f"- Πληκτρολογήθηκε: {password!r} "
-                        f"(type: {type(password).__name__})\n"
-                        f"- Επιστράφηκε από το Airtable: {stored_password!r} "
-                        f"(type: {type(stored_password).__name__})\n"
-                        f"- Στήλες που επέστρεψε η γραμμή: {sorted(record)}\n\n"
-                        f"Σημείωση: αν το 'Password' λείπει από τις στήλες, το "
-                        f"Airtable παραλείπει τα κενά κελιά — ή η στήλη έχει "
-                        f"άλλο όνομα, ή το κελί είναι άδειο."
-                    )
-                else:
-                    st.error("❌ Το Όνομα Χρήστη ή ο Κωδικός Πρόσβασης είναι "
-                             "εσφαλμένα.")
+            if record is None or not _password_matches(record.get("Password"), password):
+                st.error("❌ Το Όνομα Χρήστη ή ο Κωδικός Πρόσβασης είναι "
+                         "εσφαλμένα.")
                 return
         # Credentials verified — reuse the same Users row for the
-        # subscription verdict so login stays a single Airtable call.
+        # subscription verdict so login stays a single Airtable call, and
+        # mint the refresh-survival token (see _session_store above).
         st.session_state["username"] = username
+        st.session_state["session_token"] = _issue_session_token(username)
         st.session_state["subscription_verified"] = True
         st.session_state["subscription_status"] = record.get("SubscriptionStatus")
         st.rerun()
 
 
 def logout():
+    # Revoke the refresh-survival token FIRST so a stale ?session= URL can
+    # never resurrect the login after an explicit logout.
+    _revoke_session_token()
     # "theme_dark" is deliberately kept so the theme survives a re-login.
-    for key in ("username", "pending_invoice", "processed_upload",
-                "extraction_error", "subscription_verified",
-                "subscription_status", "confirm_close", "flash",
-                "confirm_delete_txn", "flash_recap"):
+    for key in ("username", "session_token", "pending_invoice",
+                "processed_upload", "extraction_error",
+                "subscription_verified", "subscription_status",
+                "confirm_close", "flash", "confirm_delete_txn", "flash_recap",
+                "flash_toast", "flash_toast_alert"):
         st.session_state.pop(key, None)
     st.rerun()
 
@@ -950,17 +988,26 @@ def _invoice_flow(username):
             st.error(f"❌ Η αποθήκευση στο Airtable απέτυχε: {exc}")
             return
 
+        # Instant analytics: clear every cached read and rerun NOW so the
+        # dashboard/recap numbers already include this row on the next paint.
+        # The confirmations ride session_state as toasts because widgets
+        # rendered before st.rerun() never reach the screen. processed_upload
+        # is kept: the uploader still holds the file after the rerun and the
+        # fingerprint match is what stops a re-extraction (and a re-billing).
         _invalidate_caches()
         st.session_state.pop("pending_invoice", None)
         st.session_state.pop("extraction_error", None)
-        st.success(f"Το παραστατικό αποθηκεύτηκε επιτυχώς στην Κατηγορία "
-                   f"«{category}» — {_money(amount)}.")
+        st.session_state["flash_toast"] = (
+            f"Το παραστατικό αποθηκεύτηκε επιτυχώς στην Κατηγορία "
+            f"«{category}» — {_money(amount)}."
+        )
         if amount > HIGH_EXPENSE_THRESHOLD:
-            st.error(
-                f"🚨 ΠΡΟΕΙΔΟΠΟΙΗΣΗ ΥΨΗΛΟΥ ΕΞΟΔΟΥ — "
+            st.session_state["flash_toast_alert"] = (
+                f"ΠΡΟΕΙΔΟΠΟΙΗΣΗ ΥΨΗΛΟΥ ΕΞΟΔΟΥ — "
                 f"{provider.strip() or 'άγνωστος προμηθευτής'}: {_money(amount)} "
                 f"υπερβαίνει το όριο των {_money(HIGH_EXPENSE_THRESHOLD)}."
             )
+        st.rerun()
 
 
 def _manual_entry_section(username):
@@ -997,17 +1044,26 @@ def _manual_entry_section(username):
                 return
             signed = amount if entry_type == "Έσοδο" else -amount
             try:
+                # Type/Source are explicit labels on manual rows; FileHash
+                # (and the supplier folded into Description) stay reserved
+                # for the AI scanning path.
                 db.create_transaction(
                     username, category, signed,
                     description=notes.strip() or None,
                     date=entry_date,
+                    type_=entry_type,   # "Έσοδο" / "Έξοδο" as picked in the UI
+                    source="Manual",
                 )
             except db.AirtableError as exc:
                 st.error(f"❌ Η αποθήκευση στο Airtable απέτυχε: {exc}")
                 return
+            # Instant analytics: same clear-and-rerun as the invoice flow.
             _invalidate_caches()
-            st.success(f"Η κίνηση ({entry_type}) αποθηκεύτηκε επιτυχώς στην "
-                       f"Κατηγορία «{category}» — {_money(amount)}.")
+            st.session_state["flash_toast"] = (
+                f"Η κίνηση ({entry_type}) αποθηκεύτηκε επιτυχώς στην "
+                f"Κατηγορία «{category}» — {_money(amount)}."
+            )
+            st.rerun()
 
 
 def upload_tab(username):
@@ -1190,11 +1246,53 @@ def recap_tab(username):
 # --------------------------------------------------------------------------
 # App entry point
 # --------------------------------------------------------------------------
+def _render_sidebar(username):
+    """The sidebar exists on EVERY screen (login included) so the native
+    collapse/expand toggle is always available; account controls appear only
+    once logged in."""
+    with st.sidebar:
+        st.markdown('<div class="aud-brand-small">AuditAgent<span>.ai</span></div>',
+                    unsafe_allow_html=True)
+        if username:
+            st.markdown(f'<div class="aud-user">{html.escape(username)}</div>',
+                        unsafe_allow_html=True)
+        # ON = 🌙 dark (default). Changing it reruns the script; _inject_css
+        # reads the new value from session_state at the top of the rerun.
+        st.toggle("☀️ Φωτεινό / 🌙 Σκοτεινό Μορφότυπο", value=True,
+                  key="theme_dark")
+        if not username:
+            return
+        if st.button("Αποσύνδεση", width="stretch"):
+            logout()
+        # Manual refresh: still handy for edits made directly in Airtable and
+        # for re-verifying the subscription; the app's own saves now refresh
+        # the analytics automatically.
+        if st.button("🔄 Ανανέωση", width="stretch"):
+            _invalidate_caches()
+            st.session_state.pop("subscription_verified", None)
+            st.session_state.pop("subscription_status", None)
+            st.rerun()
+
+
+def _flush_toasts():
+    """Deliver save confirmations queued before an st.rerun(). Toasts float
+    above the page, so they are visible no matter which tab is active."""
+    toast = st.session_state.pop("flash_toast", None)
+    if toast:
+        st.toast(toast, icon="✅")
+    alert = st.session_state.pop("flash_toast_alert", None)
+    if alert:
+        st.toast(alert, icon="🚨")
+
+
 def main():
     _inject_css()
     _run_retention_cleanup()
+    _restore_session()
 
     username = st.session_state.get("username")
+    _render_sidebar(username)
+
     if not username:
         login_screen()
         return
@@ -1202,24 +1300,7 @@ def main():
     if not subscription_gate(username):
         return
 
-    with st.sidebar:
-        st.markdown('<div class="aud-brand-small">AuditAgent<span>.ai</span></div>',
-                    unsafe_allow_html=True)
-        st.markdown(f'<div class="aud-user">{html.escape(username)}</div>',
-                    unsafe_allow_html=True)
-        # ON = 🌙 dark (default). Changing it reruns the script; _inject_css
-        # reads the new value from session_state at the top of the rerun.
-        st.toggle("☀️ Φωτεινό / 🌙 Σκοτεινό Μορφότυπο", value=True,
-                  key="theme_dark")
-        if st.button("Αποσύνδεση", width="stretch"):
-            logout()
-        # Manual refresh: the only place (besides login) that re-verifies the
-        # subscription and re-reads Airtable data.
-        if st.button("🔄 Ανανέωση", width="stretch"):
-            _invalidate_caches()
-            st.session_state.pop("subscription_verified", None)
-            st.session_state.pop("subscription_status", None)
-            st.rerun()
+    _flush_toasts()
 
     tab_dashboard, tab_upload, tab_recap = st.tabs(
         ["📊 Πίνακας Ελέγχου", "📸 Καταχώρηση", "🗓 Ανασκόπηση"]
