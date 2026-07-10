@@ -123,8 +123,13 @@ html, body, .stApp, .stApp * {
 }
 .stApp { background: var(--aud-bg); }
 
-/* Chrome: hide menu/footer/toolbar, keep the header bar (mobile sidebar toggle) */
-#MainMenu, footer, [data-testid="stToolbar"], [data-testid="stDecoration"] { display: none; }
+/* Chrome: hide the menu/footer/deploy chrome. Do NOT hide
+   [data-testid="stToolbar"]: since Streamlit ~1.5x that testid is the ENTIRE
+   header bar and the sidebar expand arrow (stExpandSidebarButton) renders
+   inside it — hiding it leaves a collapsed sidebar with no way to reopen.
+   Hide only its right-side children instead. */
+#MainMenu, footer, [data-testid="stDecoration"],
+[data-testid="stMainMenu"], [data-testid="stToolbarActions"] { display: none; }
 header[data-testid="stHeader"] { background: transparent; }
 /* Native sidebar toggle (collapse arrow / hamburger): NEVER hide it, and
    force it on even in builds that only reveal it on hover. Covers every
@@ -874,10 +879,14 @@ def _invoice_flow(username):
         unsafe_allow_html=True,
     )
 
+    # The uploader key carries a suffix that is bumped after a save/discard:
+    # re-keying re-instantiates the widget empty on the next run — the only
+    # way to programmatically clear st.file_uploader.
+    suffix = st.session_state.setdefault("uploader_key_suffix", 0)
     uploaded = st.file_uploader(
         "Φωτογραφία παραστατικού ή PDF",
         type=UPLOAD_TYPES,
-        key="invoice_upload",
+        key=f"invoice_upload_{suffix}",
         label_visibility="collapsed",
     )
 
@@ -960,6 +969,8 @@ def _invoice_flow(username):
     if discard:
         st.session_state.pop("pending_invoice", None)
         st.session_state.pop("extraction_error", None)
+        st.session_state.pop("processed_upload", None)
+        st.session_state["uploader_key_suffix"] += 1
         st.rerun()
 
     if save:
@@ -991,12 +1002,15 @@ def _invoice_flow(username):
         # Instant analytics: clear every cached read and rerun NOW so the
         # dashboard/recap numbers already include this row on the next paint.
         # The confirmations ride session_state as toasts because widgets
-        # rendered before st.rerun() never reach the screen. processed_upload
-        # is kept: the uploader still holds the file after the rerun and the
-        # fingerprint match is what stops a re-extraction (and a re-billing).
+        # rendered before st.rerun() never reach the screen. The uploader is
+        # cleared by bumping its key suffix, so processed_upload goes too: a
+        # deliberate re-upload of the same receipt re-extracts and is then
+        # stopped by the FileHash duplicate guard with a visible error.
         _invalidate_caches()
         st.session_state.pop("pending_invoice", None)
         st.session_state.pop("extraction_error", None)
+        st.session_state.pop("processed_upload", None)
+        st.session_state["uploader_key_suffix"] += 1
         st.session_state["flash_toast"] = (
             f"Το παραστατικό αποθηκεύτηκε επιτυχώς στην Κατηγορία "
             f"«{category}» — {_money(amount)}."
