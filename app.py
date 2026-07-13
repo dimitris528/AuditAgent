@@ -8,17 +8,21 @@ cached Airtable logic and the data-retention hooks are unchanged:
        cached in st.session_state and re-verified only on "Ανανέωση" or after
        a browser refresh. Logins survive refreshes via a server-side token
        store mirrored into the ?session= query param (see _session_store).
-    2. Executive dashboard: revenue / expenses / net profit KPI cards, plus
-       an "Αρχειοθέτηση Κατηγορίας" action that archives a category. The UI
-       speaks generic business Greek ("Κατηγορίες") for retail merchants and
-       shop owners; the Airtable schema underneath (Projects/Status/Name
-       columns) is unchanged.
+    2. Executive dashboard: color-coded revenue (soft green) / expenses
+       (soft red) / net profit KPI cards, with the quick-entry flow directly
+       beneath them — "➕ Προσθήκη / Λεπτομέρειες Εσόδων" and "➖ Προσθήκη /
+       Λεπτομέρειες Εξόδων" expanders, each carrying its own Amount/Date/
+       Category/Description form. Category archiving lives in a collapsed
+       picker ("Αρχειοθέτηση Κατηγορίας") instead of standalone per-card
+       buttons. The UI speaks generic business Greek ("Κατηγορίες") for
+       retail merchants and shop owners; the Airtable schema underneath
+       (Projects/Status/Name columns) is unchanged.
     3. Single-tap document upload (camera photo or PDF) -> GPT-4o extraction
        -> confirmation screen -> saved to Airtable. If extraction fails for
        ANY reason the form degrades to blank manual entry instead of blocking.
        Each upload's SHA-256 lands in the Transactions FileHash column and is
        re-checked (per tenant) before every save to reject duplicate receipts.
-       A "✍️ Χειροκίνητη Καταχώρηση" expander covers document-less entries.
+       Document-less entries go through the dashboard quick-entry expanders.
        Every successful save clears the data caches and reruns immediately,
        so dashboard/recap analytics update without a manual refresh; the
        confirmation arrives as a toast.
@@ -208,6 +212,17 @@ ul[data-baseweb="menu"] li:hover { background: var(--aud-border) !important; }
 .aud-kpi.accent .aud-kpi-value {
     color: var(--aud-accent-text); font-size: clamp(1.3rem, 5.5vw, 1.75rem); font-weight: 700;
 }
+/* Color-coded flow cards: Έσοδα always soft green, Έξοδα always soft red.
+   Fixed hexes by design — the same look in BOTH themes, so the label/value
+   colors are pinned too (the theme's muted grey would wash out on these). */
+.aud-kpi.revenue { background: #d4edda; border-color: #a9d8b8; }
+.aud-kpi.revenue:hover { border-color: #6fbf8b; box-shadow: 0 8px 24px rgba(21, 87, 36, .18); }
+.aud-kpi.revenue .aud-kpi-label { color: #1e7e34; }
+.aud-kpi.revenue .aud-kpi-value { color: #155724; }
+.aud-kpi.expense { background: #f8d7da; border-color: #efb2b9; }
+.aud-kpi.expense:hover { border-color: #e2848f; box-shadow: 0 8px 24px rgba(114, 28, 36, .18); }
+.aud-kpi.expense .aud-kpi-label { color: #a71d2a; }
+.aud-kpi.expense .aud-kpi-value { color: #721c24; }
 
 /* --- Project cards -------------------------------------------------------- */
 .aud-proj {
@@ -522,7 +537,7 @@ def _section(label):
 
 def _kpi_row(items):
     """Render KPI cards: items = [(label, value, kind)], kind in
-    {"", "warm", "accent", "loss"}."""
+    {"", "warm", "accent", "loss", "revenue", "expense"}."""
     cards = "".join(
         f'<div class="aud-kpi {kind}">'
         f'<div class="aud-kpi-label">{html.escape(label)}</div>'
@@ -785,9 +800,80 @@ def _close_project_control(proj, name):
             if st.button("✕ Άκυρο", key=f"no_{record_id}", width="stretch"):
                 st.session_state.pop("confirm_close", None)
                 st.rerun()
-    elif st.button("🔒 Αρχειοθέτηση Κατηγορίας", key=f"close_{record_id}"):
+    elif st.button("🔒 Αρχειοθέτηση", key=f"close_{record_id}"):
         st.session_state["confirm_close"] = record_id
         st.rerun()
+
+
+def _archive_category_expander(active):
+    """Archiving no longer clutters the card list with a standalone button
+    per category: it lives in this collapsed picker — choose a category, then
+    the usual two-step confirmation (_close_project_control) applies."""
+    with st.expander("🔒 Αρχειοθέτηση Κατηγορίας"):
+        names = [p["fields"].get("Name") or "—" for p in active]
+        choice = st.selectbox("Επιλέξτε κατηγορία προς αρχειοθέτηση", names,
+                              key="archive_category_pick")
+        _close_project_control(active[names.index(choice)], choice)
+
+
+def _quick_entry_expanders(username, category_names):
+    """The color-matched entry flow directly under the KPI cards: one
+    expander per transaction type (➕ Έσοδα / ➖ Έξοδα), each holding its own
+    Amount/Date/Category/Description form. The Έσοδο/Έξοδο choice is encoded
+    as the SIGN of Amount; every save clears the caches and reruns instantly,
+    exactly like the invoice flow, with the confirmation delivered as a toast.
+    """
+    for entry_type, title, genitive in (
+        ("Έσοδο", "➕ Προσθήκη / Λεπτομέρειες Εσόδων", "Εσόδου"),
+        ("Έξοδο", "➖ Προσθήκη / Λεπτομέρειες Εξόδων", "Εξόδου"),
+    ):
+        with st.expander(title):
+            if not category_names:
+                st.warning("Χρειάζεστε μια ενεργή κατηγορία πριν καταχωρήσετε "
+                           "κίνηση — δημιουργήστε μία στην ενότητα «➕ Νέα "
+                           "Κατηγορία/Φάκελος» παρακάτω.")
+                continue
+            # Explicit keys: the two forms carry otherwise-identical widgets,
+            # which would collide on Streamlit's auto-generated widget IDs.
+            with st.form(f"quick_entry_{entry_type}", clear_on_submit=True):
+                amount = st.number_input("Ποσό (€)", min_value=0.0, step=0.01,
+                                         key=f"qe_amount_{entry_type}")
+                entry_date = st.date_input("Ημερομηνία", value=date.today(),
+                                           format="DD/MM/YYYY",
+                                           key=f"qe_date_{entry_type}")
+                category = st.selectbox("Κατηγορία", category_names,
+                                        key=f"qe_category_{entry_type}")
+                notes = st.text_area("📝 Αιτιολογία / Περιγραφή (Προαιρετικό)",
+                                     key=f"qe_notes_{entry_type}")
+                submitted = st.form_submit_button(
+                    f"💾 Αποθήκευση {genitive}", type="primary", width="stretch")
+            if not submitted:
+                continue
+            if amount <= 0:
+                st.error("Παρακαλώ εισάγετε ποσό μεγαλύτερο από 0.")
+                continue
+            signed = amount if entry_type == "Έσοδο" else -amount
+            try:
+                # Type/Source are explicit labels on manual rows; FileHash
+                # (and the supplier folded into Description) stay reserved
+                # for the AI scanning path.
+                db.create_transaction(
+                    username, category, signed,
+                    description=notes.strip() or None,
+                    date=entry_date,
+                    type_=entry_type,
+                    source="Manual",
+                )
+            except db.AirtableError as exc:
+                st.error(f"❌ Η αποθήκευση στο Airtable απέτυχε: {exc}")
+                continue
+            # Instant analytics: same clear-and-rerun as the invoice flow.
+            _invalidate_caches()
+            st.session_state["flash_toast"] = (
+                f"Η κίνηση ({entry_type}) αποθηκεύτηκε επιτυχώς στην "
+                f"Κατηγορία «{category}» — {_money(amount)}."
+            )
+            st.rerun()
 
 
 def _closed_projects_section(completed, grouped):
@@ -819,30 +905,32 @@ def dashboard_tab(username):
         st.error(f"Δεν ήταν δυνατή η φόρτωση των δεδομένων σας: {exc}")
         return
 
+    totals = [_project_financials(p["fields"].get("Name") or "—", grouped)
+              for p in active]
+    _section("Επισκόπηση")
     if not active:
-        _section("Επισκόπηση")
         _empty_state("Δεν υπάρχουν ενεργές κατηγορίες ακόμη — δημιουργήστε "
                      "μία παρακάτω για να ξεκινήσετε την καταχώρηση "
                      "παραστατικών.")
     else:
-        totals = [_project_financials(p["fields"].get("Name") or "—", grouped)
-                  for p in active]
         total_rev = sum(t[0] for t in totals)
         total_exp = sum(t[1] for t in totals)
         net = total_rev - total_exp
-
-        _section("Επισκόπηση")
         _kpi_row([
-            ("Συνολικά έσοδα", _money(total_rev), ""),
-            ("Συνολικά έξοδα", _money(total_exp), "warm"),
+            ("Συνολικά έσοδα", _money(total_rev), "revenue"),
+            ("Συνολικά έξοδα", _money(total_exp), "expense"),
             ("Καθαρό κέρδος", _money(net), "accent" if net >= 0 else "loss"),
         ])
 
+    # Quick-entry flow sits directly under the color-coded metric cards.
+    _quick_entry_expanders(
+        username, [p["fields"].get("Name") or "—" for p in active])
+
+    if active:
         _section("Ενεργές κατηγορίες")
         for proj, (rev, exp, pnet) in zip(active, totals):
-            name = proj["fields"].get("Name") or "—"
-            _project_card(name, rev, exp, pnet)
-            _close_project_control(proj, name)
+            _project_card(proj["fields"].get("Name") or "—", rev, exp, pnet)
+        _archive_category_expander(active)
 
     with st.expander("➕ Νέα Κατηγορία/Φάκελος"):
         with st.form("new_project", clear_on_submit=True):
@@ -1024,65 +1112,10 @@ def _invoice_flow(username):
         st.rerun()
 
 
-def _manual_entry_section(username):
-    """Document-less entry: type + amount + date + category + optional notes.
-
-    The notes land in the Transactions Description column; the Έσοδο/Έξοδο
-    choice is encoded as the sign of Amount.
-    """
-    with st.expander("✍️ Χειροκίνητη Καταχώρηση"):
-        try:
-            active = _load_active_projects(username)
-        except db.AirtableError as exc:
-            st.error(f"Δεν ήταν δυνατή η φόρτωση των κατηγοριών σας: {exc}")
-            return
-        if not active:
-            st.warning("Χρειάζεστε μια ενεργή κατηγορία πριν καταχωρήσετε "
-                       "κίνηση — δημιουργήστε μία στην καρτέλα "
-                       "«Πίνακας Ελέγχου».")
-            return
-        category_names = [p["fields"].get("Name") or "—" for p in active]
-
-        with st.form("manual_entry", clear_on_submit=True):
-            entry_type = st.selectbox("Τύπος κίνησης", ["Έξοδο", "Έσοδο"])
-            amount = st.number_input("Ποσό (€)", min_value=0.0, step=0.01)
-            entry_date = st.date_input("Ημερομηνία", value=date.today(),
-                                       format="DD/MM/YYYY")
-            category = st.selectbox("Κατηγορία", category_names)
-            notes = st.text_area("📝 Αιτιολογία / Σημειώσεις (Προαιρετικό)")
-            submitted = st.form_submit_button("💾 Αποθήκευση κίνησης",
-                                              type="primary", width="stretch")
-        if submitted:
-            if amount <= 0:
-                st.error("Παρακαλώ εισάγετε ποσό μεγαλύτερο από 0.")
-                return
-            signed = amount if entry_type == "Έσοδο" else -amount
-            try:
-                # Type/Source are explicit labels on manual rows; FileHash
-                # (and the supplier folded into Description) stay reserved
-                # for the AI scanning path.
-                db.create_transaction(
-                    username, category, signed,
-                    description=notes.strip() or None,
-                    date=entry_date,
-                    type_=entry_type,   # "Έσοδο" / "Έξοδο" as picked in the UI
-                    source="Manual",
-                )
-            except db.AirtableError as exc:
-                st.error(f"❌ Η αποθήκευση στο Airtable απέτυχε: {exc}")
-                return
-            # Instant analytics: same clear-and-rerun as the invoice flow.
-            _invalidate_caches()
-            st.session_state["flash_toast"] = (
-                f"Η κίνηση ({entry_type}) αποθηκεύτηκε επιτυχώς στην "
-                f"Κατηγορία «{category}» — {_money(amount)}."
-            )
-            st.rerun()
-
-
 def upload_tab(username):
+    # Document-less (manual) entries live on the dashboard now, inside the
+    # ➕ Εσόδων / ➖ Εξόδων quick-entry expanders under the KPI cards.
     _invoice_flow(username)
-    _manual_entry_section(username)
 
 
 # --------------------------------------------------------------------------
