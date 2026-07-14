@@ -1,0 +1,24 @@
+# Render Blueprint — lets Render create/build the service automatically from
+# GitHub (New → Blueprint → point at this repo). Optional: you can instead
+# create a Web Service by hand in the dashboard with runtime "Docker".
+services:
+  - type: web
+    name: auditagent
+    runtime: docker
+    # Hobby workspace: "free" spins down after ~15 min idle (slow cold start
+    # for the client); switch to "starter" for an always-on instance.
+    plan: free
+    autoDeploy: true
+    healthCheckPath: /_stcore/health
+    envVars:
+      # sync: false → Render prompts for the value in the dashboard;
+      # secrets never live in the repo.
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: AIRTABLE_PAT
+        sync: false
+      - key: AIRTABLE_BASE_ID
+        sync: false
+      # Table names default sensibly in config.py (Invoices / Projects /
+      # Transactions / Users) — add AIRTABLE_*_TABLE vars here only if yours
+      # are named differently.

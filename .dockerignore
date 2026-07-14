@@ -1,0 +1,16 @@
+# Never bake secrets or dev cruft into the image.
+# NOTE: .streamlit/ must ship — it carries the theme and toolbarMode config.
+.env
+.git
+.gitignore
+.dockerignore
+.claude
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.DS_Store
+Thumbs.db
+Dockerfile
+render.yaml

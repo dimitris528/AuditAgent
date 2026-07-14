@@ -10,3 +10,7 @@ font = "sans serif"
 
 [browser]
 gatherUsageStats = false
+
+# White-label: hide the developer toolbar / Deploy button for viewers.
+[client]
+toolbarMode = "minimal"

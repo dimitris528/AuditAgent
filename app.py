@@ -8,13 +8,14 @@ cached Airtable logic and the data-retention hooks are unchanged:
        cached in st.session_state and re-verified only on "Ανανέωση" or after
        a browser refresh. Logins survive refreshes via a server-side token
        store mirrored into the ?session= query param (see _session_store).
-    2. Executive dashboard: color-coded revenue (soft green) / expenses
-       (soft red) / net profit KPI cards, with the quick-entry flow directly
-       beneath them — "➕ Προσθήκη / Λεπτομέρειες Εσόδων" and "➖ Προσθήκη /
-       Λεπτομέρειες Εξόδων" expanders, each carrying its own Amount/Date/
-       Category/Description form. Category archiving lives in a collapsed
-       picker ("Αρχειοθέτηση Κατηγορίας") instead of standalone per-card
-       buttons. The UI speaks generic business Greek ("Κατηγορίες") for
+    2. Executive dashboard: a merged header row — the Συνολικά έσοδα (soft
+       green) and Συνολικά έξοδα (soft red) KPI cards are REAL clickable
+       buttons; tapping one toggles its inline Amount/Date/Category/
+       Description quick-entry form beneath the row (opening one closes the
+       other). The third card, Καθαρό, stays static and colors itself by
+       sign: green when positive, red when negative, neutral grey at zero.
+       Category archiving lives in a collapsed picker ("Αρχειοθέτηση
+       Κατηγορίας") instead of standalone per-card buttons. The UI speaks generic business Greek ("Κατηγορίες") for
        retail merchants and shop owners; the Airtable schema underneath
        (Projects/Status/Name columns) is unchanged.
     3. Single-tap document upload (camera photo or PDF) -> GPT-4o extraction
@@ -22,7 +23,8 @@ cached Airtable logic and the data-retention hooks are unchanged:
        ANY reason the form degrades to blank manual entry instead of blocking.
        Each upload's SHA-256 lands in the Transactions FileHash column and is
        re-checked (per tenant) before every save to reject duplicate receipts.
-       Document-less entries go through the dashboard quick-entry expanders.
+       Document-less entries go through the dashboard's clickable Έσοδα/
+       Έξοδα cards and their inline quick-entry forms.
        Every successful save clears the data caches and reruns immediately,
        so dashboard/recap analytics update without a manual refresh; the
        confirmation arrives as a toast.
@@ -127,14 +129,20 @@ html, body, .stApp, .stApp * {
 }
 .stApp { background: var(--aud-bg); }
 
-/* Chrome: hide the menu/footer/deploy chrome. Do NOT hide
-   [data-testid="stToolbar"]: since Streamlit ~1.5x that testid is the ENTIRE
-   header bar and the sidebar expand arrow (stExpandSidebarButton) renders
-   inside it — hiding it leaves a collapsed sidebar with no way to reopen.
-   Hide only its right-side children instead. */
+/* Chrome: hide ALL Streamlit-branded chrome (white-label). Do NOT hide
+   [data-testid="stHeader"] or [data-testid="stToolbar"] wholesale: since
+   Streamlit ~1.5x those wrap the ENTIRE header bar and the sidebar expand
+   arrow (stExpandSidebarButton) renders inside them — hiding either leaves a
+   collapsed sidebar with no way to reopen. Hide each child element instead:
+   hamburger menu, footer, rainbow decoration strip, toolbar actions, Deploy
+   button (old + new testids), status/"Running" widget, and the hosted
+   "Made with Streamlit" viewer badge. */
 #MainMenu, footer, [data-testid="stDecoration"],
-[data-testid="stMainMenu"], [data-testid="stToolbarActions"] { display: none; }
-header[data-testid="stHeader"] { background: transparent; }
+[data-testid="stMainMenu"], [data-testid="stToolbarActions"],
+[data-testid="stAppDeployButton"], [data-testid="stDeployButton"],
+[data-testid="stStatusWidget"],
+[class^="viewerBadge"], [class*="viewerBadge"] { display: none !important; }
+header[data-testid="stHeader"] { background: transparent; box-shadow: none; }
 /* Native sidebar toggle (collapse arrow / hamburger): NEVER hide it, and
    force it on even in builds that only reveal it on hover. Covers every
    testid Streamlit has used for the control. */
@@ -212,17 +220,62 @@ ul[data-baseweb="menu"] li:hover { background: var(--aud-border) !important; }
 .aud-kpi.accent .aud-kpi-value {
     color: var(--aud-accent-text); font-size: clamp(1.3rem, 5.5vw, 1.75rem); font-weight: 700;
 }
-/* Color-coded flow cards: Έσοδα always soft green, Έξοδα always soft red.
-   Fixed hexes by design — the same look in BOTH themes, so the label/value
-   colors are pinned too (the theme's muted grey would wash out on these). */
-.aud-kpi.revenue { background: #d4edda; border-color: #a9d8b8; }
-.aud-kpi.revenue:hover { border-color: #6fbf8b; box-shadow: 0 8px 24px rgba(21, 87, 36, .18); }
-.aud-kpi.revenue .aud-kpi-label { color: #1e7e34; }
-.aud-kpi.revenue .aud-kpi-value { color: #155724; }
-.aud-kpi.expense { background: #f8d7da; border-color: #efb2b9; }
-.aud-kpi.expense:hover { border-color: #e2848f; box-shadow: 0 8px 24px rgba(114, 28, 36, .18); }
-.aud-kpi.expense .aud-kpi-label { color: #a71d2a; }
-.aud-kpi.expense .aud-kpi-value { color: #721c24; }
+/* Color-coded flow: Έσοδα always soft green, Έξοδα always soft red. Fixed
+   hexes by design — the same look in BOTH themes, so the label/value colors
+   are pinned too (the theme's muted grey would wash out on these). The two
+   cards are REAL st.buttons (keys qe_card_income / qe_card_expense) dressed
+   as KPI cards; tapping one toggles its inline quick-entry form. The div
+   prefix keeps specificity above the generic button[kind="secondary"] rules
+   below (same trick as the st-key-close_/st-key-del_ ghosts). */
+div[class*="st-key-qe_card_"] button {
+    width: 100%; min-height: 92px; border-radius: 16px; padding: 14px 20px;
+    display: flex; flex-direction: column; align-items: flex-start;
+    justify-content: center; text-align: left;
+    transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;
+}
+div[class*="st-key-qe_card_"] button:hover { transform: translateY(-2px); }
+div[class*="st-key-qe_card_"] button:active { transform: scale(.985); }
+/* The button label is two-paragraph markdown: caption line, then amount. */
+div[class*="st-key-qe_card_"] button p { margin: 0; line-height: 1.2; }
+div[class*="st-key-qe_card_"] button p:first-of-type {
+    font-size: .8rem; font-weight: 500; margin-bottom: 6px;
+}
+div[class*="st-key-qe_card_"] button p:last-of-type {
+    font-size: clamp(1.1rem, 4.5vw, 1.5rem); font-weight: 600;
+    line-height: 1.15; white-space: nowrap;
+}
+div[class*="st-key-qe_card_income"] button { background: #d4edda; border: 1px solid #a9d8b8; }
+div[class*="st-key-qe_card_income"] button p { color: #155724; }
+div[class*="st-key-qe_card_income"] button p:first-of-type { color: #1e7e34; }
+div[class*="st-key-qe_card_income"] button:hover {
+    background: #d4edda; border-color: #6fbf8b;
+    box-shadow: 0 8px 24px rgba(21, 87, 36, .18);
+}
+div[class*="st-key-qe_card_expense"] button { background: #f8d7da; border: 1px solid #efb2b9; }
+div[class*="st-key-qe_card_expense"] button p { color: #721c24; }
+div[class*="st-key-qe_card_expense"] button p:first-of-type { color: #a71d2a; }
+div[class*="st-key-qe_card_expense"] button:hover {
+    background: #f8d7da; border-color: #e2848f;
+    box-shadow: 0 8px 24px rgba(114, 28, 36, .18);
+}
+/* Καθαρό stays a static (non-clickable) card in the third column; its palette
+   follows the SIGN of the value — net-pos / net-neg / net-zero appended by
+   _kpi_entry_row. Height/centering mirror the buttons so the row lines up. */
+div[class*="st-key-qe_card_net"] .aud-kpi-row { margin: 0; }
+div[class*="st-key-qe_card_net"] .aud-kpi {
+    min-height: 92px; display: flex; flex-direction: column; justify-content: center;
+}
+.aud-kpi.net-pos { background: #d4edda; border-color: #a9d8b8; }
+.aud-kpi.net-pos:hover { border-color: #6fbf8b; box-shadow: 0 8px 24px rgba(21, 87, 36, .18); }
+.aud-kpi.net-pos .aud-kpi-label { color: #1e7e34; }
+.aud-kpi.net-pos .aud-kpi-value { color: #155724; }
+.aud-kpi.net-neg { background: #f8d7da; border-color: #efb2b9; }
+.aud-kpi.net-neg:hover { border-color: #e2848f; box-shadow: 0 8px 24px rgba(114, 28, 36, .18); }
+.aud-kpi.net-neg .aud-kpi-label { color: #a71d2a; }
+.aud-kpi.net-neg .aud-kpi-value { color: #721c24; }
+.aud-kpi.net-zero { background: #f8f9fa; border-color: #d9dce1; }
+.aud-kpi.net-zero .aud-kpi-label { color: #5a6472; }
+.aud-kpi.net-zero .aud-kpi-value { color: #2f3a48; }
 
 /* --- Project cards -------------------------------------------------------- */
 .aud-proj {
@@ -537,7 +590,7 @@ def _section(label):
 
 def _kpi_row(items):
     """Render KPI cards: items = [(label, value, kind)], kind in
-    {"", "warm", "accent", "loss", "revenue", "expense"}."""
+    {"", "warm", "accent", "loss", "net-pos", "net-neg", "net-zero"}."""
     cards = "".join(
         f'<div class="aud-kpi {kind}">'
         f'<div class="aud-kpi-label">{html.escape(label)}</div>'
@@ -816,64 +869,101 @@ def _archive_category_expander(active):
         _close_project_control(active[names.index(choice)], choice)
 
 
-def _quick_entry_expanders(username, category_names):
-    """The color-matched entry flow directly under the KPI cards: one
-    expander per transaction type (➕ Έσοδα / ➖ Έξοδα), each holding its own
-    Amount/Date/Category/Description form. The Έσοδο/Έξοδο choice is encoded
-    as the SIGN of Amount; every save clears the caches and reruns instantly,
-    exactly like the invoice flow, with the confirmation delivered as a toast.
-    """
-    for entry_type, title, genitive in (
-        ("Έσοδο", "➕ Προσθήκη / Λεπτομέρειες Εσόδων", "Εσόδου"),
-        ("Έξοδο", "➖ Προσθήκη / Λεπτομέρειες Εξόδων", "Εξόδου"),
-    ):
-        with st.expander(title):
-            if not category_names:
-                st.warning("Χρειάζεστε μια ενεργή κατηγορία πριν καταχωρήσετε "
-                           "κίνηση — δημιουργήστε μία στην ενότητα «➕ Νέα "
-                           "Κατηγορία/Φάκελος» παρακάτω.")
-                continue
-            # Explicit keys: the two forms carry otherwise-identical widgets,
-            # which would collide on Streamlit's auto-generated widget IDs.
-            with st.form(f"quick_entry_{entry_type}", clear_on_submit=True):
-                amount = st.number_input("Ποσό (€)", min_value=0.0, step=0.01,
-                                         key=f"qe_amount_{entry_type}")
-                entry_date = st.date_input("Ημερομηνία", value=date.today(),
-                                           format="DD/MM/YYYY",
-                                           key=f"qe_date_{entry_type}")
-                category = st.selectbox("Κατηγορία", category_names,
-                                        key=f"qe_category_{entry_type}")
-                notes = st.text_area("📝 Αιτιολογία / Περιγραφή (Προαιρετικό)",
-                                     key=f"qe_notes_{entry_type}")
-                submitted = st.form_submit_button(
-                    f"💾 Αποθήκευση {genitive}", type="primary", width="stretch")
-            if not submitted:
-                continue
-            if amount <= 0:
-                st.error("Παρακαλώ εισάγετε ποσό μεγαλύτερο από 0.")
-                continue
-            signed = amount if entry_type == "Έσοδο" else -amount
-            try:
-                # Type/Source are explicit labels on manual rows; FileHash
-                # (and the supplier folded into Description) stay reserved
-                # for the AI scanning path.
-                db.create_transaction(
-                    username, category, signed,
-                    description=notes.strip() or None,
-                    date=entry_date,
-                    type_=entry_type,
-                    source="Manual",
-                )
-            except db.AirtableError as exc:
-                st.error(f"❌ Η αποθήκευση στο Airtable απέτυχε: {exc}")
-                continue
-            # Instant analytics: same clear-and-rerun as the invoice flow.
-            _invalidate_caches()
-            st.session_state["flash_toast"] = (
-                f"Η κίνηση ({entry_type}) αποθηκεύτηκε επιτυχώς στην "
-                f"Κατηγορία «{category}» — {_money(amount)}."
-            )
-            st.rerun()
+def _toggle_quick_entry(which):
+    """on_click for the Έσοδα/Έξοδα card-buttons: toggle one quick-entry
+    form and close the other — mutually exclusive so the pair never stacks
+    and pushes the dashboard down."""
+    other = ("show_expense_form" if which == "show_income_form"
+             else "show_income_form")
+    st.session_state[which] = not st.session_state.get(which, False)
+    st.session_state[other] = False
+
+
+def _quick_entry_form(username, category_names, entry_type):
+    """Inline Amount/Date/Category/Description form for ONE transaction type,
+    revealed by its clickable KPI card. The Έσοδο/Έξοδο choice is encoded as
+    the SIGN of Amount; every save closes the form, clears the caches and
+    reruns instantly, exactly like the invoice flow, with the confirmation
+    delivered as a toast."""
+    genitive = "Εσόδου" if entry_type == "Έσοδο" else "Εξόδου"
+    if not category_names:
+        st.warning("Χρειάζεστε μια ενεργή κατηγορία πριν καταχωρήσετε "
+                   "κίνηση — δημιουργήστε μία στην ενότητα «➕ Νέα "
+                   "Κατηγορία/Φάκελος» παρακάτω.")
+        return
+    # Explicit keys: the two forms carry otherwise-identical widgets,
+    # which would collide on Streamlit's auto-generated widget IDs.
+    with st.form(f"quick_entry_{entry_type}", clear_on_submit=True):
+        amount = st.number_input("Ποσό (€)", min_value=0.0, step=0.01,
+                                 key=f"qe_amount_{entry_type}")
+        entry_date = st.date_input("Ημερομηνία", value=date.today(),
+                                   format="DD/MM/YYYY",
+                                   key=f"qe_date_{entry_type}")
+        category = st.selectbox("Κατηγορία", category_names,
+                                key=f"qe_category_{entry_type}")
+        notes = st.text_area("📝 Αιτιολογία / Περιγραφή (Προαιρετικό)",
+                             key=f"qe_notes_{entry_type}")
+        submitted = st.form_submit_button(
+            f"💾 Αποθήκευση {genitive}", type="primary", width="stretch")
+    if not submitted:
+        return
+    if amount <= 0:
+        st.error("Παρακαλώ εισάγετε ποσό μεγαλύτερο από 0.")
+        return
+    signed = amount if entry_type == "Έσοδο" else -amount
+    try:
+        # Type/Source are explicit labels on manual rows; FileHash
+        # (and the supplier folded into Description) stay reserved
+        # for the AI scanning path.
+        db.create_transaction(
+            username, category, signed,
+            description=notes.strip() or None,
+            date=entry_date,
+            type_=entry_type,
+            source="Manual",
+        )
+    except db.AirtableError as exc:
+        st.error(f"❌ Η αποθήκευση στο Airtable απέτυχε: {exc}")
+        return
+    # Instant analytics: same clear-and-rerun as the invoice flow.
+    st.session_state["show_income_form"] = False
+    st.session_state["show_expense_form"] = False
+    _invalidate_caches()
+    st.session_state["flash_toast"] = (
+        f"Η κίνηση ({entry_type}) αποθηκεύτηκε επιτυχώς στην "
+        f"Κατηγορία «{category}» — {_money(amount)}."
+    )
+    st.rerun()
+
+
+def _kpi_entry_row(username, category_names, total_rev, total_exp, net):
+    """The merged dashboard header: Συνολικά έσοδα / Συνολικά έξοδα as
+    clickable card-buttons (tap toggles the matching inline entry form just
+    below; opening one closes the other) plus the static Καθαρό card whose
+    palette follows the sign of the value. Equal thirds, like the old KPI
+    row; on narrow phones Streamlit stacks the columns, matching how the
+    old flex row wrapped."""
+    col_rev, col_exp, col_net = st.columns(3)
+    with col_rev:
+        st.button(f"Συνολικά έσοδα\n\n{_money(total_rev)}",
+                  key="qe_card_income", width="stretch",
+                  help="Πατήστε για προσθήκη εσόδου",
+                  on_click=_toggle_quick_entry, args=("show_income_form",))
+    with col_exp:
+        st.button(f"Συνολικά έξοδα\n\n{_money(total_exp)}",
+                  key="qe_card_expense", width="stretch",
+                  help="Πατήστε για προσθήκη εξόδου",
+                  on_click=_toggle_quick_entry, args=("show_expense_form",))
+    with col_net:
+        with st.container(key="qe_card_net"):
+            net_r = round(net, 2)  # float dust must not miss the == 0 style
+            kind = ("net-pos" if net_r > 0
+                    else "net-neg" if net_r < 0 else "net-zero")
+            _kpi_row([("Καθαρό κέρδος", _money(net), kind)])
+    if st.session_state.get("show_income_form"):
+        _quick_entry_form(username, category_names, "Έσοδο")
+    elif st.session_state.get("show_expense_form"):
+        _quick_entry_form(username, category_names, "Έξοδο")
 
 
 def _closed_projects_section(completed, grouped):
@@ -916,15 +1006,11 @@ def dashboard_tab(username):
         total_rev = sum(t[0] for t in totals)
         total_exp = sum(t[1] for t in totals)
         net = total_rev - total_exp
-        _kpi_row([
-            ("Συνολικά έσοδα", _money(total_rev), "revenue"),
-            ("Συνολικά έξοδα", _money(total_exp), "expense"),
-            ("Καθαρό κέρδος", _money(net), "accent" if net >= 0 else "loss"),
-        ])
-
-    # Quick-entry flow sits directly under the color-coded metric cards.
-    _quick_entry_expanders(
-        username, [p["fields"].get("Name") or "—" for p in active])
+        # Merged header: the Έσοδα/Έξοδα cards ARE the quick-entry buttons;
+        # tapping one opens its inline form directly beneath the row.
+        _kpi_entry_row(
+            username, [p["fields"].get("Name") or "—" for p in active],
+            total_rev, total_exp, net)
 
     if active:
         _section("Ενεργές κατηγορίες")
@@ -1113,8 +1199,8 @@ def _invoice_flow(username):
 
 
 def upload_tab(username):
-    # Document-less (manual) entries live on the dashboard now, inside the
-    # ➕ Εσόδων / ➖ Εξόδων quick-entry expanders under the KPI cards.
+    # Document-less (manual) entries live on the dashboard now: tapping the
+    # Έσοδα/Έξοδα KPI cards opens their inline quick-entry forms.
     _invoice_flow(username)
 
 
