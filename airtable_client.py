@@ -35,6 +35,10 @@ Required Airtable schema (create these in your base before running the app):
       Username            Single line text  - tenant key (login name)
       Password            Text              - login password for this user
       SubscriptionStatus  Single select     - options: "Active", "Expired"
+      Email               Single line text  - OPTIONAL; only used as the
+                                              Stripe webhook's fallback match
+                                              when the checkout carries no
+                                              client_reference_id
 """
 
 import re
@@ -176,6 +180,44 @@ def get_subscription_status(username):
     if not records:
         return None
     return records[0]["fields"].get("SubscriptionStatus")
+
+
+def find_user(username=None, email=None):
+    """Return the first matching Users record ({id, fields, ...}) or None.
+
+    Username (the tenant key) is tried first — the Stripe webhook passes the
+    checkout's client_reference_id here for an exact match. Email is the
+    fallback and needs the OPTIONAL Email column; if that column doesn't
+    exist in the base, Airtable rejects the formula and the fallback quietly
+    yields None instead of erroring the caller.
+    """
+    if username:
+        records = _select(AIRTABLE_USERS_TABLE,
+                          f"{{Username}}='{_sanitize(username)}'")
+        if records:
+            return records[0]
+    if email:
+        formula = f"LOWER({{Email}})='{_sanitize(email).strip().lower()}'"
+        try:
+            records = _select(AIRTABLE_USERS_TABLE, formula)
+        except AirtableError:
+            return None  # base has no Email column — username match only
+        if records:
+            return records[0]
+    return None
+
+
+def set_subscription_status(record_id, status):
+    """Flip one Users row's SubscriptionStatus ("Active" / "Expired").
+
+    typecast lets Airtable create the select option if it's missing, so a
+    base whose SubscriptionStatus choices were hand-typed differently can't
+    silently reject the webhook's activation.
+    """
+    body = {"records": [{"id": record_id,
+                         "fields": {"SubscriptionStatus": status}}],
+            "typecast": True}
+    return _request("PATCH", AIRTABLE_USERS_TABLE, json=body)
 
 
 # --- Projects -------------------------------------------------------------

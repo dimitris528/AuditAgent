@@ -30,8 +30,19 @@ cached Airtable logic and the data-retention hooks are unchanged:
        confirmation arrives as a toast.
     4. Smart-period recap (current month / quarter / year / custom range) of
        archived categories, plus the period's individual transactions with a
-       confirm-then-delete control on each row.
-    5. The 2-year data-retention cleanup runs automatically in the background.
+       confirm-then-delete control on each row. Its totals row wears the
+       same palette as the dashboard header (green/red/sign-colored net).
+    5. Πληρωμές tab: Stripe billing center — Payment Link for subscribing
+       (10€/μήνα) and Customer Portal link for card changes/cancellation,
+       both opening in a new browser tab. Logged-in users with ANY
+       non-Active status (Expired/Inactive/Unpaid/blank) land on a paywall
+       gateway instead of the tabs: subscribe link, a "Πλήρωσα" re-check
+       button that clears the cached verdict, and logout.
+       The subscribe URL stamps the Username as client_reference_id; the
+       companion webhook service (stripe_webhook.py, deployed separately —
+       Streamlit itself cannot receive POSTs) verifies Stripe's signature
+       and flips the Users row to Active on checkout.session.completed.
+    6. The 2-year data-retention cleanup runs automatically in the background.
 
 Transactions schema note: the table carries EXACTLY six columns — Username,
 Amount, Date, Category, FileHash, Description. Revenue vs expense lives in
@@ -52,6 +63,7 @@ import difflib
 import hashlib
 import html
 import os
+import re
 import secrets
 import tempfile
 import time
@@ -260,19 +272,26 @@ div[class*="st-key-qe_card_expense"] button:hover {
 }
 /* Καθαρό stays a static (non-clickable) card in the third column; its palette
    follows the SIGN of the value — net-pos / net-neg / net-zero appended by
-   _kpi_entry_row. Height/centering mirror the buttons so the row lines up. */
+   _net_kind. Height/centering mirror the buttons so the row lines up. */
 div[class*="st-key-qe_card_net"] .aud-kpi-row { margin: 0; }
 div[class*="st-key-qe_card_net"] .aud-kpi {
     min-height: 92px; display: flex; flex-direction: column; justify-content: center;
 }
-.aud-kpi.net-pos { background: #d4edda; border-color: #a9d8b8; }
-.aud-kpi.net-pos:hover { border-color: #6fbf8b; box-shadow: 0 8px 24px rgba(21, 87, 36, .18); }
-.aud-kpi.net-pos .aud-kpi-label { color: #1e7e34; }
-.aud-kpi.net-pos .aud-kpi-value { color: #155724; }
-.aud-kpi.net-neg { background: #f8d7da; border-color: #efb2b9; }
-.aud-kpi.net-neg:hover { border-color: #e2848f; box-shadow: 0 8px 24px rgba(114, 28, 36, .18); }
-.aud-kpi.net-neg .aud-kpi-label { color: #a71d2a; }
-.aud-kpi.net-neg .aud-kpi-value { color: #721c24; }
+/* Static KPI palettes, shared by the dashboard Καθαρό card and the recap
+   (Ανασκόπηση) totals row: revenue/net-pos soft green, expense/net-neg soft
+   red — the same fixed hexes as the clickable cards — net-zero neutral. */
+.aud-kpi.revenue, .aud-kpi.net-pos { background: #d4edda; border-color: #a9d8b8; }
+.aud-kpi.revenue:hover, .aud-kpi.net-pos:hover {
+    border-color: #6fbf8b; box-shadow: 0 8px 24px rgba(21, 87, 36, .18);
+}
+.aud-kpi.revenue .aud-kpi-label, .aud-kpi.net-pos .aud-kpi-label { color: #1e7e34; }
+.aud-kpi.revenue .aud-kpi-value, .aud-kpi.net-pos .aud-kpi-value { color: #155724; }
+.aud-kpi.expense, .aud-kpi.net-neg { background: #f8d7da; border-color: #efb2b9; }
+.aud-kpi.expense:hover, .aud-kpi.net-neg:hover {
+    border-color: #e2848f; box-shadow: 0 8px 24px rgba(114, 28, 36, .18);
+}
+.aud-kpi.expense .aud-kpi-label, .aud-kpi.net-neg .aud-kpi-label { color: #a71d2a; }
+.aud-kpi.expense .aud-kpi-value, .aud-kpi.net-neg .aud-kpi-value { color: #721c24; }
 .aud-kpi.net-zero { background: #f8f9fa; border-color: #d9dce1; }
 .aud-kpi.net-zero .aud-kpi-label { color: #5a6472; }
 .aud-kpi.net-zero .aud-kpi-value { color: #2f3a48; }
@@ -345,30 +364,46 @@ div[class*="st-key-del_"] button:hover {
 }
 .aud-lock-title { color: var(--aud-text); font-weight: 700; font-size: 1.12rem; margin-bottom: 8px; }
 .aud-lock-text { color: var(--aud-muted); font-size: .95rem; line-height: 1.6; }
-
-/* --- Buttons ------------------------------------------------------------- */
-.stButton > button, [data-testid="stFormSubmitButton"] > button {
-    border-radius: 12px; font-weight: 600; padding: .62rem 1rem;
-    transition: all .18s ease;
+/* Paywall variant: a billing gateway, not an error — mint instead of red. */
+.aud-lock.aud-paywall { border-color: rgba(0, 230, 118, .35); margin-bottom: 16px; }
+.aud-lock.aud-paywall .aud-lock-icon {
+    background: rgba(0, 230, 118, .12); color: var(--aud-accent-text);
 }
-button[kind="secondary"], button[data-testid="stBaseButton-secondaryFormSubmit"] {
+.aud-lock-price {
+    color: var(--aud-accent-text); font-weight: 800; font-size: 1.35rem; margin-top: 14px;
+}
+
+/* --- Buttons (st.button, form submits, and st.link_button anchors) -------- */
+.stButton > button, .stLinkButton > a, [data-testid="stFormSubmitButton"] > button {
+    border-radius: 12px; font-weight: 600; padding: .62rem 1rem;
+    transition: all .18s ease; text-decoration: none;
+}
+button[kind="secondary"], button[data-testid="stBaseButton-secondaryFormSubmit"],
+a[data-testid="stBaseLinkButton-secondary"] {
     background: var(--aud-surface); color: var(--aud-text-soft); border: 1px solid var(--aud-border);
 }
-button[kind="secondary"]:hover, button[data-testid="stBaseButton-secondaryFormSubmit"]:hover {
+button[kind="secondary"]:hover, button[data-testid="stBaseButton-secondaryFormSubmit"]:hover,
+a[data-testid="stBaseLinkButton-secondary"]:hover {
     border-color: var(--aud-muted); color: var(--aud-text);
 }
-button[kind="primary"], button[data-testid="stBaseButton-primaryFormSubmit"] {
+button[kind="primary"], button[data-testid="stBaseButton-primaryFormSubmit"],
+a[data-testid="stBaseLinkButton-primary"] {
     background: var(--aud-accent) !important; border: none !important;
 }
 button[kind="primary"], button[data-testid="stBaseButton-primaryFormSubmit"],
-button[kind="primary"] *, button[data-testid="stBaseButton-primaryFormSubmit"] * {
+a[data-testid="stBaseLinkButton-primary"],
+button[kind="primary"] *, button[data-testid="stBaseButton-primaryFormSubmit"] *,
+a[data-testid="stBaseLinkButton-primary"] * {
     color: #121214 !important;  /* dark label on the mint fill in BOTH themes */
 }
-button[kind="primary"]:hover, button[data-testid="stBaseButton-primaryFormSubmit"]:hover {
+button[kind="primary"]:hover, button[data-testid="stBaseButton-primaryFormSubmit"]:hover,
+a[data-testid="stBaseLinkButton-primary"]:hover {
     filter: brightness(1.06);
     box-shadow: 0 0 0 1px rgba(0, 230, 118, .45), 0 6px 22px rgba(0, 230, 118, .28);
 }
-button[kind="primary"]:active { transform: scale(.985); }
+button[kind="primary"]:active, a[data-testid="stBaseLinkButton-primary"]:active {
+    transform: scale(.985);
+}
 
 /* --- Inputs ------------------------------------------------------------- */
 div[data-baseweb="input"], div[data-baseweb="textarea"], div[data-baseweb="select"] > div {
@@ -448,6 +483,20 @@ div[data-baseweb="select"] > div:focus-within {
 
 /* --- Alerts ------------------------------------------------------------- */
 [data-testid="stAlert"] { border-radius: 12px; }
+
+/* --- Πληρωμές (billing center) cards --------------------------------------
+   st.container(key="pay_card_...") wrappers dressed as surface cards. */
+div[class*="st-key-pay_card_"] {
+    background: var(--aud-surface); border: 1px solid var(--aud-border);
+    border-radius: 16px; padding: 22px 22px 18px;
+    transition: border-color .18s ease, box-shadow .18s ease;
+}
+div[class*="st-key-pay_card_"]:hover {
+    border-color: var(--aud-border-strong); box-shadow: 0 8px 24px var(--aud-shadow);
+}
+.aud-pay-title { color: var(--aud-text); font-weight: 700; font-size: 1.05rem; margin-bottom: 4px; }
+.aud-pay-badge { color: var(--aud-accent-text); font-weight: 800; font-size: 1.3rem; margin-bottom: 8px; }
+.aud-pay-text { color: var(--aud-muted); font-size: .9rem; line-height: 1.6; margin-bottom: 4px; }
 </style>
 """
 
@@ -590,7 +639,8 @@ def _section(label):
 
 def _kpi_row(items):
     """Render KPI cards: items = [(label, value, kind)], kind in
-    {"", "warm", "accent", "loss", "net-pos", "net-neg", "net-zero"}."""
+    {"", "warm", "accent", "loss", "revenue", "expense",
+     "net-pos", "net-neg", "net-zero"}."""
     cards = "".join(
         f'<div class="aud-kpi {kind}">'
         f'<div class="aud-kpi-label">{html.escape(label)}</div>'
@@ -599,6 +649,14 @@ def _kpi_row(items):
         for label, value, kind in items
     )
     st.markdown(f'<div class="aud-kpi-row">{cards}</div>', unsafe_allow_html=True)
+
+
+def _net_kind(net):
+    """Καθαρό card palette from the SIGN of the value: net-pos (soft green),
+    net-neg (soft red), net-zero (neutral). Rounded to cents first so float
+    dust can't miss the == 0 style."""
+    net_r = round(net, 2)
+    return "net-pos" if net_r > 0 else "net-neg" if net_r < 0 else "net-zero"
 
 
 def _project_card(name, rev, exp, net):
@@ -779,6 +837,40 @@ def _lock_screen(text):
             logout()
 
 
+def _paywall_screen(username):
+    """Billing gateway for logged-in users whose subscription isn't Active —
+    Expired, Inactive, Unpaid, blank, whatever the Users row says. Unlike
+    _lock_screen (an error state), this is a polite sales screen: explain,
+    show the price, hand over the Stripe payment link, and offer a one-tap
+    re-check for when they come back from checkout (the verdict is cached
+    per session, so without the re-check they'd have to re-login)."""
+    st.markdown(
+        '<div class="aud-lock aud-paywall">'
+        '<div class="aud-lock-icon">💳</div>'
+        '<div class="aud-lock-title">Η συνδρομή σας δεν είναι ενεργή</div>'
+        '<div class="aud-lock-text">Για να συνεχίσετε στο AuditAgent.ai, '
+        "ενεργοποιήστε τη συνδρομή σας. Η πληρωμή γίνεται με ασφάλεια μέσω "
+        "Stripe και η πρόσβασή σας ξεκλειδώνει αυτόματα μόλις ολοκληρωθεί."
+        "</div>"
+        '<div class="aud-lock-price">10€ / μήνα</div></div>',
+        unsafe_allow_html=True,
+    )
+    _, mid, _ = st.columns([1, 1.2, 1])
+    with mid:
+        st.link_button("💳 Ενεργοποίηση Συνδρομής (10€/μήνα)",
+                       _subscribe_url(username), type="primary",
+                       width="stretch")
+        # Checkout opens in a new tab; back here, one tap re-reads the Users
+        # row — by then the Stripe webhook has flipped it to Active.
+        if st.button("🔄 Πλήρωσα — Έλεγχος ενεργοποίησης", width="stretch",
+                     key="paywall_recheck"):
+            st.session_state.pop("subscription_verified", None)
+            st.session_state.pop("subscription_status", None)
+            st.rerun()
+        if st.button("Αποσύνδεση", width="stretch", key="paywall_logout"):
+            logout()
+
+
 def subscription_gate(username):
     """Return True only for a Username with a Users row whose
     SubscriptionStatus is "Active"; render the appropriate block screen
@@ -810,13 +902,13 @@ def subscription_gate(username):
     if status == "active":
         return True
 
-    if status == "expired":
-        _lock_screen("Η συνδρομή σας έχει λήξει. Παρακαλώ επικοινωνήστε με "
-                     "τον διαχειριστή για ανανέωση.")
-    else:
-        # No Users row, or a blank/unrecognized status.
-        _lock_screen("Ο λογαριασμός δεν βρέθηκε ή δεν είναι ενεργός. Παρακαλώ "
-                     "επικοινωνήστε με τον διαχειριστή.")
+    # Login already required an existing Users row with a matching password,
+    # so EVERY non-Active verdict here — "Expired", "Inactive", "Unpaid",
+    # blank, or a row deleted mid-session — is a billing situation, not an
+    # error: show the payment gateway (subscribe link + re-check + logout)
+    # instead of a dead-end message. Access stays denied either way, so the
+    # strict allow-list is unchanged.
+    _paywall_screen(username)
     return False
 
 
@@ -956,10 +1048,7 @@ def _kpi_entry_row(username, category_names, total_rev, total_exp, net):
                   on_click=_toggle_quick_entry, args=("show_expense_form",))
     with col_net:
         with st.container(key="qe_card_net"):
-            net_r = round(net, 2)  # float dust must not miss the == 0 style
-            kind = ("net-pos" if net_r > 0
-                    else "net-neg" if net_r < 0 else "net-zero")
-            _kpi_row([("Καθαρό κέρδος", _money(net), kind)])
+            _kpi_row([("Καθαρό κέρδος", _money(net), _net_kind(net))])
     if st.session_state.get("show_income_form"):
         _quick_entry_form(username, category_names, "Έσοδο")
     elif st.session_state.get("show_expense_form"):
@@ -1367,13 +1456,74 @@ def recap_tab(username):
         st.dataframe(rows, width="stretch", hide_index=True)
 
         net = total_rev - total_exp
+        # Same visual language as the dashboard header: green revenue card,
+        # red expense card, sign-colored net card.
         _kpi_row([
-            ("Συνολικά έσοδα", _money(total_rev), ""),
-            ("Συνολικά έξοδα", _money(total_exp), "warm"),
-            ("Καθαρό κέρδος", _money(net), "accent" if net >= 0 else "loss"),
+            ("Συνολικά έσοδα", _money(total_rev), "revenue"),
+            ("Συνολικά έξοδα", _money(total_exp), "expense"),
+            ("Καθαρό κέρδος", _money(net), _net_kind(net)),
         ])
 
     _period_transactions_section(transactions, start, end)
+
+
+# --------------------------------------------------------------------------
+# Tab 4 — Πληρωμές (billing center)
+# --------------------------------------------------------------------------
+# Stripe no-code links (TEST mode — swap for the live-mode links at launch).
+# The portal URL is the PERMANENT /p/login/ link (Stripe Dashboard →
+# Settings → Billing → Customer portal), not a single-use /p/session/ one.
+STRIPE_SUBSCRIBE_URL = "https://buy.stripe.com/test_00w8wR6WG1Jee5759xa3u01"
+STRIPE_PORTAL_URL = "https://billing.stripe.com/p/login/test_4gM8wR6WGbjO8KN1Xla3u00"
+
+
+def _subscribe_url(username):
+    """Payment Link with the tenant stamped as client_reference_id, so the
+    Stripe webhook (stripe_webhook.py) flips the EXACT Users row to Active
+    after checkout. Stripe only accepts 1-200 chars of [A-Za-z0-9_-] there;
+    any other username (Greek letters, spaces, ...) gets the bare link and
+    activation falls back to matching the payer's email against the Users
+    table's optional Email column."""
+    if username and re.fullmatch(r"[A-Za-z0-9_-]{1,200}", username):
+        return f"{STRIPE_SUBSCRIBE_URL}?client_reference_id={username}"
+    return STRIPE_SUBSCRIBE_URL
+
+
+def payments_tab(username):
+    """Billing center: subscribe via Stripe Payment Link, self-service
+    management (card change, receipts, cancellation) via the Stripe Customer
+    Portal. st.link_button always opens in a NEW browser tab, so the client
+    never loses their session. After checkout, the webhook service
+    (stripe_webhook.py) flips the Users row's SubscriptionStatus to Active
+    automatically — matched via the client_reference_id this tab stamps on
+    the Payment Link; the sidebar «Ανανέωση» re-reads the fresh verdict."""
+    _section("Πληρωμές & Συνδρομή")
+    col_sub, col_manage = st.columns(2)
+    with col_sub, st.container(key="pay_card_subscribe"):
+        st.markdown(
+            '<div class="aud-pay-title">Νέα Συνδρομή</div>'
+            '<div class="aud-pay-badge">10€ / μήνα</div>'
+            '<div class="aud-pay-text">Πλήρης πρόσβαση στο AuditAgent.ai: '
+            "σκανάρισμα παραστατικών με AI, αναλυτικά στατιστικά και "
+            "απεριόριστες καταχωρήσεις. Ακύρωση οποιαδήποτε στιγμή.</div>",
+            unsafe_allow_html=True,
+        )
+        st.link_button("💳 Ενεργοποίηση Συνδρομής (10€/μήνα)",
+                       _subscribe_url(username), type="primary",
+                       width="stretch")
+    with col_manage, st.container(key="pay_card_manage"):
+        st.markdown(
+            '<div class="aud-pay-title">Υπάρχουσα Συνδρομή</div>'
+            '<div class="aud-pay-text">Αλλαγή κάρτας, λήψη αποδείξεων ή '
+            "ακύρωση της συνδρομής σας — με ασφάλεια μέσω του Stripe "
+            "Customer Portal.</div>",
+            unsafe_allow_html=True,
+        )
+        st.link_button("⚙️ Διαχείριση Συνδρομής & Αλλαγή Κάρτας",
+                       STRIPE_PORTAL_URL, width="stretch")
+    st.caption("Οι πληρωμές διεκπεραιώνονται με ασφάλεια από το Stripe — "
+               "τα στοιχεία της κάρτας σας δεν αποθηκεύονται ποτέ στο "
+               "AuditAgent.ai.")
 
 
 # --------------------------------------------------------------------------
@@ -1435,8 +1585,8 @@ def main():
 
     _flush_toasts()
 
-    tab_dashboard, tab_upload, tab_recap = st.tabs(
-        ["📊 Πίνακας Ελέγχου", "📸 Καταχώρηση", "🗓 Ανασκόπηση"]
+    tab_dashboard, tab_upload, tab_recap, tab_payments = st.tabs(
+        ["📊 Πίνακας Ελέγχου", "📸 Καταχώρηση", "🗓 Ανασκόπηση", "💳 Πληρωμές"]
     )
     with tab_dashboard:
         dashboard_tab(username)
@@ -1444,6 +1594,8 @@ def main():
         upload_tab(username)
     with tab_recap:
         recap_tab(username)
+    with tab_payments:
+        payments_tab(username)
 
 
 main()

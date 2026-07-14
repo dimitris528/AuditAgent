@@ -22,3 +22,26 @@ services:
       # Table names default sensibly in config.py (Invoices / Projects /
       # Transactions / Users) — add AIRTABLE_*_TABLE vars here only if yours
       # are named differently.
+
+  # Stripe webhook receiver (stripe_webhook.py) — Streamlit cannot accept
+  # POSTs, so this runs as its own tiny service from the SAME image, with
+  # the CMD overridden. Point the Stripe endpoint at
+  #   https://<this service's host>/webhook
+  # subscribed to checkout.session.completed. NOTE: on the free plan the
+  # service spins down when idle — Stripe retries failed deliveries for up
+  # to ~3 days so no event is lost, but activation can lag by the ~1 min
+  # cold start; use "starter" for instant activation.
+  - type: web
+    name: auditagent-webhook
+    runtime: docker
+    plan: free
+    autoDeploy: true
+    healthCheckPath: /
+    dockerCommand: gunicorn stripe_webhook:app --bind 0.0.0.0:$PORT
+    envVars:
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: AIRTABLE_PAT
+        sync: false
+      - key: AIRTABLE_BASE_ID
+        sync: false

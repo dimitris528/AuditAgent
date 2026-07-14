@@ -29,6 +29,14 @@ AIRTABLE_TRANSACTIONS_TABLE = os.getenv("AIRTABLE_TRANSACTIONS_TABLE", "Transact
 AIRTABLE_USERS_TABLE = os.getenv("AIRTABLE_USERS_TABLE", "Users")
 
 
+# --- Stripe ----------------------------------------------------------------
+# Signing secret for the webhook endpoint (stripe_webhook.py). Take it from
+# Stripe Dashboard -> Developers -> Webhooks -> your endpoint ("whsec_...").
+# Only the webhook service needs it; the Streamlit app never touches Stripe
+# server-side (the Πληρωμές tab just links out to Payment Link / Portal).
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+
+
 # --- WhatsApp Business Cloud API ------------------------------------------
 # Create an app at https://developers.facebook.com/ -> add the "WhatsApp"
 # product. WHATSAPP_TOKEN is the (permanent) access token; WHATSAPP_PHONE_NUMBER_ID

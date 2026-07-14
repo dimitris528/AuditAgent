@@ -6,3 +6,8 @@ openai==2.2.0            # GPT-4o Vision invoice extraction (extractor.py)
 pdfplumber==0.11.10      # PDF text extraction fallback path (extractor.py)
 requests==2.34.2         # Airtable REST client (airtable_client.py, airtable_publisher.py)
 python-dotenv==1.1.1     # .env loading (config.py)
+
+# Stripe webhook service (stripe_webhook.py — separate Render web service)
+stripe==15.3.0           # webhook signature verification + event types
+flask==3.1.3             # the /webhook POST endpoint
+gunicorn==26.0.0         # production WSGI server on Render (linux-only)
