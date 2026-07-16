@@ -1,5 +1,5 @@
 """
-AuditAgent.ai — Streamlit PWA front-end (dark/light themes, Greek UI).
+AuditAgent — Streamlit PWA front-end (dark/light themes, Greek UI).
 
 Presentation layer only differs from the classic build; the multi-tenant,
 cached Airtable logic and the data-retention hooks are unchanged:
@@ -116,7 +116,7 @@ RESET_CODE_TTL_MINUTES = 15
 TRIAL_DAYS = 15
 
 st.set_page_config(
-    page_title="AuditAgent.ai",
+    page_title="AuditAgent",
     page_icon="🧾",
     layout="centered",  # single column reads well on phones
 )
@@ -137,7 +137,6 @@ _DARK_PALETTE = {
     "muted": "#8E8E93",
     "accent": "#00E676",        # fills (primary buttons, tab highlight)
     "accent-text": "#00E676",   # accent-colored TEXT on surfaces
-    "warm": "#E6A23C",
     "loss": "#FF6B57",
     "shadow": "rgba(0, 0, 0, .35)",
 }
@@ -153,7 +152,6 @@ _LIGHT_PALETTE = {
     "muted": "#6E6E73",
     "accent": "#00E676",
     "accent-text": "#00843D",   # darker green: mint text is unreadable on white
-    "warm": "#B26A00",
     "loss": "#D63A22",
     "shadow": "rgba(0, 0, 0, .10)",
 }
@@ -262,7 +260,6 @@ ul[data-baseweb="menu"] li:hover { background: var(--aud-border) !important; }
     color: var(--aud-text-soft); font-size: clamp(1.1rem, 4.5vw, 1.5rem); font-weight: 600;
     line-height: 1.15; white-space: nowrap;
 }
-.aud-kpi.warm  .aud-kpi-value { color: var(--aud-warm); }
 .aud-kpi.loss  .aud-kpi-value { color: var(--aud-loss); }
 .aud-kpi.accent { border-color: rgba(0, 230, 118, .35); }
 .aud-kpi.accent:hover {
@@ -349,7 +346,6 @@ div[class*="st-key-projcard_"]:hover { border-color: var(--aud-border-strong); }
 .aud-proj-name { color: var(--aud-text); font-weight: 600; font-size: 1.02rem; margin-bottom: 10px; }
 .aud-proj-stats { display: flex; gap: 26px; flex-wrap: wrap; }
 .aud-proj-value { color: var(--aud-text-soft); font-size: .98rem; font-weight: 600; }
-.aud-proj-value.warm { color: var(--aud-warm); }
 .aud-proj-value.accent { color: var(--aud-accent-text); }
 .aud-proj-value.loss { color: var(--aud-loss); }
 
@@ -768,7 +764,7 @@ def _section(label):
 
 def _kpi_row(items):
     """Render KPI cards: items = [(label, value, kind)], kind in
-    {"", "warm", "accent", "loss", "revenue", "expense",
+    {"", "accent", "loss", "revenue", "expense",
      "net-pos", "net-neg", "net-zero"}."""
     cards = "".join(
         f'<div class="aud-kpi {kind}">'
@@ -788,18 +784,29 @@ def _net_kind(net):
     return "net-pos" if net_r > 0 else "net-neg" if net_r < 0 else "net-zero"
 
 
+def _net_value_kind(net):
+    """Text color for an inline Καθαρό VALUE (the category cards): green
+    when positive, red when negative, and "" — the default text color —
+    at exactly zero. Same round-to-cents guard as _net_kind."""
+    net_r = round(net, 2)
+    return "accent" if net_r > 0 else "loss" if net_r < 0 else ""
+
+
 def _project_card_body(name, rev, exp, net):
     """Name + Έσοδα/Έξοδα/Καθαρό stats for one active category. The card
     chrome (surface, border, radius, full row width) lives on the keyed
     st.container wrapping the row — see st-key-projcard_ in the CSS — so
-    the inline Αρχειοθέτηση pill renders INSIDE the card, not beside it."""
+    the inline Αρχειοθέτηση pill renders INSIDE the card, not beside it.
+
+    Flow colors: Έσοδα ALWAYS green, Έξοδα ALWAYS red (accent/loss — the
+    same theme-aware pair the recap rows use), Καθαρό by sign."""
     stats = "".join(
         f'<div><div class="aud-kpi-label">{html.escape(label)}</div>'
         f'<div class="aud-proj-value {kind}">{html.escape(value)}</div></div>'
         for label, value, kind in [
-            ("Έσοδα", _money(rev), ""),
-            ("Έξοδα", _money(exp), "warm"),
-            ("Καθαρό", _money(net), "accent" if net >= 0 else "loss"),
+            ("Έσοδα", _money(rev), "accent"),
+            ("Έξοδα", _money(exp), "loss"),
+            ("Καθαρό", _money(net), _net_value_kind(net)),
         ]
     )
     st.markdown(
@@ -1004,7 +1011,7 @@ def _password_matches(stored, typed):
 
 
 def login_screen():
-    st.markdown('<div class="aud-brand">AuditAgent<span>.ai</span></div>',
+    st.markdown('<div class="aud-brand">Audit<span>Agent</span></div>',
                 unsafe_allow_html=True)
     st.markdown('<div class="aud-tagline">Οικονομικός έλεγχος για τη '
                 "σύγχρονη επιχείρηση</div>", unsafe_allow_html=True)
@@ -1119,18 +1126,18 @@ def _send_reset_email(to_addr, code):
             "emails cannot be sent (see config.py)."
         )
     msg = EmailMessage()
-    msg["Subject"] = "AuditAgent.ai — Επαναφορά κωδικού πρόσβασης"
+    msg["Subject"] = "AuditAgent — Επαναφορά κωδικού πρόσβασης"
     msg["From"] = SMTP_EMAIL
     msg["To"] = to_addr
     msg.set_content(
         "Γεια σας,\n\n"
         "Ζητήθηκε επαναφορά κωδικού για τον λογαριασμό σας στο "
-        "AuditAgent.ai.\n\n"
+        "AuditAgent.\n\n"
         f"Κωδικός επαλήθευσης: {code}\n\n"
         f"Ο κωδικός ισχύει για {RESET_CODE_TTL_MINUTES} λεπτά. Αν δεν "
         "ζητήσατε εσείς την επαναφορά, αγνοήστε αυτό το μήνυμα — ο κωδικός "
         "πρόσβασής σας δεν έχει αλλάξει.\n\n"
-        "AuditAgent.ai"
+        "AuditAgent"
     )
     with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=20) as smtp:
         smtp.login(SMTP_EMAIL, SMTP_PASSWORD)
@@ -1412,7 +1419,7 @@ def _lock_screen(text):
     st.markdown(
         '<div class="aud-lock">'
         '<div class="aud-lock-icon">🔒</div>'
-        '<div class="aud-lock-title">AuditAgent.ai</div>'
+        '<div class="aud-lock-title">AuditAgent</div>'
         f'<div class="aud-lock-text">{html.escape(text)}</div></div>',
         unsafe_allow_html=True,
     )
@@ -1433,7 +1440,7 @@ def _paywall_screen(username):
         '<div class="aud-lock aud-paywall">'
         '<div class="aud-lock-icon">💳</div>'
         '<div class="aud-lock-title">Η συνδρομή σας δεν είναι ενεργή</div>'
-        '<div class="aud-lock-text">Για να συνεχίσετε στο AuditAgent.ai, '
+        '<div class="aud-lock-text">Για να συνεχίσετε στο AuditAgent, '
         "ενεργοποιήστε τη συνδρομή σας. Η πληρωμή γίνεται με ασφάλεια μέσω "
         "Stripe και η πρόσβασή σας ξεκλειδώνει αυτόματα μόλις ολοκληρωθεί."
         "</div>"
@@ -2177,7 +2184,7 @@ def payments_tab(username):
         st.markdown(
             '<div class="aud-pay-title">Νέα Συνδρομή</div>'
             '<div class="aud-pay-badge">10€ / μήνα</div>'
-            '<div class="aud-pay-text">Πλήρης πρόσβαση στο AuditAgent.ai: '
+            '<div class="aud-pay-text">Πλήρης πρόσβαση στο AuditAgent: '
             "σκανάρισμα παραστατικών με AI, αναλυτικά στατιστικά και "
             "απεριόριστες καταχωρήσεις. Ακύρωση οποιαδήποτε στιγμή.</div>",
             unsafe_allow_html=True,
@@ -2197,7 +2204,7 @@ def payments_tab(username):
                        STRIPE_PORTAL_URL, width="stretch")
     st.caption("Οι πληρωμές διεκπεραιώνονται με ασφάλεια από το Stripe — "
                "τα στοιχεία της κάρτας σας δεν αποθηκεύονται ποτέ στο "
-               "AuditAgent.ai.")
+               "AuditAgent.")
 
 
 # --------------------------------------------------------------------------
@@ -2218,7 +2225,7 @@ def _render_sidebar(username):
     collapse/expand toggle is always available; navigation and account
     controls appear only once logged in."""
     with st.sidebar:
-        st.markdown('<div class="aud-brand-small">AuditAgent<span>.ai</span></div>',
+        st.markdown('<div class="aud-brand-small">Audit<span>Agent</span></div>',
                     unsafe_allow_html=True)
         if username:
             st.markdown(f'<div class="aud-user">{html.escape(username)}</div>',

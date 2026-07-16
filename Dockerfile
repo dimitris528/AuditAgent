@@ -1,4 +1,4 @@
-# AuditAgent.ai — container image for Render (Web Service, runtime: docker).
+# AuditAgent — container image for Render (Web Service, runtime: docker).
 # Render injects PORT at runtime; we bind Streamlit to it (8501 fallback for
 # local `docker run -p 8501:8501 auditagent`).
 
