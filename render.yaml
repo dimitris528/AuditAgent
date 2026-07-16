@@ -3,7 +3,7 @@
 # create a Web Service by hand in the dashboard with runtime "Docker".
 services:
   - type: web
-    name: auditagent
+    name: bakalocharto
     runtime: docker
     # Hobby workspace: "free" spins down after ~15 min idle (slow cold start
     # for the client); switch to "starter" for an always-on instance.
@@ -39,7 +39,7 @@ services:
   # to ~3 days so no event is lost, but activation can lag by the ~1 min
   # cold start; use "starter" for instant activation.
   - type: web
-    name: auditagent-webhook
+    name: bakalocharto-webhook
     runtime: docker
     plan: free
     autoDeploy: true

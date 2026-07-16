@@ -1,5 +1,6 @@
 """
-AuditAgent — Streamlit PWA front-end (dark/light themes, Greek UI).
+Μπακαλοχαρτο (Bakalocharto) — Streamlit PWA front-end (dark/light themes,
+Greek UI).
 
 Presentation layer only differs from the classic build; the multi-tenant,
 cached Airtable logic and the data-retention hooks are unchanged:
@@ -28,6 +29,15 @@ cached Airtable logic and the data-retention hooks are unchanged:
        Description quick-entry form beneath the row (opening one closes the
        other). The third card, Καθαρό, stays static and colors itself by
        sign: green when positive, red when negative, neutral grey at zero.
+       The fourth card, Χρεωστούμενα (debts/receivables), is ALWAYS yellow
+       (#f1c40f family) in both themes and doubles as the debts action
+       button: tapping it opens the inline «Ποσό προς προσθήκη»/«Κατηγορία»
+       form plus the list of outstanding debts, each with an «Εξόφληση»
+       control — resolving one flips the row's Type to "Έσοδο" in Airtable,
+       so the amount automatically leaves Χρεωστούμενα and lands in the
+       Έσοδα of the same category. All amount fields across the app are
+       plain manual text inputs (no +/- steppers), parsed leniently
+       ("150", "12,50", "1.204,80").
        Each active category card carries a small inline "🔒 Αρχειοθέτηση"
        ghost button to its right; archived categories hide behind a large
        KPI-styled "📂 Αρχειοθετημένες Κατηγορίες" toggle button. New
@@ -67,11 +77,13 @@ cached Airtable logic and the data-retention hooks are unchanged:
        and flips the Users row to Active on checkout.session.completed.
     6. The 2-year data-retention cleanup runs automatically in the background.
 
-Transactions schema note: the table carries EXACTLY six columns — Username,
-Amount, Date, Category, FileHash, Description. Revenue vs expense lives in
-the SIGN of Amount (Έσοδο positive, Έξοδο negative); the UI always displays
-absolute values. The supplier name from invoice extraction is folded into
-Description.
+Transactions schema note: the table carries the columns Username, Amount,
+Date, Category, FileHash, Description, Type, Source. Revenue vs expense
+lives in the SIGN of Amount (Έσοδο positive, Έξοδο negative); the UI always
+displays absolute values. The supplier name from invoice extraction is
+folded into Description. Χρεωστούμενα (debts) live in the SAME table as
+Type "Χρεωστούμενο" rows with a positive Amount; they are excluded from
+every revenue/expense figure until Εξόφληση flips their Type to "Έσοδο".
 
 Theming: every color is a CSS custom property (--aud-*) injected per theme.
 Dark: #121214 canvas / #1C1C1E surfaces / #00E676 accent. Light: #F4F4F6
@@ -116,7 +128,7 @@ RESET_CODE_TTL_MINUTES = 15
 TRIAL_DAYS = 15
 
 st.set_page_config(
-    page_title="AuditAgent",
+    page_title="Μπακαλοχαρτο",
     page_icon="🧾",
     layout="centered",  # single column reads well on phones
 )
@@ -192,6 +204,24 @@ header[data-testid="stHeader"] { background: transparent; box-shadow: none; }
 [data-testid="stSidebarCollapse"], [data-testid="stSidebarCollapseButton"],
 [data-testid="stSidebarCollapsedControl"], [data-testid="stExpandSidebarButton"] {
     display: flex !important; visibility: visible !important; opacity: 1 !important;
+}
+/* ...and paint the arrow with the ACTIVE text color: the native (dark)
+   theme renders the glyph white, which vanishes on the light canvas.
+   var(--text-color) is aliased to the palette in _inject_css, so it's
+   black in Light Mode and white in Dark Mode automatically. Covers both
+   the Material-icon ligature and SVG builds of the control. */
+[data-testid="stSidebarCollapse"] button, [data-testid="stSidebarCollapseButton"] button,
+[data-testid="stSidebarCollapsedControl"] button, [data-testid="stExpandSidebarButton"] button,
+header[data-testid="stHeader"] button[kind="headerNoPadding"] {
+    color: var(--text-color) !important;
+}
+[data-testid="stSidebarCollapse"] [data-testid="stIconMaterial"],
+[data-testid="stSidebarCollapseButton"] [data-testid="stIconMaterial"],
+[data-testid="stSidebarCollapsedControl"] [data-testid="stIconMaterial"],
+[data-testid="stExpandSidebarButton"] [data-testid="stIconMaterial"],
+[data-testid="stSidebarCollapse"] svg, [data-testid="stSidebarCollapseButton"] svg,
+[data-testid="stSidebarCollapsedControl"] svg, [data-testid="stExpandSidebarButton"] svg {
+    color: var(--text-color) !important; fill: var(--text-color) !important;
 }
 .block-container { padding-top: 2.2rem; max-width: 46rem; }
 
@@ -307,6 +337,16 @@ div[class*="st-key-qe_card_expense"] button:hover {
     background: #f8d7da; border-color: #e2848f;
     box-shadow: 0 8px 24px rgba(114, 28, 36, .18);
 }
+/* Χρεωστούμενα: the 4th card is ALWAYS yellow (#f1c40f) in BOTH themes —
+   same clickable-KPI treatment as Έσοδα/Έξοδα (key qe_card_debt); tapping
+   it opens the debts panel (entry form + outstanding list). */
+div[class*="st-key-qe_card_debt"] button { background: #fcf3cf; border: 1px solid #f1c40f; }
+div[class*="st-key-qe_card_debt"] button p { color: #7d6608; }
+div[class*="st-key-qe_card_debt"] button p:first-of-type { color: #9a7d0a; }
+div[class*="st-key-qe_card_debt"] button:hover {
+    background: #fcf3cf; border-color: #f1c40f;
+    box-shadow: 0 8px 24px rgba(241, 196, 15, .25);
+}
 /* Καθαρό stays a static (non-clickable) card in the third column; its palette
    follows the SIGN of the value — net-pos / net-neg / net-zero appended by
    _net_kind. Height/centering mirror the buttons so the row lines up. */
@@ -376,6 +416,10 @@ div[class*="st-key-close_"] button:hover {
 }
 .aud-txn-row.income { border-left: 3px solid rgba(0, 230, 118, .55); }
 .aud-txn-row.expense { border-left: 3px solid rgba(255, 107, 87, .55); }
+/* Outstanding-debt rows: always the fixed Χρεωστούμενα yellow (border
+   #f1c40f; the amount uses the darker #b7950b so it reads on white too). */
+.aud-txn-row.debt { border-left: 3px solid #f1c40f; }
+.aud-proj-value.debt { color: #b7950b; }
 .aud-txn-meta { color: var(--aud-text-soft); }
 div[class*="st-key-del_"] button {
     background: transparent; color: var(--aud-muted); border: 1px dashed var(--aud-border-strong);
@@ -384,6 +428,38 @@ div[class*="st-key-del_"] button {
 div[class*="st-key-del_"] button:hover {
     color: var(--aud-loss); border-color: rgba(255, 107, 87, .55); background: transparent;
 }
+/* Εξόφληση ghost button on each outstanding-debt row: same quiet dashed
+   pill as the delete ghost, but it warms to the Χρεωστούμενα yellow. */
+div[class*="st-key-paid_"] button {
+    background: transparent; color: var(--aud-muted); border: 1px dashed #f1c40f;
+    font-size: .8rem; font-weight: 500; padding: .3rem .7rem; white-space: nowrap;
+}
+div[class*="st-key-paid_"] button:hover {
+    color: #b7950b; border-color: #f1c40f; background: rgba(241, 196, 15, .08);
+}
+
+/* --- Recap table ------------------------------------------------------------
+   st.dataframe draws its cells on a <canvas> from Streamlit's NATIVE theme
+   — CSS can't recolor a canvas, so it sat stuck on dark grey in Light
+   Mode. The recap renders a plain HTML table instead (.aud-table), which
+   lives entirely on the active palette. */
+.aud-table-wrap {
+    overflow-x: auto; border: 1px solid var(--aud-border); border-radius: 12px;
+    margin: 4px 0 14px; background: var(--background-color);
+}
+.aud-table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+.aud-table th {
+    background: var(--secondary-background-color); color: var(--aud-muted);
+    font-weight: 600; text-align: left; padding: 10px 14px; white-space: nowrap;
+    border-bottom: 1px solid var(--aud-border-strong);
+}
+.aud-table td {
+    background: var(--background-color); color: var(--text-color);
+    padding: 9px 14px; border-bottom: 1px solid var(--aud-border); white-space: nowrap;
+}
+.aud-table tr:last-child td { border-bottom: none; }
+/* Money columns (Έσοδα/Έξοδα/Καθαρό) read best right-aligned. */
+.aud-table th:nth-child(n+3), .aud-table td:nth-child(n+3) { text-align: right; }
 
 /* --- Closed projects list --------------------------------------------------- */
 .aud-closed-row {
@@ -481,8 +557,24 @@ iframe[height="1"] {  /* belt-and-braces if the container testid renames */
 
 /* --- Inputs ------------------------------------------------------------- */
 div[data-baseweb="input"], div[data-baseweb="textarea"], div[data-baseweb="select"] > div {
-    background: var(--aud-surface) !important; border-color: var(--aud-border) !important;
+    background: var(--background-color) !important; border-color: var(--aud-border) !important;
     border-radius: 12px !important;
+}
+/* The INNER nodes (base-input wrapper + the <input>/<textarea> themselves)
+   carry their own background from Streamlit's NATIVE theme (pinned dark in
+   config.toml) — without repainting them, Light Mode shows dark boxes
+   inside white shells. var(--background-color)/var(--text-color) are
+   aliased to the active palette in _inject_css, so both modes just work. */
+div[data-baseweb="input"] > div, div[data-baseweb="base-input"],
+div[data-baseweb="input"] input, div[data-baseweb="textarea"] textarea,
+div[data-baseweb="select"] input {
+    background: var(--background-color) !important;
+    color: var(--text-color) !important;
+}
+/* Icon buttons living inside inputs (password reveal eye, clear ✕): the
+   native theme paints them white — invisible on a white field. */
+div[data-baseweb="input"] button, div[data-baseweb="input"] svg {
+    color: var(--aud-muted) !important; fill: var(--aud-muted) !important;
 }
 div[data-baseweb="input"]:focus-within, div[data-baseweb="textarea"]:focus-within,
 div[data-baseweb="select"] > div:focus-within {
@@ -606,6 +698,24 @@ div[class*="st-key-archived_toggle"] button:hover {
 }
 div[class*="st-key-archived_toggle"] button:active { transform: scale(.985); }
 
+/* --- Tooltips ------------------------------------------------------------ */
+/* Hover tooltips (help= on buttons/inputs, e.g. "Πατήστε για προσθήκη
+   εσόδου") render in a body-level portal painted by the NATIVE theme —
+   they stayed near-black with dark text in Light Mode. Re-anchor every
+   layer (BaseWeb tooltip, Streamlit's testid, generic role) to the active
+   palette; covers the inner markdown too. */
+div[data-baseweb="tooltip"], [data-testid="stTooltipContent"], [role="tooltip"] {
+    background: var(--background-color) !important;
+    color: var(--text-color) !important;
+    border: 1px solid var(--aud-border-strong) !important;
+    border-radius: 10px !important;
+    box-shadow: 0 6px 20px var(--aud-shadow) !important;
+}
+div[data-baseweb="tooltip"] *, [data-testid="stTooltipContent"] *,
+[role="tooltip"] [data-testid="stMarkdownContainer"] p {
+    color: var(--text-color) !important;
+}
+
 /* --- Alerts ------------------------------------------------------------- */
 [data-testid="stAlert"] { border-radius: 12px; }
 
@@ -635,6 +745,16 @@ def _inject_css():
     """
     palette = _DARK_PALETTE if st.session_state.get("theme_dark", True) else _LIGHT_PALETTE
     root = "".join(f"--aud-{name}: {value};" for name, value in palette.items())
+    # Also re-point Streamlit's OWN theme variables at the active palette.
+    # config.toml pins the native theme to dark (so BaseWeb popovers match
+    # the default look), which left native-styled surfaces — inner input
+    # nodes, tooltips, header icons — stuck dark in Light Mode. Our :root
+    # block is injected after Streamlit's, so these aliases win, and every
+    # rule written against var(--background-color) / var(--text-color)
+    # follows the sidebar toggle.
+    root += (f"--background-color: {palette['surface']};"
+             f"--secondary-background-color: {palette['bg']};"
+             f"--text-color: {palette['text']};")
     st.markdown(f"<style>:root {{ {root} }}</style>", unsafe_allow_html=True)
     st.markdown(_CSS, unsafe_allow_html=True)
 
@@ -692,9 +812,28 @@ def _amount(record):
 
 
 def _is_revenue(record):
-    """Revenue vs expense lives in the SIGN of Amount (schema has no Type
-    column): positive/zero = Έσοδο, negative = Έξοδο."""
+    """Revenue vs expense lives in the SIGN of Amount (the Type column is a
+    label only): positive/zero = Έσοδο, negative = Έξοδο."""
     return _amount(record) >= 0
+
+
+# Χρεωστούμενα (debts/receivables) ride the Transactions table as rows whose
+# Type carries this label: positive Amount, excluded from every revenue/
+# expense figure until Εξόφληση flips the Type to "Έσοδο".
+DEBT_TYPE = "Χρεωστούμενο"
+
+
+def _is_debt(record):
+    return (record["fields"].get("Type") or "").strip() == DEBT_TYPE
+
+
+def _split_debts(transactions):
+    """Return (regular, debts): debts never enter the revenue/expense math —
+    only the yellow Χρεωστούμενα KPI card and its panel see them."""
+    regular, debts = [], []
+    for txn in transactions:
+        (debts if _is_debt(txn) else regular).append(txn)
+    return regular, debts
 
 
 def _sum_by_type(records):
@@ -1011,7 +1150,7 @@ def _password_matches(stored, typed):
 
 
 def login_screen():
-    st.markdown('<div class="aud-brand">Audit<span>Agent</span></div>',
+    st.markdown('<div class="aud-brand">Μπακαλο<span>χαρτο</span></div>',
                 unsafe_allow_html=True)
     st.markdown('<div class="aud-tagline">Οικονομικός έλεγχος για τη '
                 "σύγχρονη επιχείρηση</div>", unsafe_allow_html=True)
@@ -1126,18 +1265,18 @@ def _send_reset_email(to_addr, code):
             "emails cannot be sent (see config.py)."
         )
     msg = EmailMessage()
-    msg["Subject"] = "AuditAgent — Επαναφορά κωδικού πρόσβασης"
+    msg["Subject"] = "Μπακαλοχαρτο — Επαναφορά κωδικού πρόσβασης"
     msg["From"] = SMTP_EMAIL
     msg["To"] = to_addr
     msg.set_content(
         "Γεια σας,\n\n"
         "Ζητήθηκε επαναφορά κωδικού για τον λογαριασμό σας στο "
-        "AuditAgent.\n\n"
+        "Μπακαλοχαρτο.\n\n"
         f"Κωδικός επαλήθευσης: {code}\n\n"
         f"Ο κωδικός ισχύει για {RESET_CODE_TTL_MINUTES} λεπτά. Αν δεν "
         "ζητήσατε εσείς την επαναφορά, αγνοήστε αυτό το μήνυμα — ο κωδικός "
         "πρόσβασής σας δεν έχει αλλάξει.\n\n"
-        "AuditAgent"
+        "Μπακαλοχαρτο"
     )
     with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=20) as smtp:
         smtp.login(SMTP_EMAIL, SMTP_PASSWORD)
@@ -1406,7 +1545,8 @@ def logout():
                 "trial_expiry", "user_record_id",
                 "confirm_close", "flash", "confirm_delete_txn", "flash_recap",
                 "flash_toast", "flash_toast_alert", "nav_page",
-                "show_archived", "show_income_form", "show_expense_form"):
+                "show_archived", "show_income_form", "show_expense_form",
+                "show_debt_form", "confirm_paid_debt"):
         st.session_state.pop(key, None)
     # The localStorage wipe can't happen here: an iframe injected right
     # before st.rerun() never gets to execute its script. The flag makes
@@ -1419,7 +1559,7 @@ def _lock_screen(text):
     st.markdown(
         '<div class="aud-lock">'
         '<div class="aud-lock-icon">🔒</div>'
-        '<div class="aud-lock-title">AuditAgent</div>'
+        '<div class="aud-lock-title">Μπακαλοχαρτο</div>'
         f'<div class="aud-lock-text">{html.escape(text)}</div></div>',
         unsafe_allow_html=True,
     )
@@ -1440,7 +1580,7 @@ def _paywall_screen(username):
         '<div class="aud-lock aud-paywall">'
         '<div class="aud-lock-icon">💳</div>'
         '<div class="aud-lock-title">Η συνδρομή σας δεν είναι ενεργή</div>'
-        '<div class="aud-lock-text">Για να συνεχίσετε στο AuditAgent, '
+        '<div class="aud-lock-text">Για να συνεχίσετε στο Μπακαλοχαρτο, '
         "ενεργοποιήστε τη συνδρομή σας. Η πληρωμή γίνεται με ασφάλεια μέσω "
         "Stripe και η πρόσβασή σας ξεκλειδώνει αυτόματα μόλις ολοκληρωθεί."
         "</div>"
@@ -1588,14 +1728,18 @@ def _close_project_control(proj, name):
             st.rerun()
 
 
+_QUICK_ENTRY_FLAGS = ("show_income_form", "show_expense_form",
+                      "show_debt_form")
+
+
 def _toggle_quick_entry(which):
-    """on_click for the Έσοδα/Έξοδα card-buttons: toggle one quick-entry
-    form and close the other — mutually exclusive so the pair never stacks
-    and pushes the dashboard down."""
-    other = ("show_expense_form" if which == "show_income_form"
-             else "show_income_form")
-    st.session_state[which] = not st.session_state.get(which, False)
-    st.session_state[other] = False
+    """on_click for the Έσοδα/Έξοδα/Χρεωστούμενα card-buttons: toggle one
+    inline panel and close the others — mutually exclusive so they never
+    stack and push the dashboard down."""
+    was_open = st.session_state.get(which, False)
+    for flag in _QUICK_ENTRY_FLAGS:
+        st.session_state[flag] = False
+    st.session_state[which] = not was_open
 
 
 NEW_CATEGORY_OPTION = "➕ Δημιουργία Νέας Κατηγορίας..."
@@ -1654,8 +1798,10 @@ def _quick_entry_form(username, category_names, entry_type):
     # Explicit keys: the two forms carry otherwise-identical widgets,
     # which would collide on Streamlit's auto-generated widget IDs.
     with st.form(f"quick_entry_{entry_type}", clear_on_submit=True):
-        amount = st.number_input("Ποσό (€)", min_value=0.0, step=0.01,
-                                 key=f"qe_amount_{entry_type}")
+        # Plain manual text input (no +/- steppers); parsed leniently on
+        # submit — "150", "12,50" and "1.204,80" all work.
+        amount_text = st.text_input("Ποσό (€)", placeholder="π.χ. 150,00",
+                                    key=f"qe_amount_{entry_type}")
         entry_date = st.date_input("Ημερομηνία", value=date.today(),
                                    format="DD/MM/YYYY",
                                    key=f"qe_date_{entry_type}")
@@ -1665,8 +1811,10 @@ def _quick_entry_form(username, category_names, entry_type):
             f"💾 Αποθήκευση {genitive}", type="primary", width="stretch")
     if not submitted:
         return
-    if amount <= 0:
-        st.error("Παρακαλώ εισάγετε ποσό μεγαλύτερο από 0.")
+    amount = _parse_amount(amount_text)
+    if amount is None or amount <= 0:
+        st.error("Παρακαλώ εισάγετε έγκυρο ποσό μεγαλύτερο από 0 "
+                 "(π.χ. 150,00).")
         return
     category = _resolve_category(username, choice, new_category)
     if category is None:
@@ -1687,8 +1835,8 @@ def _quick_entry_form(username, category_names, entry_type):
         st.error(f"❌ Η αποθήκευση στο Airtable απέτυχε: {exc}")
         return
     # Instant analytics: same clear-and-rerun as the invoice flow.
-    st.session_state["show_income_form"] = False
-    st.session_state["show_expense_form"] = False
+    for flag in _QUICK_ENTRY_FLAGS:
+        st.session_state[flag] = False
     _invalidate_caches()
     st.session_state["flash_toast"] = (
         f"Η κίνηση ({entry_type}) αποθηκεύτηκε επιτυχώς στην "
@@ -1697,14 +1845,116 @@ def _quick_entry_form(username, category_names, entry_type):
     st.rerun()
 
 
-def _kpi_entry_row(username, category_names, total_rev, total_exp, net):
+def _debt_entry_panel(username, category_names, debts):
+    """The inline Χρεωστούμενα panel, revealed by the yellow KPI card: the
+    «Ποσό προς προσθήκη»/«Κατηγορία» entry form, then the list of
+    outstanding debts with their Εξόφληση controls. The panel stays open
+    after a save so the fresh row is immediately visible in the list."""
+    choice, new_category = _category_picker(category_names,
+                                            key="qe_category_debt")
+    with st.form("quick_entry_debt", clear_on_submit=True):
+        amount_text = st.text_input("Ποσό προς προσθήκη (€)",
+                                    placeholder="π.χ. 150,00",
+                                    key="qe_amount_debt")
+        submitted = st.form_submit_button("💾 Καταχώρηση Χρεωστούμενου",
+                                          type="primary", width="stretch")
+    if submitted:
+        amount = _parse_amount(amount_text)
+        if amount is None or amount <= 0:
+            st.error("Παρακαλώ εισάγετε έγκυρο ποσό μεγαλύτερο από 0 "
+                     "(π.χ. 150,00).")
+        else:
+            category = _resolve_category(username, choice, new_category)
+            if category is not None:
+                try:
+                    # Positive Amount + Type "Χρεωστούμενο": the row carries
+                    # its category but stays OUT of the revenue math until
+                    # Εξόφληση flips the Type to "Έσοδο".
+                    db.create_transaction(
+                        username, category, amount,
+                        date=date.today(), type_=DEBT_TYPE, source="Manual")
+                except db.AirtableError as exc:
+                    st.error(f"❌ Η αποθήκευση στο Airtable απέτυχε: {exc}")
+                else:
+                    _invalidate_caches()
+                    st.session_state["flash_toast"] = (
+                        f"Το χρεωστούμενο καταχωρήθηκε στην Κατηγορία "
+                        f"«{category}» — {_money(amount)}.")
+                    st.rerun()
+
+    _section(f"Εκκρεμή Χρεωστούμενα ({len(debts)})")
+    if not debts:
+        _empty_state("Δεν υπάρχουν εκκρεμή χρεωστούμενα.")
+        return
+    for txn in sorted(debts, key=lambda t: _txn_date(t) or date.min,
+                      reverse=True):
+        fields = txn["fields"]
+        txn_day = _txn_date(txn)
+        meta = " · ".join(part for part in (
+            txn_day.strftime("%d/%m/%Y") if txn_day else None,
+            fields.get("Category"),
+            fields.get("Description"),
+        ) if part)
+        col_info, col_paid = st.columns([4, 1.3], vertical_alignment="center")
+        with col_info:
+            st.markdown(
+                f'<div class="aud-txn-row debt">'
+                f'<span class="aud-txn-meta">{html.escape(meta)}</span>'
+                f'<span class="aud-proj-value debt">'
+                f'{html.escape(_money(fields.get("Amount")))}</span></div>',
+                unsafe_allow_html=True,
+            )
+        with col_paid:
+            if st.button("✅ Εξόφληση", key=f"paid_{txn['id']}",
+                         help="Μεταφορά του ποσού στα Έσοδα της κατηγορίας"):
+                st.session_state["confirm_paid_debt"] = txn["id"]
+                st.rerun()
+        _resolve_debt_control(txn)
+
+
+def _resolve_debt_control(txn):
+    """Two-step Εξόφληση confirmation for one outstanding debt: the explicit
+    «Ναι» tap flips the row's Type to "Έσοδο" (Date -> today), so the amount
+    automatically leaves Χρεωστούμενα and lands in the Έσοδα of the same
+    category — no second row, nothing to reconcile."""
+    if st.session_state.get("confirm_paid_debt") != txn["id"]:
+        return
+    category = txn["fields"].get("Category") or "—"
+    amount = _money(txn["fields"].get("Amount"))
+    st.warning(f"Εξόφληση χρεωστούμενου {amount}; Θα αφαιρεθεί από τα "
+               f"Χρεωστούμενα και θα προστεθεί στα Έσοδα της κατηγορίας "
+               f"«{category}».")
+    col_yes, col_no = st.columns(2)
+    with col_yes:
+        if st.button("✅ Ναι, εξόφληση", key=f"yespaid_{txn['id']}",
+                     type="primary", width="stretch"):
+            try:
+                db.resolve_debt_transaction(txn["id"], date.today())
+            except db.AirtableError as exc:
+                st.error(f"Δεν ήταν δυνατή η εξόφληση: {exc}")
+            else:
+                st.session_state.pop("confirm_paid_debt", None)
+                _invalidate_caches()
+                st.session_state["flash_toast"] = (
+                    f"Το χρεωστούμενο εξοφλήθηκε — {amount} προστέθηκε στα "
+                    f"Έσοδα της κατηγορίας «{category}».")
+                st.rerun()
+    with col_no:
+        if st.button("✕ Άκυρο", key=f"nopaid_{txn['id']}", width="stretch"):
+            st.session_state.pop("confirm_paid_debt", None)
+            st.rerun()
+
+
+def _kpi_entry_row(username, category_names, total_rev, total_exp, net,
+                   total_debt, debts):
     """The merged dashboard header: Συνολικά έσοδα / Συνολικά έξοδα as
     clickable card-buttons (tap toggles the matching inline entry form just
-    below; opening one closes the other) plus the static Καθαρό card whose
-    palette follows the sign of the value. Equal thirds, like the old KPI
-    row; on narrow phones Streamlit stacks the columns, matching how the
-    old flex row wrapped."""
-    col_rev, col_exp, col_net = st.columns(3)
+    below; opening one closes the others), the static Καθαρό card whose
+    palette follows the sign of the value, and the ALWAYS-yellow
+    Χρεωστούμενα card-button right next to it (tap toggles the debts
+    panel). Equal quarters; on narrow phones Streamlit stacks the columns,
+    matching how the old flex row wrapped."""
+    col_rev, col_exp, col_net, col_debt = st.columns(4)
     with col_rev:
         st.button(f"Συνολικά έσοδα\n\n{_money(total_rev)}",
                   key="qe_card_income", width="stretch",
@@ -1718,10 +1968,17 @@ def _kpi_entry_row(username, category_names, total_rev, total_exp, net):
     with col_net:
         with st.container(key="qe_card_net"):
             _kpi_row([("Καθαρό κέρδος", _money(net), _net_kind(net))])
+    with col_debt:
+        st.button(f"Χρεωστούμενα\n\n{_money(total_debt)}",
+                  key="qe_card_debt", width="stretch",
+                  help="Πατήστε για διαχείριση χρεωστούμενων",
+                  on_click=_toggle_quick_entry, args=("show_debt_form",))
     if st.session_state.get("show_income_form"):
         _quick_entry_form(username, category_names, "Έσοδο")
     elif st.session_state.get("show_expense_form"):
         _quick_entry_form(username, category_names, "Έξοδο")
+    elif st.session_state.get("show_debt_form"):
+        _debt_entry_panel(username, category_names, debts)
 
 
 def _closed_projects_section(completed, grouped):
@@ -1757,10 +2014,13 @@ def dashboard_tab(username):
     try:
         active = _load_active_projects(username)
         completed = _load_completed_projects(username)
-        grouped = _transactions_by_category(_load_transactions(username))
+        # Debts never enter the revenue/expense math — they feed only the
+        # yellow Χρεωστούμενα card and its panel.
+        regular, debts = _split_debts(_load_transactions(username))
     except db.AirtableError as exc:
         st.error(f"Δεν ήταν δυνατή η φόρτωση των δεδομένων σας: {exc}")
         return
+    grouped = _transactions_by_category(regular)
 
     totals = [_project_financials(p["fields"].get("Name") or "—", grouped)
               for p in active]
@@ -1772,13 +2032,14 @@ def dashboard_tab(username):
     total_rev = sum(t[0] for t in totals)
     total_exp = sum(t[1] for t in totals)
     net = total_rev - total_exp
-    # Merged header: the Έσοδα/Έξοδα cards ARE the quick-entry buttons;
-    # tapping one opens its inline form directly beneath the row. Rendered
-    # even with zero categories — the forms' category dropdown can create
-    # the first one via "➕ Δημιουργία Νέας Κατηγορίας...".
+    total_debt = sum(_amount(d) for d in debts)
+    # Merged header: the Έσοδα/Έξοδα/Χρεωστούμενα cards ARE the quick-entry
+    # buttons; tapping one opens its inline panel directly beneath the row.
+    # Rendered even with zero categories — the forms' category dropdown can
+    # create the first one via "➕ Δημιουργία Νέας Κατηγορίας...".
     _kpi_entry_row(
         username, [p["fields"].get("Name") or "—" for p in active],
-        total_rev, total_exp, net)
+        total_rev, total_exp, net, total_debt, debts)
 
     if active:
         _section("Ενεργές κατηγορίες")
@@ -1878,13 +2139,17 @@ def _invoice_flow(username):
     choice, new_category = _category_picker(category_names, key=picker_key,
                                             default_index=default_index)
 
+    # Prefill the manual amount input with the extracted total (dot-decimal,
+    # two places); _parse_amount re-reads whatever the user types.
+    extracted_amount = _parse_amount(pending.get("total_amount"))
     with st.form("confirm_invoice"):
         provider = st.text_input("Προμηθευτής", value=pending.get("provider_name") or "")
-        # No min_value: credit notes legitimately carry negative totals.
-        amount = st.number_input(
+        # Plain manual text input (no +/- steppers). Negatives are allowed:
+        # credit notes legitimately carry negative totals.
+        amount_text = st.text_input(
             "Συνολικό ποσό (€)",
-            step=0.01,
-            value=float(_parse_amount(pending.get("total_amount")) or 0.0),
+            value=f"{extracted_amount:.2f}" if extracted_amount is not None else "",
+            placeholder="π.χ. 150,00",
         )
         # A real date picker: the user can't submit a malformed date, and the
         # extracted EU-format string ("26/06/2026") is parsed to prefill it.
@@ -1908,6 +2173,10 @@ def _invoice_flow(username):
         st.rerun()
 
     if save:
+        amount = _parse_amount(amount_text)
+        if amount is None:
+            st.error("Παρακαλώ εισάγετε έγκυρο ποσό (π.χ. 150,00).")
+            return
         # Resolve the picker first: a "create new" choice with a blank name
         # aborts before anything touches Airtable.
         category = _resolve_category(username, choice, new_category)
@@ -1976,6 +2245,9 @@ PERIOD_MONTH = "Τρέχων Μήνας"
 PERIOD_QUARTER = "Τρέχον Τρίμηνο"
 PERIOD_YEAR = "Τρέχον Έτος"
 PERIOD_CUSTOM = "Προσαρμοσμένο Εύρος"
+
+# Column order of the recap table (also the keys of each row dict).
+_RECAP_COLUMNS = ("Κατηγορία", "Αρχειοθετήθηκε", "Έσοδα", "Έξοδα", "Καθαρό")
 
 
 def _resolve_period(choice, today, earliest):
@@ -2111,6 +2383,9 @@ def recap_tab(username):
     except db.AirtableError as exc:
         st.error(f"Δεν ήταν δυνατή η φόρτωση των δεδομένων σας: {exc}")
         return
+    # Outstanding debts stay off the recap analytics: they aren't revenue
+    # (yet) — once resolved, their Type flips to "Έσοδο" and they show here.
+    transactions, _debts = _split_debts(transactions)
     grouped = _transactions_by_category(transactions)
 
     selected = [p for p in completed
@@ -2134,7 +2409,21 @@ def recap_tab(username):
                 "Καθαρό": _money(net),
             })
 
-        st.dataframe(rows, width="stretch", hide_index=True)
+        # A plain HTML table instead of st.dataframe: the dataframe paints
+        # its cells on a <canvas> from the NATIVE (dark) theme and ignores
+        # CSS — this one follows the active palette in both modes.
+        head = "".join(f"<th>{html.escape(col)}</th>" for col in _RECAP_COLUMNS)
+        body = "".join(
+            "<tr>" + "".join(
+                f"<td>{html.escape(str(row[col]))}</td>"
+                for col in _RECAP_COLUMNS) + "</tr>"
+            for row in rows
+        )
+        st.markdown(
+            f'<div class="aud-table-wrap"><table class="aud-table">'
+            f'<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>',
+            unsafe_allow_html=True,
+        )
 
         net = total_rev - total_exp
         # Same visual language as the dashboard header: green revenue card,
@@ -2184,7 +2473,7 @@ def payments_tab(username):
         st.markdown(
             '<div class="aud-pay-title">Νέα Συνδρομή</div>'
             '<div class="aud-pay-badge">10€ / μήνα</div>'
-            '<div class="aud-pay-text">Πλήρης πρόσβαση στο AuditAgent: '
+            '<div class="aud-pay-text">Πλήρης πρόσβαση στο Μπακαλοχαρτο: '
             "σκανάρισμα παραστατικών με AI, αναλυτικά στατιστικά και "
             "απεριόριστες καταχωρήσεις. Ακύρωση οποιαδήποτε στιγμή.</div>",
             unsafe_allow_html=True,
@@ -2204,7 +2493,7 @@ def payments_tab(username):
                        STRIPE_PORTAL_URL, width="stretch")
     st.caption("Οι πληρωμές διεκπεραιώνονται με ασφάλεια από το Stripe — "
                "τα στοιχεία της κάρτας σας δεν αποθηκεύονται ποτέ στο "
-               "AuditAgent.")
+               "Μπακαλοχαρτο.")
 
 
 # --------------------------------------------------------------------------
@@ -2225,7 +2514,7 @@ def _render_sidebar(username):
     collapse/expand toggle is always available; navigation and account
     controls appear only once logged in."""
     with st.sidebar:
-        st.markdown('<div class="aud-brand-small">Audit<span>Agent</span></div>',
+        st.markdown('<div class="aud-brand-small">Μπακαλο<span>χαρτο</span></div>',
                     unsafe_allow_html=True)
         if username:
             st.markdown(f'<div class="aud-user">{html.escape(username)}</div>',

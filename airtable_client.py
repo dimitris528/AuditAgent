@@ -22,9 +22,15 @@ Required Airtable schema (create these in your base before running the app):
       FileHash      Single line text    - SHA-256 of the uploaded file; the
                                           per-tenant duplicate-receipt guard
                                           (AI scanning path only)
-      Type          Single select       - "Έσοδο" / "Έξοδο" label (optional;
-                                          manual entries only — the sign of
-                                          Amount stays the source of truth)
+      Type          Single select       - "Έσοδο" / "Έξοδο" / "Χρεωστούμενο"
+                                          label (optional; manual entries
+                                          only — the sign of Amount stays the
+                                          source of truth for revenue vs
+                                          expense). "Χρεωστούμενο" rows are
+                                          DEBTS/receivables: positive Amount,
+                                          excluded from every revenue/expense
+                                          figure until resolve_debt_transaction
+                                          flips the Type to "Έσοδο"
       Source        Single select       - e.g. "Manual" (optional; manual
                                           entries only)
       The save payload NEVER contains any key outside these columns —
@@ -401,6 +407,24 @@ def create_transaction(username, category, amount,
         )
     return _request("POST", AIRTABLE_TRANSACTIONS_TABLE,
                     json={"fields": fields, "typecast": True})
+
+
+def resolve_debt_transaction(record_id, paid_date=None):
+    """Mark a Χρεωστούμενο row as paid: Type -> "Έσοδο" and Date -> the
+    payment date (today by default).
+
+    The Amount is already stored positive, so the Type flip alone moves the
+    value out of the Χρεωστούμενα KPI and into the same Category's revenue —
+    one row, nothing to keep in sync. typecast lets Airtable create the
+    "Έσοδο" select option if the base doesn't have it yet.
+    """
+    fields = {
+        "Type": "Έσοδο",
+        "Date": to_iso_date(paid_date) or date.today().isoformat(),
+    }
+    body = {"records": [{"id": record_id, "fields": fields}],
+            "typecast": True}
+    return _request("PATCH", AIRTABLE_TRANSACTIONS_TABLE, json=body)
 
 
 def find_transaction_by_hash(username, file_hash):

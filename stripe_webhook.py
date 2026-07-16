@@ -3,7 +3,7 @@ Stripe webhook receiver — a SEPARATE web service from the Streamlit app.
 
 Streamlit has no request routing and cannot accept webhook POSTs, so this
 tiny Flask app runs as its own Render web service (see render.yaml:
-auditagent-webhook, started via gunicorn) and listens on POST /webhook.
+bakalocharto-webhook, started via gunicorn) and listens on POST /webhook.
 
 Flow:
     Stripe -> POST /webhook
@@ -23,7 +23,7 @@ retrying can't fix a payer we can't identify, and the event stays visible
 in the Stripe Dashboard for manual reconciliation.
 
 Stripe endpoint config: point the endpoint at
-    https://<auditagent-webhook host>/webhook
+    https://<bakalocharto-webhook host>/webhook
 and subscribe it to the checkout.session.completed event.
 
 Local test:

@@ -1,8 +1,11 @@
-# AuditAgent — container image for Render (Web Service, runtime: docker).
-# Render injects PORT at runtime; we bind Streamlit to it (8501 fallback for
-# local `docker run -p 8501:8501 auditagent`).
+# Bakalocharto (Μπακαλοχαρτο) — container image for Render (Web Service,
+# runtime: docker). Render injects PORT at runtime; we bind Streamlit to it
+# (8501 fallback for local `docker run -p 8501:8501 bakalocharto`).
 
-FROM python:3.12-slim
+# Pinned to 3.11: the compiled wheels in requirements.txt (pydantic-core,
+# pyarrow, ...) are locked against cp311 — a newer interpreter would force
+# source builds / mismatched binaries (the exit-139 SIGSEGV crash).
+FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
