@@ -209,6 +209,21 @@ def find_user(username=None, email=None):
     return None
 
 
+def create_user(username, email, hashed_password):
+    """Create a Users row for the self-registration form (app.py).
+
+    Password arrives ALREADY hashed (passwords.hash_password) — plaintext
+    never reaches Airtable. SubscriptionStatus is deliberately left blank:
+    the fresh account logs straight into the paywall gateway, and the
+    Stripe webhook flips the row to "Active" after checkout. The caller is
+    responsible for uniqueness checks (find_user) before creating.
+    """
+    fields = {"Username": username, "Email": email,
+              "Password": hashed_password}
+    return _request("POST", AIRTABLE_USERS_TABLE,
+                    json={"fields": fields, "typecast": True})
+
+
 def set_reset_token(record_id, token, expiry_iso):
     """Store a password-reset code and its UTC expiry on one Users row.
 

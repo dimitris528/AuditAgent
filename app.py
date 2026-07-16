@@ -14,6 +14,9 @@ cached Airtable logic and the data-retention hooks are unchanged:
        "Ξέχασα τον κωδικό μου": email -> 6-digit code (smtplib/Gmail App
        Password) -> code + new password -> pbkdf2 hash written to Airtable
        (ResetToken / ResetTokenExpiry columns; 15-min TTL, 5 attempts).
+       "Εγγραφή εδώ": self-registration (Username/Email/Password) creates
+       the Users row with a hashed password and NO SubscriptionStatus, so
+       the first login lands on the paywall gateway for Stripe checkout.
     2. Executive dashboard: a merged header row — the Συνολικά έσοδα (soft
        green) and Συνολικά έξοδα (soft red) KPI cards are REAL clickable
        buttons; tapping one toggles its inline Amount/Date/Category/
@@ -440,6 +443,29 @@ a[data-testid="stBaseLinkButton-primary"]:hover {
 }
 button[kind="primary"]:active, a[data-testid="stBaseLinkButton-primary"]:active {
     transform: scale(.985);
+}
+/* Tertiary = text links ("🔑 Ξέχασα τον κωδικό μου", "📝 … Εγγραφή εδώ"):
+   no fill, no border, soft text that turns mint on hover. */
+button[kind="tertiary"] {
+    background: transparent !important; border: none !important;
+    color: var(--aud-text-soft) !important; font-weight: 500;
+    box-shadow: none !important;
+}
+button[kind="tertiary"]:hover {
+    color: var(--aud-accent) !important; background: transparent !important;
+}
+
+/* --- Script-carrier iframes ---------------------------------------------- */
+/* The localStorage session helpers and the sidebar auto-collapse listener
+   ride st.iframe(height=1); a blank iframe document paints WHITE against
+   the dark canvas — the "glitch sliver" at the top of the page. Hide their
+   whole element container: display:none iframes still load and execute
+   their <script>, which is the only reason they exist. */
+div[data-testid="stElementContainer"]:has(iframe[height="1"]) {
+    display: none;
+}
+iframe[height="1"] {  /* belt-and-braces if the container testid renames */
+    display: none;
 }
 
 /* --- Inputs ------------------------------------------------------------- */
@@ -968,15 +994,18 @@ def login_screen():
     st.markdown('<div class="aud-tagline">Οικονομικός έλεγχος για τη '
                 "σύγχρονη επιχείρηση</div>", unsafe_allow_html=True)
 
-    # "Ξέχασα τον κωδικό μου" replaces the login form while active.
+    # "Ξέχασα τον κωδικό μου" / "Εγγραφή" replace the login form while active.
     if st.session_state.get("reset_stage"):
         _password_reset_screen()
+        return
+    if st.session_state.get("show_register"):
+        _register_screen()
         return
 
     _, mid, _ = st.columns([1, 1.7, 1])
     with mid:
-        # Verdict left behind by a finished reset flow (success or lock-out).
-        flash = st.session_state.pop("reset_flash", None)
+        # Verdict left behind by a finished reset/registration flow.
+        flash = st.session_state.pop("login_flash", None)
         if flash:
             kind, text = flash
             (st.success if kind == "success" else st.error)(text)
@@ -997,6 +1026,10 @@ def login_screen():
         if st.button("🔑 Ξέχασα τον κωδικό μου", type="tertiary",
                      width="stretch"):
             st.session_state["reset_stage"] = "request"
+            st.rerun()
+        if st.button("📝 Δεν έχετε λογαριασμό; Εγγραφή εδώ", type="tertiary",
+                     width="stretch"):
+            st.session_state["show_register"] = True
             st.rerun()
     if submitted:
         username = username.strip()
@@ -1235,7 +1268,7 @@ def _reset_verify_form():
                      "δοκιμάστε ξανά σε λίγο.")
             return
         _clear_reset_state()
-        st.session_state["reset_flash"] = (
+        st.session_state["login_flash"] = (
             "success", "Ο κωδικός σας άλλαξε επιτυχώς! Μπορείτε να "
                        "συνδεθείτε.")
         st.rerun()
@@ -1251,12 +1284,83 @@ def _reset_verify_form():
             except db.AirtableError as exc:
                 print(f"[WARN] Reset token revoke failed for {email!r}: {exc}")
         _clear_reset_state()
-        st.session_state["reset_flash"] = (
+        st.session_state["login_flash"] = (
             "error", "Πολλές αποτυχημένες προσπάθειες — η επαναφορά "
                      "ακυρώθηκε. Ζητήστε νέο κωδικό επαλήθευσης.")
         st.rerun()
     st.error("❌ Λανθασμένος κωδικός επαλήθευσης "
              f"(προσπάθεια {attempts}/{_MAX_RESET_ATTEMPTS}).")
+
+
+# --------------------------------------------------------------------------
+# Self-registration ("Δεν έχετε λογαριασμό; Εγγραφή εδώ")
+# --------------------------------------------------------------------------
+def _register_screen():
+    """Create a Users row from the login card. The password is hashed
+    before it leaves the process (passwords.hash_password) and
+    SubscriptionStatus stays blank, so the new account lands on the paywall
+    gateway after its first login — Stripe checkout activates it there."""
+    _, mid, _ = st.columns([1, 1.7, 1])
+    with mid:
+        st.markdown("#### 📝 Δημιουργία Λογαριασμού")
+        st.caption("Το email χρειάζεται για την επαναφορά κωδικού και τις "
+                   "ειδοποιήσεις συνδρομής.")
+        with st.form("register"):
+            username = st.text_input(
+                "Όνομα Χρήστη (Username)", placeholder="π.χ. mystore",
+                help="3+ χαρακτήρες· λατινικά γράμματα, αριθμοί και . _ -")
+            email = st.text_input("Email", placeholder="you@example.com")
+            password = st.text_input(
+                "Κωδικός Πρόσβασης (Password)", type="password",
+                placeholder="••••••••",
+                help="Τουλάχιστον 6 χαρακτήρες.")
+            submitted = st.form_submit_button("Δημιουργία Λογαριασμού",
+                                              type="primary",
+                                              width="stretch")
+        if submitted:
+            _handle_registration(username, email, password)
+        if st.button("⬅️ Επιστροφή στη Σύνδεση", width="stretch"):
+            st.session_state.pop("show_register", None)
+            st.rerun()
+
+
+def _handle_registration(username, email, password):
+    username = username.strip()
+    email = email.strip()
+    password = password.strip()
+    # Username doubles as the tenant key inside Airtable formulas and the
+    # Stripe client_reference_id — keep it to a formula-safe alphabet.
+    if not re.fullmatch(r"[A-Za-z0-9._-]{3,32}", username):
+        st.error("Το Όνομα Χρήστη πρέπει να έχει 3–32 χαρακτήρες: λατινικά "
+                 "γράμματα, αριθμούς ή . _ - (χωρίς κενά).")
+        return
+    if "@" not in email:
+        st.error("Παρακαλώ εισάγετε ένα έγκυρο email.")
+        return
+    if len(password) < 6:
+        st.error("Ο κωδικός πρέπει να έχει τουλάχιστον 6 χαρακτήρες.")
+        return
+    try:
+        if db.find_user(username=username):
+            st.error("Το Όνομα Χρήστη χρησιμοποιείται ήδη. Επιλέξτε άλλο.")
+            return
+        # One row per email, or the password-reset lookup (find_user by
+        # email) would pick an arbitrary account.
+        if db.find_user(email=email):
+            st.error("Το email αντιστοιχεί ήδη σε λογαριασμό. Δοκιμάστε "
+                     "«Ξέχασα τον κωδικό μου».")
+            return
+        db.create_user(username, email, passwords.hash_password(password))
+    except db.AirtableError as exc:
+        print(f"[WARN] Registration failed for {username!r}: {exc}")
+        st.error("Η δημιουργία λογαριασμού απέτυχε προσωρινά. Παρακαλώ "
+                 "δοκιμάστε ξανά σε λίγο.")
+        return
+    st.session_state.pop("show_register", None)
+    st.session_state["login_flash"] = (
+        "success", "Ο λογαριασμός δημιουργήθηκε επιτυχώς! Συνδεθείτε με τα "
+                   "στοιχεία σας.")
+    st.rerun()
 
 
 def logout():
