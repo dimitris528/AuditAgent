@@ -732,6 +732,53 @@ div[class*="st-key-pay_card_"]:hover {
 .aud-pay-title { color: var(--aud-text); font-weight: 700; font-size: 1.05rem; margin-bottom: 4px; }
 .aud-pay-badge { color: var(--aud-accent-text); font-weight: 800; font-size: 1.3rem; margin-bottom: 8px; }
 .aud-pay-text { color: var(--aud-muted); font-size: .9rem; line-height: 1.6; margin-bottom: 4px; }
+
+/* --- Mobile: compact 2x2 KPI grid ------------------------------------------
+   On phones Streamlit stacks st.columns into ONE long full-width column, so
+   the four header cards (Έσοδα / Έξοδα / Καθαρό / Χρεωστούμενα) swallowed a
+   whole screen. Scope via :has() to ONLY the horizontal block that carries
+   the qe_card_ widgets and pin its columns to half width — a 2x2 grid —
+   then tighten the cards' padding and type. Colors, borders and radii keep
+   riding the same desktop rules (palette vars + fixed flow hexes), so
+   light/dark alignment is untouched. Both stColumn/column testids covered
+   for older Streamlit builds. */
+@media (max-width: 768px) {
+    div[data-testid="stHorizontalBlock"]:has(div[class*="st-key-qe_card_"]) {
+        flex-wrap: wrap !important; gap: 10px !important;
+    }
+    div[data-testid="stHorizontalBlock"]:has(div[class*="st-key-qe_card_"]) > div[data-testid="stColumn"],
+    div[data-testid="stHorizontalBlock"]:has(div[class*="st-key-qe_card_"]) > div[data-testid="column"] {
+        flex: 1 1 calc(50% - 5px) !important;
+        width: calc(50% - 5px) !important;
+        min-width: calc(50% - 5px) !important;
+        max-width: calc(50% - 5px) !important;
+    }
+    /* Compact cards: shorter, tighter, smaller type — the label stays on one
+       line so all four cards keep equal heights. */
+    div[class*="st-key-qe_card_"] button {
+        min-height: 68px; padding: 10px 12px; border-radius: 14px;
+    }
+    div[class*="st-key-qe_card_"] button p:first-of-type {
+        font-size: .72rem; margin-bottom: 3px; white-space: nowrap;
+    }
+    div[class*="st-key-qe_card_"] button p:last-of-type {
+        font-size: clamp(.95rem, 4.2vw, 1.2rem);
+    }
+    /* The static Καθαρό card mirrors the buttons' compact metrics. */
+    div[class*="st-key-qe_card_net"] .aud-kpi {
+        min-height: 68px; padding: 10px 12px; border-radius: 14px;
+    }
+    div[class*="st-key-qe_card_net"] .aud-kpi-label {
+        font-size: .72rem; margin-bottom: 3px; white-space: nowrap;
+    }
+    div[class*="st-key-qe_card_net"] .aud-kpi-value,
+    div[class*="st-key-qe_card_net"] .aud-kpi.accent .aud-kpi-value {
+        font-size: clamp(.95rem, 4.2vw, 1.2rem);
+    }
+    /* Static KPI rows elsewhere (recap totals) tighten to match. */
+    .aud-kpi-row { gap: 10px; }
+    .aud-kpi { padding: 12px 14px; border-radius: 14px; }
+}
 </style>
 """
 
@@ -870,12 +917,28 @@ def _closed_date(record):
 
 
 def _txn_date(record):
-    """A transaction's effective date: the Date field, else createdTime."""
-    raw = (record["fields"].get("Date") or record.get("createdTime") or "")[:10]
+    """A transaction's effective date as a datetime.date.
+
+    The Date column is a plain ISO day ("YYYY-MM-DD" — create_transaction
+    funnels every input through to_iso_date), so it parses directly and
+    compares cleanly against st.date_input values. Rows without a Date fall
+    back to Airtable's createdTime, a UTC timestamp: convert it to LOCAL
+    time BEFORE taking the date, otherwise an entry keyed in near midnight
+    lands on the neighbouring day and silently falls out of month/quarter
+    boundaries in the recap filter.
+    """
+    raw = (record["fields"].get("Date") or "")[:10]
+    if raw:
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            return None
+    created = record.get("createdTime") or ""
     try:
-        return date.fromisoformat(raw) if raw else None
+        stamp = datetime.fromisoformat(created.replace("Z", "+00:00"))
     except ValueError:
         return None
+    return stamp.astimezone().date()
 
 
 def _extract_uploaded_invoice(uploaded):
@@ -1952,8 +2015,8 @@ def _kpi_entry_row(username, category_names, total_rev, total_exp, net,
     below; opening one closes the others), the static Καθαρό card whose
     palette follows the sign of the value, and the ALWAYS-yellow
     Χρεωστούμενα card-button right next to it (tap toggles the debts
-    panel). Equal quarters; on narrow phones Streamlit stacks the columns,
-    matching how the old flex row wrapped."""
+    panel). Equal quarters; on narrow phones the mobile media query in _CSS
+    reflows the four columns into a compact 2x2 grid."""
     col_rev, col_exp, col_net, col_debt = st.columns(4)
     with col_rev:
         st.button(f"Συνολικά έσοδα\n\n{_money(total_rev)}",
@@ -2029,8 +2092,11 @@ def dashboard_tab(username):
         _empty_state("Δεν υπάρχουν ενεργές κατηγορίες ακόμη — πατήστε "
                      "«Συνολικά έσοδα» ή «Συνολικά έξοδα» και επιλέξτε "
                      "«➕ Δημιουργία Νέας Κατηγορίας...» για να ξεκινήσετε.")
-    total_rev = sum(t[0] for t in totals)
-    total_exp = sum(t[1] for t in totals)
+    # Header totals come from the transactions THEMSELVES: summing the
+    # per-active-category tuples silently dropped every row whose Category
+    # no longer matches an active project (archived, renamed, or free-typed),
+    # leaving the cards showing only a fraction of the real money.
+    total_exp, total_rev = _sum_by_type(regular)
     net = total_rev - total_exp
     total_debt = sum(_amount(d) for d in debts)
     # Merged header: the Έσοδα/Έξοδα/Χρεωστούμενα cards ARE the quick-entry
@@ -2293,12 +2359,13 @@ def _delete_txn_control(record_id):
             st.rerun()
 
 
-def _period_transactions_section(transactions, start, end):
-    """List the period's individual transactions, each with a delete control."""
-    period = sorted(
-        (t for t in transactions if (d := _txn_date(t)) and start <= d <= end),
-        key=_txn_date, reverse=True,
-    )
+def _period_transactions_section(period_txns):
+    """List the period's individual transactions, each with a delete control.
+
+    Receives the ALREADY date-filtered period scope built in recap_tab — the
+    same list the summary table and KPI totals sum — so the rows shown here
+    always add up to exactly the figures above them."""
+    period = sorted(period_txns, key=_txn_date, reverse=True)
     _section(f"Κινήσεις περιόδου ({len(period)})")
     if not period:
         _empty_state("Δεν υπάρχουν κινήσεις στην επιλεγμένη περίοδο.")
@@ -2340,8 +2407,9 @@ def recap_tab(username):
     if flash:
         st.success(flash)
     st.markdown(
-        f'<div class="aud-upload-hint">Αρχειοθετημένες κατηγορίες και τα '
-        f"αποτελέσματά τους. Δεδομένα παλαιότερα των {RETENTION_YEARS} ετών διαγράφονται "
+        f'<div class="aud-upload-hint">Συγκεντρωτικά έσοδα και έξοδα ανά '
+        f"κατηγορία για την περίοδο που επιλέγετε. Δεδομένα "
+        f"παλαιότερα των {RETENTION_YEARS} ετών διαγράφονται "
         f"αυτόματα, οπότε η ανασκόπηση καλύπτει έως τα τελευταία "
         f"{RETENTION_YEARS} έτη.</div>",
         unsafe_allow_html=True,
@@ -2386,28 +2454,42 @@ def recap_tab(username):
     # Outstanding debts stay off the recap analytics: they aren't revenue
     # (yet) — once resolved, their Type flips to "Έσοδο" and they show here.
     transactions, _debts = _split_debts(transactions)
-    grouped = _transactions_by_category(transactions)
+    # ONE period scope feeds everything below — the summary table, the KPI
+    # totals and the Κινήσεις list — so the three can never disagree. The
+    # old flow summed the LIFETIME totals of categories archived INSIDE the
+    # range instead: entries living in active (or long-archived) categories
+    # were dropped, so the cards showed a fraction of what the list summed.
+    period_txns = [t for t in transactions
+                   if (d := _txn_date(t)) and start <= d <= end]
+    grouped = _transactions_by_category(period_txns)
+    # Latest archive date per category name, for the table's second column.
+    closed_by_key = {}
+    for proj in completed:
+        key = (proj["fields"].get("Name") or "").strip().lower()
+        closed_day = _closed_date(proj)
+        if closed_day and closed_day >= (closed_by_key.get(key) or date.min):
+            closed_by_key[key] = closed_day
 
-    selected = [p for p in completed
-                if (d := _closed_date(p)) and start <= d <= end]
-    if not selected:
-        _empty_state(f"Δεν αρχειοθετήθηκαν κατηγορίες μεταξύ "
+    if not period_txns:
+        _empty_state(f"Δεν υπάρχουν κινήσεις μεταξύ "
                      f"{start.strftime('%d/%m/%Y')} και {end.strftime('%d/%m/%Y')}.")
     else:
-        total_rev = total_exp = 0.0
         rows = []
-        for proj in sorted(selected, key=lambda p: _closed_date(p)):
-            name = proj["fields"].get("Name") or "—"
-            rev, exp, net = _project_financials(name, grouped)
-            total_rev += rev
-            total_exp += exp
+        for key in sorted(grouped):
+            txns = grouped[key]
+            exp, rev = _sum_by_type(txns)
+            name = next((t["fields"].get("Category") for t in txns
+                         if t["fields"].get("Category")), "—")
+            closed_day = closed_by_key.get(key)
             rows.append({
                 "Κατηγορία": name,
-                "Αρχειοθετήθηκε": _closed_date(proj).strftime("%d/%m/%Y"),
+                "Αρχειοθετήθηκε": (closed_day.strftime("%d/%m/%Y")
+                                   if closed_day else "Ενεργή"),
                 "Έσοδα": _money(rev),
                 "Έξοδα": _money(exp),
-                "Καθαρό": _money(net),
+                "Καθαρό": _money(rev - exp),
             })
+        total_exp, total_rev = _sum_by_type(period_txns)
 
         # A plain HTML table instead of st.dataframe: the dataframe paints
         # its cells on a <canvas> from the NATIVE (dark) theme and ignores
@@ -2434,7 +2516,7 @@ def recap_tab(username):
             ("Καθαρό κέρδος", _money(net), _net_kind(net)),
         ])
 
-    _period_transactions_section(transactions, start, end)
+    _period_transactions_section(period_txns)
 
 
 # --------------------------------------------------------------------------
