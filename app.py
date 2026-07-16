@@ -897,8 +897,7 @@ def logout():
                 "subscription_verified", "subscription_status",
                 "confirm_close", "flash", "confirm_delete_txn", "flash_recap",
                 "flash_toast", "flash_toast_alert", "nav_page",
-                "_last_nav_page", "show_archived",
-                "show_income_form", "show_expense_form"):
+                "show_archived", "show_income_form", "show_expense_form"):
         st.session_state.pop(key, None)
     st.rerun()
 
@@ -1683,6 +1682,9 @@ def _render_sidebar(username):
             _section("Πλοήγηση")
             st.radio("Πλοήγηση", PAGES, key="nav_page",
                      label_visibility="collapsed")
+            # Every nav tap auto-closes the sidebar on ALL devices (the
+            # listener installs once per page load; see the docstring).
+            _install_sidebar_autocollapse()
             _section("Ρυθμίσεις")
         # ON = 🌙 dark (default). Changing it reruns the script; _inject_css
         # reads the new value from session_state at the top of the rerun.
@@ -1702,34 +1704,67 @@ def _render_sidebar(username):
             st.rerun()
 
 
-def _auto_collapse_sidebar():
-    """One-shot JS fired right after a sidebar navigation change: on phone
-    widths the sidebar is a full-screen overlay, so tap the native collapse
-    control for the user instead of making them close it by hand.
+def _install_sidebar_autocollapse():
+    """Global listener: ANY tap on a nav_page menu option closes the sidebar
+    on EVERY device — phones, laptops, desktops — for every page change:
+    Πίνακας Ελέγχου, Καταχώρηση, Ανασκόπηση and Πληρωμές alike. (There is
+    deliberately NO viewport-width gate; the user reopens the sidebar any
+    time via the native expand arrow, which the CSS always keeps visible.)
+
+    Why a persistent listener instead of a one-shot script per nav change:
+    Streamlit's React frontend only executes an iframe's script when the
+    iframe MOUNTS. A rerun that re-renders byte-identical HTML at the same
+    tree position reuses the existing DOM node, so a "fire once after this
+    rerun" snippet runs on the first navigation and then never again. This
+    listener is therefore installed ONCE per browser page load (guarded by a
+    flag on the parent window), delegated on the parent document — where it
+    survives every rerun/re-render — and reacts to both click (capture
+    phase, since Streamlit widgets stop propagation) and change (keyboard
+    radio navigation) events.
 
     st.markdown strips <script>, so this rides st.iframe (the successor of
     components.v1.html, deprecated in Streamlit 1.58) and reaches the app
-    through window.parent. Docked (desktop) widths are left alone:
-    auto-closing there would be hostile. The selector list covers every
-    testid Streamlit has used for the collapse control (same set the CSS
-    keeps visible)."""
+    through window.parent. The selector list covers every testid Streamlit
+    has used for the collapse control (same set the CSS keeps visible)."""
     st.iframe(
         """
         <script>
         (function () {
             const root = window.parent;
-            if (root.innerWidth > 768) return;  // desktop: sidebar is docked
+            if (root.__audNavAutoCollapse) return;  // once per page load
+            root.__audNavAutoCollapse = true;
             const doc = root.document;
-            const sidebar = doc.querySelector('[data-testid="stSidebar"]');
-            if (!sidebar || sidebar.getAttribute('aria-expanded') === 'false') {
-                return;
+
+            function collapseSidebar() {
+                // No width gate: collapse on all devices, desktop included.
+                setTimeout(function () {
+                    const sidebar = doc.querySelector('[data-testid="stSidebar"]');
+                    if (!sidebar ||
+                        sidebar.getAttribute('aria-expanded') === 'false') {
+                        return;
+                    }
+                    const btn = sidebar.querySelector(
+                        '[data-testid="stSidebarCollapseButton"] button,' +
+                        '[data-testid="stSidebarCollapse"] button,' +
+                        '[data-testid="stSidebarHeader"] button,' +
+                        'button[kind="headerNoPadding"]');
+                    if (btn) { btn.click(); }
+                }, 150);
             }
-            const btn = sidebar.querySelector(
-                '[data-testid="stSidebarCollapseButton"] button,' +
-                '[data-testid="stSidebarCollapse"] button,' +
-                '[data-testid="stSidebarHeader"] button,' +
-                'button[kind="headerNoPadding"]');
-            if (btn) { setTimeout(function () { btn.click(); }, 120); }
+
+            function isNavOption(target) {
+                return target instanceof root.Element &&
+                    target.closest('[class*="st-key-nav_page"]') !== null;
+            }
+
+            // Delegated on the document: keeps working no matter how often
+            // Streamlit swaps the sidebar's inner DOM between reruns.
+            doc.addEventListener('click', function (ev) {
+                if (isNavOption(ev.target)) { collapseSidebar(); }
+            }, true);
+            doc.addEventListener('change', function (ev) {
+                if (isNavOption(ev.target)) { collapseSidebar(); }
+            }, true);
         })();
         </script>
         """,
@@ -1769,12 +1804,6 @@ def main():
     # widget in _render_sidebar owns "nav_page"; before its first paint the
     # key is absent, so default to the dashboard).
     page = st.session_state.get("nav_page", PAGE_DASHBOARD)
-    # Mobile UX: when this rerun was caused by picking a DIFFERENT page in
-    # the sidebar menu, auto-close the sidebar overlay so the new page is
-    # immediately visible. First paint (no previous page) never fires it.
-    if st.session_state.get("_last_nav_page") not in (None, page):
-        _auto_collapse_sidebar()
-    st.session_state["_last_nav_page"] = page
     if page == PAGE_UPLOAD:
         upload_tab(username)
     elif page == PAGE_RECAP:
