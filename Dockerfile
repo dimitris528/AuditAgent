@@ -23,4 +23,12 @@ USER appuser
 EXPOSE 8501
 
 # Shell form on purpose: ${PORT:-8501} needs shell expansion.
-CMD streamlit run app.py --server.port=${PORT:-8501} --server.address=0.0.0.0 --server.headless=true
+# The CORS/XSRF/compression flags mirror .streamlit/config.toml so the
+# stability settings hold even if the config file is missing from the image.
+CMD streamlit run app.py \
+    --server.port=${PORT:-8501} \
+    --server.address=0.0.0.0 \
+    --server.headless=true \
+    --server.enableCORS=false \
+    --server.enableXsrfProtection=false \
+    --server.enableWebsocketCompression=false

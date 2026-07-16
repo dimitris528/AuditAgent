@@ -1,3 +1,13 @@
+# Production stability behind Render's proxy: Render terminates TLS and
+# proxies the WebSocket, so Streamlit's own CORS/XSRF checks and per-message
+# compression cause spurious "Connection lost" drops — the proxy is the
+# security boundary here.
+[server]
+enableCORS = false
+enableXsrfProtection = false
+enableWebsocketCompression = false
+headless = true
+
 # Native Streamlit theme — keeps BaseWeb widgets (dropdown popovers, date
 # picker, dataframe) on-palette where CSS injection can't reach.
 [theme]
