@@ -7,7 +7,13 @@ cached Airtable logic and the data-retention hooks are unchanged:
        Users table in ONE Airtable round-trip). The subscription verdict is
        cached in st.session_state and re-verified only on "Ανανέωση" or after
        a browser refresh. Logins survive refreshes via a server-side token
-       store mirrored into the ?session= query param (see _session_store).
+       store mirrored into the ?session= query param AND into the browser's
+       localStorage, so even a WebSocket reconnect that lands with empty
+       session_state and no query param self-heals (see _session_store /
+       _sync_browser_session). Explicit logout wipes every copy.
+       "Ξέχασα τον κωδικό μου": email -> 6-digit code (smtplib/Gmail App
+       Password) -> code + new password -> pbkdf2 hash written to Airtable
+       (ResetToken / ResetTokenExpiry columns; 15-min TTL, 5 attempts).
     2. Executive dashboard: a merged header row — the Συνολικά έσοδα (soft
        green) and Συνολικά έξοδα (soft red) KPI cards are REAL clickable
        buttons; tapping one toggles its inline Amount/Date/Category/
@@ -71,17 +77,22 @@ Run with:   streamlit run app.py
 import difflib
 import hashlib
 import html
+import json
 import os
 import re
 import secrets
+import smtplib
 import tempfile
 import time
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
+from email.message import EmailMessage
 
 import streamlit as st
 
 import airtable_client as db
+import passwords
 from airtable_client import _subtract_years
+from config import SMTP_EMAIL, SMTP_HOST, SMTP_PASSWORD, SMTP_PORT
 from auditor import HIGH_EXPENSE_THRESHOLD, _parse_amount
 from extractor import extract_invoice_data
 
@@ -90,6 +101,8 @@ UPLOAD_TYPES = ["pdf", "jpg", "jpeg", "png", "webp"]
 # A login survives browser refreshes for this long (sliding window, renewed
 # on every restored page load).
 SESSION_TTL_SECONDS = 12 * 3600
+# A password-reset code emailed by "Ξέχασα τον κωδικό μου" is valid this long.
+RESET_CODE_TTL_MINUTES = 15
 
 st.set_page_config(
     page_title="AuditAgent.ai",
@@ -769,6 +782,15 @@ def _empty_state(text):
 # as ?session=…; the refreshed page finds the token in its query params and
 # silently re-hydrates st.session_state. Only the unguessable token ever
 # appears in the URL — never the username or password.
+#
+# Second safety net: the token is ALSO mirrored into the browser's
+# localStorage (_persist_browser_session). Rapid navigation clicks can drop
+# the WebSocket; Streamlit then reconnects with a brand-new empty
+# st.session_state, and if the ?session= param didn't survive the reconnect
+# the user used to be dumped on the login screen. Now the login screen first
+# checks localStorage (_sync_browser_session): if a token is stored there,
+# a tiny script reloads the page with ?session=<token> re-attached and the
+# server-side restore takes over. Explicit logout wipes BOTH stores.
 @st.cache_resource(show_spinner=False)
 def _session_store():
     """Server-side {token: {"username", "expires"}} map, shared across
@@ -807,8 +829,12 @@ def _restore_session():
     now = time.time()
     if not entry or entry["expires"] < now:
         # Expired or revoked — drop the dead token so login starts clean.
+        # The flag makes _sync_browser_session wipe the localStorage copy
+        # too, otherwise it would keep reloading the page with this same
+        # dead token forever.
         _session_store().pop(token, None)
         del st.query_params["session"]
+        st.session_state["_browser_session_dead"] = True
         return
     entry["expires"] = now + SESSION_TTL_SECONDS  # sliding renewal
     st.session_state["username"] = entry["username"]
@@ -817,23 +843,123 @@ def _restore_session():
     # it once against Airtable, so a refresh can't outlive a cancelled plan.
 
 
+# The localStorage key holding the session token, and a sessionStorage
+# marker that stops the restore script from reload-looping on a token the
+# server keeps rejecting (e.g. after a server restart emptied the store).
+_LS_TOKEN_KEY = "aud_session_token"
+_SS_ATTEMPT_KEY = "aud_restore_attempted"
+
+
+def _persist_browser_session():
+    """Mirror the live token into localStorage (runs on every logged-in
+    render). st.iframe scripts only execute when the iframe MOUNTS (see
+    _install_sidebar_autocollapse), which is exactly enough here: a fresh
+    page load or a post-login rerun mounts it once, and re-writing the same
+    token on later reruns would be a no-op anyway. Also re-arms the restore
+    guard so a future reconnect may try this token."""
+    token = st.session_state.get("session_token")
+    if not token:
+        return
+    st.session_state.pop("_browser_session_dead", None)
+    st.iframe(
+        f"""
+        <script>
+        (function () {{
+            try {{
+                window.parent.localStorage.setItem(
+                    {json.dumps(_LS_TOKEN_KEY)}, {json.dumps(token)});
+                window.parent.sessionStorage.removeItem(
+                    {json.dumps(_SS_ATTEMPT_KEY)});
+            }} catch (e) {{}}
+        }})();
+        </script>
+        """,
+        height=1,
+    )
+
+
+def _clear_browser_session_script():
+    st.iframe(
+        f"""
+        <script>
+        (function () {{
+            try {{
+                window.parent.localStorage.removeItem({json.dumps(_LS_TOKEN_KEY)});
+                window.parent.sessionStorage.removeItem({json.dumps(_SS_ATTEMPT_KEY)});
+            }} catch (e) {{}}
+        }})();
+        </script>
+        """,
+        height=1,
+    )
+
+
+def _sync_browser_session():
+    """Runs just before the login screen renders (i.e. st.session_state has
+    no username). Two jobs:
+
+    1. If the user explicitly logged out, or the URL carried a token the
+       server rejected, wipe the localStorage copy so it can't resurrect
+       the session.
+    2. Otherwise, if the browser still remembers a token — the case where a
+       rapid-click WebSocket reconnect handed us a brand-new empty
+       st.session_state — reload the page with ?session=<token> attached so
+       _restore_session hydrates it, instead of showing the login screen.
+       The sessionStorage marker guarantees at most ONE reload attempt per
+       token per tab, so a dead token can never loop."""
+    if (st.session_state.pop("_clear_browser_session", None)
+            or st.session_state.get("_browser_session_dead")):
+        _clear_browser_session_script()
+        return
+    st.iframe(
+        f"""
+        <script>
+        (function () {{
+            try {{
+                const root = window.parent;
+                const token = root.localStorage.getItem({json.dumps(_LS_TOKEN_KEY)});
+                if (!token) return;
+                if (root.sessionStorage.getItem({json.dumps(_SS_ATTEMPT_KEY)}) === token) return;
+                root.sessionStorage.setItem({json.dumps(_SS_ATTEMPT_KEY)}, token);
+                const url = new URL(root.location.href);
+                url.searchParams.set("session", token);
+                root.location.replace(url.toString());
+            }} catch (e) {{}}
+        }})();
+        </script>
+        """,
+        height=1,
+    )
+
+
 # --------------------------------------------------------------------------
 # Login (tenant context + password check)
 # --------------------------------------------------------------------------
 def _password_matches(stored, typed):
     """Compare the Users-table Password column against the typed password.
 
-    The column may be Text or Number in Airtable; a numeric cell comes back
-    as int/float, so both sides are normalized to a string. Comparison is
-    case-sensitive. An empty or missing stored password never matches
-    (fail closed).
+    Two accepted cell formats:
+      - pbkdf2_sha256$… hash (passwords.py) — the typed password is hashed
+        with the cell's own salt/iterations and the digests are compared.
+      - Legacy plaintext — direct comparison, kept so pre-hashing accounts
+        still log in; login_screen rewrites the cell as a hash right after.
+    Both comparisons are constant-time. The column may be Text or Number in
+    Airtable; a numeric cell comes back as int/float, so it is normalized to
+    a string. Comparison is case-sensitive. An empty or missing stored
+    password never matches (fail closed).
     """
     if stored is None:
         return False
     if isinstance(stored, float) and stored.is_integer():
         stored = int(stored)
     stored = str(stored).strip()
-    return bool(stored) and stored == typed.strip()
+    typed = typed.strip()
+    if not stored:
+        return False
+    if passwords.is_hashed(stored):
+        return passwords.verify_password(stored, typed)
+    return secrets.compare_digest(stored.encode("utf-8"),
+                                  typed.encode("utf-8"))
 
 
 def login_screen():
@@ -842,8 +968,18 @@ def login_screen():
     st.markdown('<div class="aud-tagline">Οικονομικός έλεγχος για τη '
                 "σύγχρονη επιχείρηση</div>", unsafe_allow_html=True)
 
+    # "Ξέχασα τον κωδικό μου" replaces the login form while active.
+    if st.session_state.get("reset_stage"):
+        _password_reset_screen()
+        return
+
     _, mid, _ = st.columns([1, 1.7, 1])
     with mid:
+        # Verdict left behind by a finished reset flow (success or lock-out).
+        flash = st.session_state.pop("reset_flash", None)
+        if flash:
+            kind, text = flash
+            (st.success if kind == "success" else st.error)(text)
         with st.form("login"):
             username = st.text_input(
                 "Όνομα Χρήστη (Username)",
@@ -858,6 +994,10 @@ def login_screen():
             )
             submitted = st.form_submit_button("Σύνδεση", type="primary",
                                               width="stretch")
+        if st.button("🔑 Ξέχασα τον κωδικό μου", type="tertiary",
+                     width="stretch"):
+            st.session_state["reset_stage"] = "request"
+            st.rerun()
     if submitted:
         username = username.strip()
         password = password.strip()
@@ -867,16 +1007,29 @@ def login_screen():
                          "Κωδικό Πρόσβασης.")
                 return
             try:
-                record = db.get_user_record(username)
+                user = db.find_user(username=username)
             except db.AirtableError as exc:
                 print(f"[WARN] Login lookup failed for {username!r}: {exc}")
                 st.error("Ο έλεγχος του λογαριασμού σας απέτυχε προσωρινά. "
                          "Παρακαλώ δοκιμάστε ξανά σε λίγο.")
                 return
-            if record is None or not _password_matches(record.get("Password"), password):
+            record = user["fields"] if user else {}
+            if user is None or not _password_matches(record.get("Password"), password):
                 st.error("❌ Το Όνομα Χρήστη ή ο Κωδικός Πρόσβασης είναι "
                          "εσφαλμένα.")
                 return
+        # Transparent migration: a legacy plaintext Password cell that just
+        # verified is rewritten as its pbkdf2_sha256 hash, so the plaintext
+        # disappears from Airtable on each account's first login. Best
+        # effort — a failed write (offline, Number-typed column) only logs;
+        # the login proceeds and migration retries next time.
+        if not passwords.is_hashed(str(record.get("Password") or "")):
+            try:
+                db.update_user_password(user["id"],
+                                        passwords.hash_password(password))
+            except db.AirtableError as exc:
+                print(f"[WARN] Password hash migration failed for "
+                      f"{username!r}: {exc}")
         # Credentials verified — reuse the same Users row for the
         # subscription verdict so login stays a single Airtable call, and
         # mint the refresh-survival token (see _session_store above).
@@ -885,6 +1038,225 @@ def login_screen():
         st.session_state["subscription_verified"] = True
         st.session_state["subscription_status"] = record.get("SubscriptionStatus")
         st.rerun()
+
+
+# --------------------------------------------------------------------------
+# Password reset ("Ξέχασα τον κωδικό μου")
+# --------------------------------------------------------------------------
+# Two-stage flow on the login screen, backed by the Users columns ResetToken
+# (6-digit code) + ResetTokenExpiry (UTC ISO). Stage "request": type the
+# account Email -> a code is written to the row and emailed via smtplib
+# (Gmail App Password, see config.py). Stage "verify": type the code + the
+# new password -> on match-and-not-expired the Password cell gets the
+# pbkdf2 hash and both reset columns are cleared. Anti-enumeration: an
+# unknown email shows the exact same "code sent" message and the same
+# failing verify form. Anti-brute-force: 5 wrong codes revoke the token.
+_MAX_RESET_ATTEMPTS = 5
+_RESET_STATE_KEYS = ("reset_stage", "reset_email", "reset_record_id",
+                     "reset_attempts")
+
+
+def _clear_reset_state():
+    for key in _RESET_STATE_KEYS:
+        st.session_state.pop(key, None)
+
+
+def _send_reset_email(to_addr, code):
+    """Email the 6-digit code with stdlib smtplib (implicit-TLS Gmail)."""
+    if not SMTP_EMAIL or not SMTP_PASSWORD:
+        raise RuntimeError(
+            "SMTP_EMAIL / SMTP_PASSWORD are not configured — password-reset "
+            "emails cannot be sent (see config.py)."
+        )
+    msg = EmailMessage()
+    msg["Subject"] = "AuditAgent.ai — Επαναφορά κωδικού πρόσβασης"
+    msg["From"] = SMTP_EMAIL
+    msg["To"] = to_addr
+    msg.set_content(
+        "Γεια σας,\n\n"
+        "Ζητήθηκε επαναφορά κωδικού για τον λογαριασμό σας στο "
+        "AuditAgent.ai.\n\n"
+        f"Κωδικός επαλήθευσης: {code}\n\n"
+        f"Ο κωδικός ισχύει για {RESET_CODE_TTL_MINUTES} λεπτά. Αν δεν "
+        "ζητήσατε εσείς την επαναφορά, αγνοήστε αυτό το μήνυμα — ο κωδικός "
+        "πρόσβασής σας δεν έχει αλλάξει.\n\n"
+        "AuditAgent.ai"
+    )
+    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=20) as smtp:
+        smtp.login(SMTP_EMAIL, SMTP_PASSWORD)
+        smtp.send_message(msg)
+
+
+def _normalize_reset_token(value):
+    """Airtable may hand the stored code back as int/float (Number-typed
+    column, which drops leading zeros) — zero-pad back to 6 digits."""
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    if isinstance(value, int):
+        return str(value).zfill(6)
+    return str(value).strip()
+
+
+def _parse_reset_expiry(value):
+    """UTC datetime from the ResetTokenExpiry cell, or None when unusable
+    (missing/garbled -> the caller treats it as expired: fail closed)."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _password_reset_screen():
+    _, mid, _ = st.columns([1, 1.7, 1])
+    with mid:
+        if st.session_state.get("reset_stage") == "verify":
+            _reset_verify_form()
+        else:
+            _reset_request_form()
+        if st.button("← Επιστροφή στη σύνδεση", width="stretch"):
+            _clear_reset_state()
+            st.rerun()
+
+
+def _reset_request_form():
+    st.markdown("#### 🔑 Επαναφορά κωδικού")
+    st.caption("Εισάγετε το email του λογαριασμού σας και θα σας στείλουμε "
+               "έναν 6-ψήφιο κωδικό επαλήθευσης.")
+    with st.form("reset_request"):
+        email = st.text_input("Email", placeholder="you@example.com")
+        submitted = st.form_submit_button("Αποστολή κωδικού επαλήθευσης",
+                                          type="primary", width="stretch")
+    if not submitted:
+        return
+    email = email.strip()
+    if "@" not in email:
+        st.error("Παρακαλώ εισάγετε ένα έγκυρο email.")
+        return
+    try:
+        user = db.find_user(email=email)
+    except db.AirtableError as exc:
+        print(f"[WARN] Reset lookup failed for {email!r}: {exc}")
+        st.error("Ο έλεγχος απέτυχε προσωρινά. Παρακαλώ δοκιμάστε ξανά "
+                 "σε λίγο.")
+        return
+    record_id = None
+    if user:
+        # secrets.randbelow: crypto-grade; zero-padded so "042153" works.
+        code = f"{secrets.randbelow(10**6):06d}"
+        expiry = (datetime.now(timezone.utc)
+                  + timedelta(minutes=RESET_CODE_TTL_MINUTES))
+        try:
+            db.set_reset_token(user["id"], code,
+                               expiry.strftime("%Y-%m-%dT%H:%M:%SZ"))
+            _send_reset_email(email, code)
+        except (db.AirtableError, RuntimeError, OSError) as exc:
+            # OSError covers every smtplib/socket failure. The token may
+            # already be written; it just expires unused.
+            print(f"[WARN] Reset code delivery failed for {email!r}: {exc}")
+            st.error("Η αποστολή του email απέτυχε προσωρινά. Παρακαλώ "
+                     "δοκιμάστε ξανά σε λίγο.")
+            return
+        record_id = user["id"]
+    # Unknown email falls through to the SAME message and the SAME verify
+    # form (which can only fail) — outsiders can't probe which emails have
+    # accounts. Only the server-side session knows whether a row matched.
+    st.session_state["reset_stage"] = "verify"
+    st.session_state["reset_email"] = email
+    st.session_state["reset_record_id"] = record_id
+    st.session_state["reset_attempts"] = 0
+    st.rerun()
+
+
+def _reset_verify_form():
+    email = st.session_state.get("reset_email", "")
+    st.markdown("#### 🔑 Επαλήθευση")
+    st.caption(f"Αν το **{email}** αντιστοιχεί σε λογαριασμό, του στείλαμε "
+               f"έναν 6-ψήφιο κωδικό (ισχύει {RESET_CODE_TTL_MINUTES} "
+               "λεπτά). Ελέγξτε και τον φάκελο Ανεπιθύμητα (Spam).")
+    with st.form("reset_verify"):
+        code = st.text_input("Κωδικός επαλήθευσης (6 ψηφία)", max_chars=6,
+                             placeholder="123456")
+        new_pw = st.text_input("Νέος Κωδικός Πρόσβασης", type="password",
+                               placeholder="••••••••")
+        submitted = st.form_submit_button("Αλλαγή Κωδικού", type="primary",
+                                          width="stretch")
+    if not submitted:
+        return
+    code = code.strip()
+    new_pw = new_pw.strip()
+    if not re.fullmatch(r"\d{6}", code):
+        st.error("Ο κωδικός επαλήθευσης αποτελείται από 6 ψηφία.")
+        return
+    if len(new_pw) < 6:
+        st.error("Ο νέος κωδικός πρέπει να έχει τουλάχιστον 6 χαρακτήρες.")
+        return
+
+    # Re-read the row fresh so we verify against what's in Airtable NOW —
+    # never against anything cached client-side. record_id is None for an
+    # unknown email; fields stays empty and verification simply fails.
+    record_id = st.session_state.get("reset_record_id")
+    fields = {}
+    if record_id:
+        try:
+            user = db.find_user(email=email)
+        except db.AirtableError as exc:
+            print(f"[WARN] Reset verify lookup failed for {email!r}: {exc}")
+            st.error("Ο έλεγχος απέτυχε προσωρινά. Παρακαλώ δοκιμάστε ξανά "
+                     "σε λίγο.")
+            return
+        if user and user["id"] == record_id:
+            fields = user["fields"]
+
+    stored = fields.get("ResetToken")
+    code_matches = stored is not None and secrets.compare_digest(
+        _normalize_reset_token(stored), code)
+
+    if code_matches:
+        expiry = _parse_reset_expiry(fields.get("ResetTokenExpiry"))
+        if expiry is None or expiry < datetime.now(timezone.utc):
+            try:
+                db.clear_reset_token(record_id)
+            except db.AirtableError:
+                pass  # already unusable; it stays expired either way
+            st.error("Ο κωδικός επαλήθευσης έληξε. Πατήστε «Επιστροφή στη "
+                     "σύνδεση» και ζητήστε νέο κωδικό.")
+            return
+        try:
+            db.complete_password_reset(
+                record_id, passwords.hash_password(new_pw))
+        except db.AirtableError as exc:
+            print(f"[WARN] Password reset write failed for {email!r}: {exc}")
+            st.error("Η αλλαγή του κωδικού απέτυχε προσωρινά. Παρακαλώ "
+                     "δοκιμάστε ξανά σε λίγο.")
+            return
+        _clear_reset_state()
+        st.session_state["reset_flash"] = (
+            "success", "Ο κωδικός σας άλλαξε επιτυχώς! Μπορείτε να "
+                       "συνδεθείτε.")
+        st.rerun()
+
+    # Wrong code (or unknown email): count the attempt; the 5th revokes the
+    # token so the 6-digit space can't be brute-forced through the form.
+    attempts = st.session_state.get("reset_attempts", 0) + 1
+    st.session_state["reset_attempts"] = attempts
+    if attempts >= _MAX_RESET_ATTEMPTS:
+        if record_id:
+            try:
+                db.clear_reset_token(record_id)
+            except db.AirtableError as exc:
+                print(f"[WARN] Reset token revoke failed for {email!r}: {exc}")
+        _clear_reset_state()
+        st.session_state["reset_flash"] = (
+            "error", "Πολλές αποτυχημένες προσπάθειες — η επαναφορά "
+                     "ακυρώθηκε. Ζητήστε νέο κωδικό επαλήθευσης.")
+        st.rerun()
+    st.error("❌ Λανθασμένος κωδικός επαλήθευσης "
+             f"(προσπάθεια {attempts}/{_MAX_RESET_ATTEMPTS}).")
 
 
 def logout():
@@ -899,6 +1271,10 @@ def logout():
                 "flash_toast", "flash_toast_alert", "nav_page",
                 "show_archived", "show_income_form", "show_expense_form"):
         st.session_state.pop(key, None)
+    # The localStorage wipe can't happen here: an iframe injected right
+    # before st.rerun() never gets to execute its script. The flag makes
+    # _sync_browser_session emit the wipe on the login render that follows.
+    st.session_state["_clear_browser_session"] = True
     st.rerun()
 
 
@@ -1792,8 +2168,15 @@ def main():
     _render_sidebar(username)
 
     if not username:
+        # May reload the page with ?session= restored from localStorage
+        # instead of leaving the user on the login screen (rapid-click
+        # WebSocket reconnects arrive here with empty session_state).
+        _sync_browser_session()
         login_screen()
         return
+
+    # Logged in: keep the localStorage mirror of the token fresh.
+    _persist_browser_session()
 
     if not subscription_gate(username):
         return

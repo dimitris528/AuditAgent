@@ -33,12 +33,26 @@ Required Airtable schema (create these in your base before running the app):
 
   Users table  (env AIRTABLE_USERS_TABLE, default "Users")
       Username            Single line text  - tenant key (login name)
-      Password            Text              - login password for this user
+      Password            Text              - pbkdf2_sha256$… hash of the
+                                              login password (passwords.py);
+                                              legacy plaintext cells still
+                                              verify and are rewritten as
+                                              hashes on first login
       SubscriptionStatus  Single select     - options: "Active", "Expired"
-      Email               Single line text  - OPTIONAL; only used as the
-                                              Stripe webhook's fallback match
-                                              when the checkout carries no
-                                              client_reference_id
+      Email               Single line text  - the password-reset flow's
+                                              lookup key (and the Stripe
+                                              webhook's fallback match when
+                                              the checkout carries no
+                                              client_reference_id); accounts
+                                              without it simply can't use
+                                              "Ξέχασα τον κωδικό μου"
+      ResetToken          Text              - 6-digit password-reset code
+                                              (app.py); prefer Text — a
+                                              Number column drops leading
+                                              zeros, which the app tolerates
+                                              by zero-padding on comparison
+      ResetTokenExpiry    Date+time         - UTC expiry of ResetToken
+                                              (written as ISO-8601 …Z)
 """
 
 import re
@@ -156,18 +170,6 @@ def _delete_records(table, record_ids):
 
 
 # --- Users ------------------------------------------------------------------
-def get_user_record(username):
-    """Return the tenant's Users-table fields dict, or None when no row exists.
-
-    Used by the login gate to verify the Password column and read the
-    SubscriptionStatus in a single Airtable round-trip.
-    Raises AirtableError on API failures, including a missing Users table.
-    """
-    formula = f"{{Username}}='{_sanitize(username)}'"
-    records = _select(AIRTABLE_USERS_TABLE, formula)
-    return records[0]["fields"] if records else None
-
-
 def get_subscription_status(username):
     """Return the tenant's SubscriptionStatus ("Active" / "Expired").
 
@@ -205,6 +207,51 @@ def find_user(username=None, email=None):
         if records:
             return records[0]
     return None
+
+
+def set_reset_token(record_id, token, expiry_iso):
+    """Store a password-reset code and its UTC expiry on one Users row.
+
+    typecast lets a dateTime-typed ResetTokenExpiry cell parse the ISO
+    string (and a Number-typed ResetToken coerce — see the schema note on
+    leading zeros).
+    """
+    body = {"records": [{"id": record_id,
+                         "fields": {"ResetToken": token,
+                                    "ResetTokenExpiry": expiry_iso}}],
+            "typecast": True}
+    return _request("PATCH", AIRTABLE_USERS_TABLE, json=body)
+
+
+def clear_reset_token(record_id):
+    """Blank one Users row's reset columns (expired code / too many tries)."""
+    body = {"records": [{"id": record_id,
+                         "fields": {"ResetToken": None,
+                                    "ResetTokenExpiry": None}}]}
+    return _request("PATCH", AIRTABLE_USERS_TABLE, json=body)
+
+
+def complete_password_reset(record_id, hashed_password):
+    """Write the new Password hash and clear both reset columns in ONE
+    PATCH, so a verified reset can't leave a still-live code behind."""
+    body = {"records": [{"id": record_id,
+                         "fields": {"Password": hashed_password,
+                                    "ResetToken": None,
+                                    "ResetTokenExpiry": None}}]}
+    return _request("PATCH", AIRTABLE_USERS_TABLE, json=body)
+
+
+def update_user_password(record_id, hashed_password):
+    """Overwrite one Users row's Password cell with a pbkdf2_sha256$… hash.
+
+    Used by the login gate's transparent migration: a legacy plaintext cell
+    that just verified gets rewritten as its hash. No typecast — if the
+    Password column was created as Number instead of Text, the write fails
+    loudly (AirtableError) rather than silently mangling the hash.
+    """
+    body = {"records": [{"id": record_id,
+                         "fields": {"Password": hashed_password}}]}
+    return _request("PATCH", AIRTABLE_USERS_TABLE, json=body)
 
 
 def set_subscription_status(record_id, status):

@@ -29,6 +29,17 @@ AIRTABLE_TRANSACTIONS_TABLE = os.getenv("AIRTABLE_TRANSACTIONS_TABLE", "Transact
 AIRTABLE_USERS_TABLE = os.getenv("AIRTABLE_USERS_TABLE", "Users")
 
 
+# --- Password-reset email (app.py "Ξέχασα τον κωδικό μου") ------------------
+# Sent with stdlib smtplib through a Gmail account. SMTP_PASSWORD is a Gmail
+# App Password (Google Account -> Security -> 2-Step Verification -> App
+# passwords), NOT the account's normal password. Leave both empty to disable
+# the reset flow (requests then fail with a "temporarily unavailable" error).
+SMTP_EMAIL = os.getenv("SMTP_EMAIL", "")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))  # implicit TLS (SMTP_SSL)
+
+
 # --- Stripe ----------------------------------------------------------------
 # Signing secret for the webhook endpoint (stripe_webhook.py). Take it from
 # Stripe Dashboard -> Developers -> Webhooks -> your endpoint ("whsec_...").

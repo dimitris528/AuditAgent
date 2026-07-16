@@ -19,6 +19,13 @@ services:
         sync: false
       - key: AIRTABLE_BASE_ID
         sync: false
+      # Password-reset emails ("Ξέχασα τον κωδικό μου"): a Gmail address and
+      # its App Password (not the normal account password). Optional — leave
+      # unset to disable the reset flow.
+      - key: SMTP_EMAIL
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
       # Table names default sensibly in config.py (Invoices / Projects /
       # Transactions / Users) — add AIRTABLE_*_TABLE vars here only if yours
       # are named differently.
