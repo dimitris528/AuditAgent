@@ -305,12 +305,16 @@ div[class*="st-key-qe_card_net"] .aud-kpi {
 .aud-kpi.net-zero .aud-kpi-label { color: #5a6472; }
 .aud-kpi.net-zero .aud-kpi-value { color: #2f3a48; }
 
-/* --- Project cards -------------------------------------------------------- */
-.aud-proj {
-    background: var(--aud-surface); border: 1px solid var(--aud-border); border-radius: 16px;
-    padding: 16px 20px; margin-bottom: 12px; transition: border-color .18s ease;
+/* --- Project cards (st.container key="projcard_<id>") ----------------------
+   The keyed container IS the surface card, so it always stretches to the
+   full row width; the category info and the inline Αρχειοθέτηση pill live
+   in columns INSIDE it (they stack naturally on narrow phones). */
+div[class*="st-key-projcard_"] {
+    width: 100%; background: var(--aud-surface); border: 1px solid var(--aud-border);
+    border-radius: 16px; padding: 16px 20px; margin-bottom: 12px;
+    transition: border-color .18s ease;
 }
-.aud-proj:hover { border-color: var(--aud-border-strong); }
+div[class*="st-key-projcard_"]:hover { border-color: var(--aud-border-strong); }
 .aud-proj-name { color: var(--aud-text); font-weight: 600; font-size: 1.02rem; margin-bottom: 10px; }
 .aud-proj-stats { display: flex; gap: 26px; flex-wrap: wrap; }
 .aud-proj-value { color: var(--aud-text-soft); font-size: .98rem; font-weight: 600; }
@@ -319,16 +323,20 @@ div[class*="st-key-qe_card_net"] .aud-kpi {
 .aud-proj-value.loss { color: var(--aud-loss); }
 
 /* --- Close-project control --------------------------------------------------
-   Small ghost "Αρχειοθέτηση" button rendered in a narrow column directly to
-   the right of each active category card (vertical_alignment="center"). */
-div[class*="st-key-close_"] { margin: 0 0 12px; }
+   Small "Αρχειοθέτηση" pill rendered INSIDE each category card (right
+   column, vertically centered): quiet rounded outline that warms to the
+   loss red on hover — it belongs to the card instead of floating beside it. */
+div[class*="st-key-close_"] { margin: 0; display: flex; justify-content: flex-end; }
 div[class*="st-key-close_"] button {
-    width: 100%;
-    background: transparent; color: var(--aud-muted); border: 1px dashed var(--aud-border-strong);
-    font-size: .8rem; font-weight: 500; padding: .38rem .55rem; white-space: nowrap;
+    width: auto; min-height: 0;
+    background: transparent; color: var(--aud-muted);
+    border: 1px solid var(--aud-border-strong); border-radius: 999px;
+    font-size: .78rem; font-weight: 600; padding: .34rem .85rem;
+    white-space: nowrap; transition: all .18s ease;
 }
 div[class*="st-key-close_"] button:hover {
-    color: var(--aud-loss); border-color: rgba(255, 107, 87, .55); background: transparent;
+    color: var(--aud-loss); border-color: rgba(255, 107, 87, .55);
+    background: rgba(255, 107, 87, .08);
 }
 
 /* --- Transaction rows (recap) + ghost delete button -------------------------
@@ -430,6 +438,16 @@ div[data-baseweb="input"]:focus-within, div[data-baseweb="textarea"]:focus-withi
 div[data-baseweb="select"] > div:focus-within {
     border-color: var(--aud-accent) !important;
 }
+/* Selectboxes (incl. the category picker with "➕ Δημιουργία Νέας...") are
+   pickers, not text fields: baseweb's combobox ships a text I-beam over its
+   inner input and arrow — force the clickable hand on every part of the
+   control and on the dropdown options, so it reads as a button. */
+.stSelectbox [data-baseweb="select"], .stSelectbox [data-baseweb="select"] *,
+div[data-baseweb="select"], div[data-baseweb="select"] *,
+div[data-baseweb="select"] input, div[data-baseweb="select"] svg,
+ul[data-baseweb="menu"] li, ul[data-baseweb="menu"] li * {
+    cursor: pointer !important;
+}
 
 /* --- Forms / expanders as cards ------------------------------------------- */
 [data-testid="stForm"] {
@@ -464,7 +482,10 @@ div[data-baseweb="select"] > div:focus-within {
    glued to the Greek label. */
 [data-testid="stFileUploaderDropzoneInstructions"] > * { display: none !important; }
 [data-testid="stFileUploaderDropzoneInstructions"]::before {
-    content: 'Σύρετε το αρχείο εδώ'; display: block;
+    /* Trailing no-break space (\\a0): if a build ever renders the two
+       pseudo-elements on one line, the copy still reads "…εδώ PDF…",
+       never "…εδώPDF" glued together. */
+    content: 'Σύρετε το αρχείο εδώ\\a0'; display: block;
     color: var(--aud-text-soft); font-weight: 600; font-size: .95rem;
 }
 [data-testid="stFileUploaderDropzoneInstructions"]::after {
@@ -713,7 +734,11 @@ def _net_kind(net):
     return "net-pos" if net_r > 0 else "net-neg" if net_r < 0 else "net-zero"
 
 
-def _project_card(name, rev, exp, net):
+def _project_card_body(name, rev, exp, net):
+    """Name + Έσοδα/Έξοδα/Καθαρό stats for one active category. The card
+    chrome (surface, border, radius, full row width) lives on the keyed
+    st.container wrapping the row — see st-key-projcard_ in the CSS — so
+    the inline Αρχειοθέτηση pill renders INSIDE the card, not beside it."""
     stats = "".join(
         f'<div><div class="aud-kpi-label">{html.escape(label)}</div>'
         f'<div class="aud-proj-value {kind}">{html.escape(value)}</div></div>'
@@ -724,9 +749,8 @@ def _project_card(name, rev, exp, net):
         ]
     )
     st.markdown(
-        f'<div class="aud-proj">'
         f'<div class="aud-proj-name">{html.escape(name)}</div>'
-        f'<div class="aud-proj-stats">{stats}</div></div>',
+        f'<div class="aud-proj-stats">{stats}</div>',
         unsafe_allow_html=True,
     )
 
@@ -873,7 +897,8 @@ def logout():
                 "subscription_verified", "subscription_status",
                 "confirm_close", "flash", "confirm_delete_txn", "flash_recap",
                 "flash_toast", "flash_toast_alert", "nav_page",
-                "show_archived", "show_income_form", "show_expense_form"):
+                "_last_nav_page", "show_archived",
+                "show_income_form", "show_expense_form"):
         st.session_state.pop(key, None)
     st.rerun()
 
@@ -971,12 +996,12 @@ def subscription_gate(username):
 # Tab 1 — Executive dashboard
 # --------------------------------------------------------------------------
 def _archive_button(proj, name):
-    """Small inline "🔒 Αρχειοθέτηση" ghost button rendered in the narrow
-    column to the right of one active category card. First tap arms the
-    confirmation (stored in session state); _close_project_control renders
-    it full-width beneath the row."""
+    """Small "🔒 Αρχειοθέτηση" pill inside one active category card (the
+    CSS right-aligns and rounds it; no width stretch — it hugs its label).
+    First tap arms the confirmation (stored in session state);
+    _close_project_control renders it full-width beneath the card."""
     record_id = proj["id"]
-    if st.button("🔒 Αρχειοθέτηση", key=f"close_{record_id}", width="stretch",
+    if st.button("🔒 Αρχειοθέτηση", key=f"close_{record_id}",
                  help=f"Αρχειοθέτηση της κατηγορίας «{name}»"):
         st.session_state["confirm_close"] = record_id
         st.rerun()
@@ -1209,12 +1234,15 @@ def dashboard_tab(username):
         _section("Ενεργές κατηγορίες")
         for proj, (rev, exp, pnet) in zip(active, totals):
             name = proj["fields"].get("Name") or "—"
-            col_card, col_archive = st.columns([4, 1.25],
-                                               vertical_alignment="center")
-            with col_card:
-                _project_card(name, rev, exp, pnet)
-            with col_archive:
-                _archive_button(proj, name)
+            # The keyed container IS the card (full row width); info and the
+            # archive pill share its inside via columns.
+            with st.container(key=f"projcard_{proj['id']}"):
+                col_info, col_archive = st.columns(
+                    [3.4, 1.1], vertical_alignment="center")
+                with col_info:
+                    _project_card_body(name, rev, exp, pnet)
+                with col_archive:
+                    _archive_button(proj, name)
             _close_project_control(proj, name)
 
     if completed:
@@ -1674,6 +1702,41 @@ def _render_sidebar(username):
             st.rerun()
 
 
+def _auto_collapse_sidebar():
+    """One-shot JS fired right after a sidebar navigation change: on phone
+    widths the sidebar is a full-screen overlay, so tap the native collapse
+    control for the user instead of making them close it by hand.
+
+    st.markdown strips <script>, so this rides st.iframe (the successor of
+    components.v1.html, deprecated in Streamlit 1.58) and reaches the app
+    through window.parent. Docked (desktop) widths are left alone:
+    auto-closing there would be hostile. The selector list covers every
+    testid Streamlit has used for the collapse control (same set the CSS
+    keeps visible)."""
+    st.iframe(
+        """
+        <script>
+        (function () {
+            const root = window.parent;
+            if (root.innerWidth > 768) return;  // desktop: sidebar is docked
+            const doc = root.document;
+            const sidebar = doc.querySelector('[data-testid="stSidebar"]');
+            if (!sidebar || sidebar.getAttribute('aria-expanded') === 'false') {
+                return;
+            }
+            const btn = sidebar.querySelector(
+                '[data-testid="stSidebarCollapseButton"] button,' +
+                '[data-testid="stSidebarCollapse"] button,' +
+                '[data-testid="stSidebarHeader"] button,' +
+                'button[kind="headerNoPadding"]');
+            if (btn) { setTimeout(function () { btn.click(); }, 120); }
+        })();
+        </script>
+        """,
+        height=1,
+    )
+
+
 def _flush_toasts():
     """Deliver save confirmations queued before an st.rerun(). Toasts float
     above the page, so they are visible no matter which tab is active."""
@@ -1706,6 +1769,12 @@ def main():
     # widget in _render_sidebar owns "nav_page"; before its first paint the
     # key is absent, so default to the dashboard).
     page = st.session_state.get("nav_page", PAGE_DASHBOARD)
+    # Mobile UX: when this rerun was caused by picking a DIFFERENT page in
+    # the sidebar menu, auto-close the sidebar overlay so the new page is
+    # immediately visible. First paint (no previous page) never fires it.
+    if st.session_state.get("_last_nav_page") not in (None, page):
+        _auto_collapse_sidebar()
+    st.session_state["_last_nav_page"] = page
     if page == PAGE_UPLOAD:
         upload_tab(username)
     elif page == PAGE_RECAP:
