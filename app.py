@@ -14,10 +14,15 @@ cached Airtable logic and the data-retention hooks are unchanged:
        Description quick-entry form beneath the row (opening one closes the
        other). The third card, Καθαρό, stays static and colors itself by
        sign: green when positive, red when negative, neutral grey at zero.
-       Category archiving lives in a collapsed picker ("Αρχειοθέτηση
-       Κατηγορίας") instead of standalone per-card buttons. The UI speaks generic business Greek ("Κατηγορίες") for
-       retail merchants and shop owners; the Airtable schema underneath
-       (Projects/Status/Name columns) is unchanged.
+       Each active category card carries a small inline "🔒 Αρχειοθέτηση"
+       ghost button to its right; archived categories hide behind a large
+       KPI-styled "📂 Αρχειοθετημένες Κατηγορίες" toggle button. New
+       categories are created inline from ANY category dropdown via the
+       permanent trailing "➕ Δημιουργία Νέας Κατηγορίας..." option (there
+       is no standalone creation form). The UI speaks generic business
+       Greek ("Κατηγορίες") for retail merchants and shop owners; the
+       Airtable schema underneath (Projects/Status/Name columns) is
+       unchanged.
     3. Single-tap document upload (camera photo or PDF) -> GPT-4o extraction
        -> confirmation screen -> saved to Airtable. If extraction fails for
        ANY reason the form degrades to blank manual entry instead of blocking.
@@ -31,13 +36,17 @@ cached Airtable logic and the data-retention hooks are unchanged:
     4. Smart-period recap (current month / quarter / year / custom range) of
        archived categories, plus the period's individual transactions with a
        confirm-then-delete control on each row. Its totals row wears the
-       same palette as the dashboard header (green/red/sign-colored net).
-    5. Πληρωμές tab: Stripe billing center — Payment Link for subscribing
+       same palette as the dashboard header (green/red/sign-colored net),
+       and each transaction row is color-coded: income green, expense red.
+    5. Πληρωμές page: Stripe billing center — Payment Link for subscribing
        (10€/μήνα) and Customer Portal link for card changes/cancellation,
        both opening in a new browser tab. Logged-in users with ANY
        non-Active status (Expired/Inactive/Unpaid/blank) land on a paywall
-       gateway instead of the tabs: subscribe link, a "Πλήρωσα" re-check
-       button that clears the cached verdict, and logout.
+       gateway instead of the app pages: subscribe link, a "Πλήρωσα"
+       re-check button that clears the cached verdict, and logout.
+    Navigation is a styled sidebar radio (Πίνακας Ελέγχου / Καταχώρηση /
+    Ανασκόπηση / Πληρωμές) next to the theme toggle and account controls —
+    the old top st.tabs row is gone; only the active page renders.
        The subscribe URL stamps the Username as client_reference_id; the
        companion webhook service (stripe_webhook.py, deployed separately —
        Streamlit itself cannot receive POSTs) verifies Stripe's signature
@@ -309,22 +318,29 @@ div[class*="st-key-qe_card_net"] .aud-kpi {
 .aud-proj-value.accent { color: var(--aud-accent-text); }
 .aud-proj-value.loss { color: var(--aud-loss); }
 
-/* --- Close-project control ------------------------------------------------ */
-div[class*="st-key-close_"] { margin: -4px 0 14px; }
+/* --- Close-project control --------------------------------------------------
+   Small ghost "Αρχειοθέτηση" button rendered in a narrow column directly to
+   the right of each active category card (vertical_alignment="center"). */
+div[class*="st-key-close_"] { margin: 0 0 12px; }
 div[class*="st-key-close_"] button {
+    width: 100%;
     background: transparent; color: var(--aud-muted); border: 1px dashed var(--aud-border-strong);
-    font-size: .85rem; font-weight: 500; padding: .38rem .9rem;
+    font-size: .8rem; font-weight: 500; padding: .38rem .55rem; white-space: nowrap;
 }
 div[class*="st-key-close_"] button:hover {
     color: var(--aud-loss); border-color: rgba(255, 107, 87, .55); background: transparent;
 }
 
-/* --- Transaction rows (recap) + ghost delete button ------------------------- */
+/* --- Transaction rows (recap) + ghost delete button -------------------------
+   Color-coded flow, same language as the KPI cards: income rows wear a green
+   left border + green amount, expense rows red — no generic yellow accent. */
 .aud-txn-row {
     display: flex; justify-content: space-between; align-items: baseline;
-    gap: 12px; flex-wrap: wrap; padding: 9px 2px;
+    gap: 12px; flex-wrap: wrap; padding: 9px 2px 9px 10px;
     border-bottom: 1px solid var(--aud-border); color: var(--aud-text-soft); font-size: .92rem;
 }
+.aud-txn-row.income { border-left: 3px solid rgba(0, 230, 118, .55); }
+.aud-txn-row.expense { border-left: 3px solid rgba(255, 107, 87, .55); }
 .aud-txn-meta { color: var(--aud-text-soft); }
 div[class*="st-key-del_"] button {
     background: transparent; color: var(--aud-muted); border: 1px dashed var(--aud-border-strong);
@@ -468,18 +484,56 @@ div[data-baseweb="select"] > div:focus-within {
     border-color: var(--aud-accent) rgba(0, 230, 118, .15) rgba(0, 230, 118, .15) !important;
 }
 
-/* --- Tabs ---------------------------------------------------------------- */
-.stTabs [data-baseweb="tab-list"] { gap: 4px; }
-.stTabs button[data-baseweb="tab"] {
-    color: var(--aud-muted); font-weight: 500; background: transparent;
-}
-.stTabs button[data-baseweb="tab"]:hover { color: var(--aud-text-soft); }
-.stTabs button[data-baseweb="tab"][aria-selected="true"] { color: var(--aud-text); font-weight: 600; }
-.stTabs [data-baseweb="tab-highlight"] { background-color: var(--aud-accent); }
-.stTabs [data-baseweb="tab-border"] { background-color: var(--aud-border); }
-
 /* --- Sidebar ------------------------------------------------------------- */
 [data-testid="stSidebar"] { background: var(--aud-sidebar); border-right: 1px solid var(--aud-border); }
+
+/* --- Sidebar navigation (st.radio key="nav_page" dressed as a menu) --------
+   The radio replaces the old top st.tabs row. Each option becomes a full-
+   width rounded menu item: the native radio dot is hidden, hover gets a
+   surface fill, and the checked item wears the mint accent border. */
+div[class*="st-key-nav_page"] div[role="radiogroup"] {
+    display: flex; flex-direction: column; gap: 6px;
+}
+div[class*="st-key-nav_page"] label[data-baseweb="radio"] {
+    width: 100%; margin: 0; padding: 11px 14px; border-radius: 12px;
+    background: transparent; border: 1px solid transparent; cursor: pointer;
+    display: flex; align-items: center;
+    transition: background .15s ease, border-color .15s ease;
+}
+div[class*="st-key-nav_page"] label[data-baseweb="radio"]:hover {
+    background: var(--aud-surface); border-color: var(--aud-border);
+}
+/* The first div inside the label is the radio dot — hide it. */
+div[class*="st-key-nav_page"] label[data-baseweb="radio"] > div:first-of-type {
+    display: none;
+}
+div[class*="st-key-nav_page"] label[data-baseweb="radio"] p {
+    color: var(--aud-text-soft); font-size: .95rem; font-weight: 500;
+}
+div[class*="st-key-nav_page"] label[data-baseweb="radio"]:has(input:checked) {
+    background: var(--aud-surface); border-color: rgba(0, 230, 118, .45);
+    box-shadow: 0 2px 12px rgba(0, 230, 118, .10);
+}
+div[class*="st-key-nav_page"] label[data-baseweb="radio"]:has(input:checked) p {
+    color: var(--aud-text); font-weight: 600;
+}
+
+/* --- Archived-categories toggle (st.button key="archived_toggle") ----------
+   A large surface button matching the KPI-card aesthetic; tapping it shows/
+   hides the archived list in place. */
+div[class*="st-key-archived_toggle"] button {
+    width: 100%; min-height: 64px; border-radius: 16px; padding: 16px 20px;
+    background: var(--aud-surface); border: 1px solid var(--aud-border);
+    color: var(--aud-text-soft); font-weight: 600; font-size: 1rem;
+    justify-content: flex-start; text-align: left;
+    transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;
+}
+div[class*="st-key-archived_toggle"] button:hover {
+    transform: translateY(-2px); border-color: var(--aud-border-strong);
+    box-shadow: 0 8px 24px var(--aud-shadow);
+    background: var(--aud-surface); color: var(--aud-text);
+}
+div[class*="st-key-archived_toggle"] button:active { transform: scale(.985); }
 
 /* --- Alerts ------------------------------------------------------------- */
 [data-testid="stAlert"] { border-radius: 12px; }
@@ -818,7 +872,8 @@ def logout():
                 "processed_upload", "extraction_error",
                 "subscription_verified", "subscription_status",
                 "confirm_close", "flash", "confirm_delete_txn", "flash_recap",
-                "flash_toast", "flash_toast_alert"):
+                "flash_toast", "flash_toast_alert", "nav_page",
+                "show_archived", "show_income_form", "show_expense_form"):
         st.session_state.pop(key, None)
     st.rerun()
 
@@ -915,50 +970,47 @@ def subscription_gate(username):
 # --------------------------------------------------------------------------
 # Tab 1 — Executive dashboard
 # --------------------------------------------------------------------------
-def _close_project_control(proj, name):
-    """Render the 🔒 archive action for one active category.
-
-    First tap arms an inline confirmation (stored in session state); the
-    second tap flips the row's Status and stamps ClosedDate = today.
-    """
+def _archive_button(proj, name):
+    """Small inline "🔒 Αρχειοθέτηση" ghost button rendered in the narrow
+    column to the right of one active category card. First tap arms the
+    confirmation (stored in session state); _close_project_control renders
+    it full-width beneath the row."""
     record_id = proj["id"]
-    if st.session_state.get("confirm_close") == record_id:
-        st.warning(f"Να αρχειοθετηθεί η κατηγορία «{name}»; Θα μεταφερθεί "
-                   "στις Αρχειοθετημένες Κατηγορίες.")
-        col_yes, col_no = st.columns(2)
-        with col_yes:
-            if st.button("✅ Ναι, αρχειοθέτηση", key=f"yes_{record_id}",
-                         type="primary", width="stretch"):
-                try:
-                    db.close_project(record_id, date.today())
-                except db.AirtableError as exc:
-                    st.error(f"Δεν ήταν δυνατή η αρχειοθέτηση της κατηγορίας: {exc}")
-                else:
-                    st.session_state.pop("confirm_close", None)
-                    st.session_state["flash"] = (
-                        f"Η κατηγορία «{name}» αρχειοθετήθηκε επιτυχώς και "
-                        "μεταφέρθηκε στις Αρχειοθετημένες Κατηγορίες."
-                    )
-                    _invalidate_caches()
-                    st.rerun()
-        with col_no:
-            if st.button("✕ Άκυρο", key=f"no_{record_id}", width="stretch"):
-                st.session_state.pop("confirm_close", None)
-                st.rerun()
-    elif st.button("🔒 Αρχειοθέτηση", key=f"close_{record_id}"):
+    if st.button("🔒 Αρχειοθέτηση", key=f"close_{record_id}", width="stretch",
+                 help=f"Αρχειοθέτηση της κατηγορίας «{name}»"):
         st.session_state["confirm_close"] = record_id
         st.rerun()
 
 
-def _archive_category_expander(active):
-    """Archiving no longer clutters the card list with a standalone button
-    per category: it lives in this collapsed picker — choose a category, then
-    the usual two-step confirmation (_close_project_control) applies."""
-    with st.expander("🔒 Αρχειοθέτηση Κατηγορίας"):
-        names = [p["fields"].get("Name") or "—" for p in active]
-        choice = st.selectbox("Επιλέξτε κατηγορία προς αρχειοθέτηση", names,
-                              key="archive_category_pick")
-        _close_project_control(active[names.index(choice)], choice)
+def _close_project_control(proj, name):
+    """Two-step archive confirmation for one active category: renders only
+    while this category is armed (confirm_close); the explicit "Ναι" tap
+    flips the row's Status and stamps ClosedDate = today."""
+    record_id = proj["id"]
+    if st.session_state.get("confirm_close") != record_id:
+        return
+    st.warning(f"Να αρχειοθετηθεί η κατηγορία «{name}»; Θα μεταφερθεί "
+               "στις Αρχειοθετημένες Κατηγορίες.")
+    col_yes, col_no = st.columns(2)
+    with col_yes:
+        if st.button("✅ Ναι, αρχειοθέτηση", key=f"yes_{record_id}",
+                     type="primary", width="stretch"):
+            try:
+                db.close_project(record_id, date.today())
+            except db.AirtableError as exc:
+                st.error(f"Δεν ήταν δυνατή η αρχειοθέτηση της κατηγορίας: {exc}")
+            else:
+                st.session_state.pop("confirm_close", None)
+                st.session_state["flash"] = (
+                    f"Η κατηγορία «{name}» αρχειοθετήθηκε επιτυχώς και "
+                    "μεταφέρθηκε στις Αρχειοθετημένες Κατηγορίες."
+                )
+                _invalidate_caches()
+                st.rerun()
+    with col_no:
+        if st.button("✕ Άκυρο", key=f"no_{record_id}", width="stretch"):
+            st.session_state.pop("confirm_close", None)
+            st.rerun()
 
 
 def _toggle_quick_entry(which):
@@ -971,6 +1023,47 @@ def _toggle_quick_entry(which):
     st.session_state[other] = False
 
 
+NEW_CATEGORY_OPTION = "➕ Δημιουργία Νέας Κατηγορίας..."
+
+
+def _category_picker(category_names, key, default_index=0):
+    """Category dropdown with the permanent trailing "create new" option.
+
+    Lives OUTSIDE any st.form on purpose: widgets inside a form don't rerun
+    on change, so the conditional "Όνομα Νέας Κατηγορίας" input could never
+    appear dynamically there. Returns (choice, new_name)."""
+    options = list(category_names) + [NEW_CATEGORY_OPTION]
+    choice = st.selectbox("Κατηγορία", options,
+                          index=min(default_index, len(options) - 1), key=key)
+    new_name = ""
+    if choice == NEW_CATEGORY_OPTION:
+        new_name = st.text_input("Όνομα Νέας Κατηγορίας",
+                                 placeholder="π.χ. Λειτουργικά Έξοδα",
+                                 key=f"{key}_new")
+    return choice, new_name
+
+
+def _resolve_category(username, choice, new_name):
+    """Turn a picker result into a real category name at save time, creating
+    the Projects row when the "create new" option was chosen (an existing
+    active category of the same name is simply reused). Returns None — with
+    the error already rendered — when the save must be aborted."""
+    if choice != NEW_CATEGORY_OPTION:
+        return choice
+    name = new_name.strip()
+    if not name:
+        st.error("Παρακαλώ εισάγετε το όνομα της νέας κατηγορίας.")
+        return None
+    try:
+        if not db.find_active_project(username, name):
+            db.create_project(username, name)
+            _invalidate_caches()
+    except db.AirtableError as exc:
+        st.error(f"Δεν ήταν δυνατή η δημιουργία της κατηγορίας: {exc}")
+        return None
+    return name
+
+
 def _quick_entry_form(username, category_names, entry_type):
     """Inline Amount/Date/Category/Description form for ONE transaction type,
     revealed by its clickable KPI card. The Έσοδο/Έξοδο choice is encoded as
@@ -978,11 +1071,11 @@ def _quick_entry_form(username, category_names, entry_type):
     reruns instantly, exactly like the invoice flow, with the confirmation
     delivered as a toast."""
     genitive = "Εσόδου" if entry_type == "Έσοδο" else "Εξόδου"
-    if not category_names:
-        st.warning("Χρειάζεστε μια ενεργή κατηγορία πριν καταχωρήσετε "
-                   "κίνηση — δημιουργήστε μία στην ενότητα «➕ Νέα "
-                   "Κατηγορία/Φάκελος» παρακάτω.")
-        return
+    # The category picker sits ABOVE the form (a form widget can't reveal the
+    # new-category input on change), so with zero active categories the form
+    # still works: the dropdown then only offers "➕ Δημιουργία Νέας...".
+    choice, new_category = _category_picker(category_names,
+                                            key=f"qe_category_{entry_type}")
     # Explicit keys: the two forms carry otherwise-identical widgets,
     # which would collide on Streamlit's auto-generated widget IDs.
     with st.form(f"quick_entry_{entry_type}", clear_on_submit=True):
@@ -991,8 +1084,6 @@ def _quick_entry_form(username, category_names, entry_type):
         entry_date = st.date_input("Ημερομηνία", value=date.today(),
                                    format="DD/MM/YYYY",
                                    key=f"qe_date_{entry_type}")
-        category = st.selectbox("Κατηγορία", category_names,
-                                key=f"qe_category_{entry_type}")
         notes = st.text_area("📝 Αιτιολογία / Περιγραφή (Προαιρετικό)",
                              key=f"qe_notes_{entry_type}")
         submitted = st.form_submit_button(
@@ -1001,6 +1092,9 @@ def _quick_entry_form(username, category_names, entry_type):
         return
     if amount <= 0:
         st.error("Παρακαλώ εισάγετε ποσό μεγαλύτερο από 0.")
+        return
+    category = _resolve_category(username, choice, new_category)
+    if category is None:
         return
     signed = amount if entry_type == "Έσοδο" else -amount
     try:
@@ -1056,8 +1150,17 @@ def _kpi_entry_row(username, category_names, total_rev, total_exp, net):
 
 
 def _closed_projects_section(completed, grouped):
-    """Collapsed archive so archived categories never clutter the daily flow."""
-    with st.expander(f"🔒 Αρχειοθετημένες Κατηγορίες ({len(completed)})"):
+    """Large KPI-styled toggle button (key archived_toggle — see the CSS);
+    tapping it shows/hides the archived-categories list in place via the
+    show_archived session flag, so the archive never clutters the daily flow."""
+    # on_click flips the flag BEFORE the rerun executes, so the arrow in the
+    # label and the list below always agree within a single paint.
+    arrow = "▲" if st.session_state.get("show_archived") else "▼"
+    st.button(f"📂 Αρχειοθετημένες Κατηγορίες ({len(completed)})  {arrow}",
+              key="archived_toggle", width="stretch",
+              on_click=lambda: st.session_state.update(
+                  show_archived=not st.session_state.get("show_archived", False)))
+    if st.session_state.get("show_archived"):
         rows = "".join(
             f'<div class="aud-closed-row">'
             f'<span class="aud-closed-name">{html.escape(p["fields"].get("Name") or "—")}</span>'
@@ -1088,44 +1191,31 @@ def dashboard_tab(username):
               for p in active]
     _section("Επισκόπηση")
     if not active:
-        _empty_state("Δεν υπάρχουν ενεργές κατηγορίες ακόμη — δημιουργήστε "
-                     "μία παρακάτω για να ξεκινήσετε την καταχώρηση "
-                     "παραστατικών.")
-    else:
-        total_rev = sum(t[0] for t in totals)
-        total_exp = sum(t[1] for t in totals)
-        net = total_rev - total_exp
-        # Merged header: the Έσοδα/Έξοδα cards ARE the quick-entry buttons;
-        # tapping one opens its inline form directly beneath the row.
-        _kpi_entry_row(
-            username, [p["fields"].get("Name") or "—" for p in active],
-            total_rev, total_exp, net)
+        _empty_state("Δεν υπάρχουν ενεργές κατηγορίες ακόμη — πατήστε "
+                     "«Συνολικά έσοδα» ή «Συνολικά έξοδα» και επιλέξτε "
+                     "«➕ Δημιουργία Νέας Κατηγορίας...» για να ξεκινήσετε.")
+    total_rev = sum(t[0] for t in totals)
+    total_exp = sum(t[1] for t in totals)
+    net = total_rev - total_exp
+    # Merged header: the Έσοδα/Έξοδα cards ARE the quick-entry buttons;
+    # tapping one opens its inline form directly beneath the row. Rendered
+    # even with zero categories — the forms' category dropdown can create
+    # the first one via "➕ Δημιουργία Νέας Κατηγορίας...".
+    _kpi_entry_row(
+        username, [p["fields"].get("Name") or "—" for p in active],
+        total_rev, total_exp, net)
 
     if active:
         _section("Ενεργές κατηγορίες")
         for proj, (rev, exp, pnet) in zip(active, totals):
-            _project_card(proj["fields"].get("Name") or "—", rev, exp, pnet)
-        _archive_category_expander(active)
-
-    with st.expander("➕ Νέα Κατηγορία/Φάκελος"):
-        with st.form("new_project", clear_on_submit=True):
-            name = st.text_input("Όνομα κατηγορίας")
-            if st.form_submit_button("Δημιουργία κατηγορίας", type="primary",
-                                     width="stretch"):
-                name = name.strip()
-                if not name:
-                    st.error("Παρακαλώ εισάγετε ένα όνομα κατηγορίας.")
-                elif db.find_active_project(username, name):
-                    st.error(f"Υπάρχει ήδη ενεργή κατηγορία με το όνομα «{name}».")
-                else:
-                    try:
-                        db.create_project(username, name)
-                    except db.AirtableError as exc:
-                        st.error("Δεν ήταν δυνατή η δημιουργία της "
-                                 f"κατηγορίας: {exc}")
-                    else:
-                        _invalidate_caches()
-                        st.rerun()
+            name = proj["fields"].get("Name") or "—"
+            col_card, col_archive = st.columns([4, 1.25],
+                                               vertical_alignment="center")
+            with col_card:
+                _project_card(name, rev, exp, pnet)
+            with col_archive:
+                _archive_button(proj, name)
+            _close_project_control(proj, name)
 
     if completed:
         _closed_projects_section(completed, grouped)
@@ -1188,11 +1278,6 @@ def _invoice_flow(username):
     except db.AirtableError as exc:
         st.error(f"Δεν ήταν δυνατή η φόρτωση των κατηγοριών σας: {exc}")
         return
-    if not active:
-        st.warning("Χρειάζεστε μια ενεργή κατηγορία πριν αποθηκεύσετε "
-                   "παραστατικό — δημιουργήστε μία στην καρτέλα "
-                   "«Πίνακας Ελέγχου».")
-        return
 
     _section("Επιβεβαίωση των στοιχείων")
     category_names = [p["fields"].get("Name") or "—" for p in active]
@@ -1206,8 +1291,16 @@ def _invoice_flow(username):
         if closest:
             default_index = lowered.index(closest[0])
 
+    # The picker sits ABOVE the form so choosing "➕ Δημιουργία Νέας
+    # Κατηγορίας..." can reveal its name input immediately (form widgets
+    # don't rerun on change). Keying by the upload fingerprint re-applies
+    # the fuzzy preselection for each new document.
+    picker_key = ("invoice_category_"
+                  f"{(st.session_state.get('processed_upload') or '')[:12]}")
+    choice, new_category = _category_picker(category_names, key=picker_key,
+                                            default_index=default_index)
+
     with st.form("confirm_invoice"):
-        category = st.selectbox("Κατηγορία", category_names, index=default_index)
         provider = st.text_input("Προμηθευτής", value=pending.get("provider_name") or "")
         # No min_value: credit notes legitimately carry negative totals.
         amount = st.number_input(
@@ -1237,6 +1330,11 @@ def _invoice_flow(username):
         st.rerun()
 
     if save:
+        # Resolve the picker first: a "create new" choice with a blank name
+        # aborts before anything touches Airtable.
+        category = _resolve_category(username, choice, new_category)
+        if category is None:
+            return
         # Duplicate-receipt guard: the SHA-256 fingerprint computed at upload
         # time is checked against this tenant's FileHash column before the
         # save, and stored with the new row so future re-uploads are caught.
@@ -1367,10 +1465,15 @@ def _period_transactions_section(transactions, start, end):
         ) if part)
         col_info, col_del = st.columns([4, 1.3], vertical_alignment="center")
         with col_info:
+            # Income rows/values green, expense rows/values red — the row
+            # class paints the left border, the value class the amount (the
+            # old yellow "warm" accent is gone from the recap).
+            row_kind = "income" if is_revenue else "expense"
+            value_kind = "accent" if is_revenue else "loss"
             st.markdown(
-                f'<div class="aud-txn-row">'
+                f'<div class="aud-txn-row {row_kind}">'
                 f'<span class="aud-txn-meta">{html.escape(meta)}</span>'
-                f'<span class="aud-proj-value {"accent" if is_revenue else "warm"}">'
+                f'<span class="aud-proj-value {value_kind}">'
                 f'{html.escape(_money(fields.get("Amount")))}</span></div>',
                 unsafe_allow_html=True,
             )
@@ -1529,16 +1632,30 @@ def payments_tab(username):
 # --------------------------------------------------------------------------
 # App entry point
 # --------------------------------------------------------------------------
+# Sidebar navigation replaces the old top st.tabs row: one styled radio
+# (key "nav_page" — see the CSS that dresses it as a menu), and only the
+# active page's content is rendered in the main area.
+PAGE_DASHBOARD = "📊 Πίνακας Ελέγχου"
+PAGE_UPLOAD = "📸 Καταχώρηση"
+PAGE_RECAP = "🗓 Ανασκόπηση"
+PAGE_PAYMENTS = "💳 Πληρωμές"
+PAGES = [PAGE_DASHBOARD, PAGE_UPLOAD, PAGE_RECAP, PAGE_PAYMENTS]
+
+
 def _render_sidebar(username):
     """The sidebar exists on EVERY screen (login included) so the native
-    collapse/expand toggle is always available; account controls appear only
-    once logged in."""
+    collapse/expand toggle is always available; navigation and account
+    controls appear only once logged in."""
     with st.sidebar:
         st.markdown('<div class="aud-brand-small">AuditAgent<span>.ai</span></div>',
                     unsafe_allow_html=True)
         if username:
             st.markdown(f'<div class="aud-user">{html.escape(username)}</div>',
                         unsafe_allow_html=True)
+            _section("Πλοήγηση")
+            st.radio("Πλοήγηση", PAGES, key="nav_page",
+                     label_visibility="collapsed")
+            _section("Ρυθμίσεις")
         # ON = 🌙 dark (default). Changing it reruns the script; _inject_css
         # reads the new value from session_state at the top of the rerun.
         st.toggle("☀️ Φωτεινό / 🌙 Σκοτεινό Μορφότυπο", value=True,
@@ -1585,17 +1702,18 @@ def main():
 
     _flush_toasts()
 
-    tab_dashboard, tab_upload, tab_recap, tab_payments = st.tabs(
-        ["📊 Πίνακας Ελέγχου", "📸 Καταχώρηση", "🗓 Ανασκόπηση", "💳 Πληρωμές"]
-    )
-    with tab_dashboard:
-        dashboard_tab(username)
-    with tab_upload:
+    # Only the sidebar-selected page renders in the main area (the radio
+    # widget in _render_sidebar owns "nav_page"; before its first paint the
+    # key is absent, so default to the dashboard).
+    page = st.session_state.get("nav_page", PAGE_DASHBOARD)
+    if page == PAGE_UPLOAD:
         upload_tab(username)
-    with tab_recap:
+    elif page == PAGE_RECAP:
         recap_tab(username)
-    with tab_payments:
+    elif page == PAGE_PAYMENTS:
         payments_tab(username)
+    else:
+        dashboard_tab(username)
 
 
 main()
