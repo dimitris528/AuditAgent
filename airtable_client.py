@@ -38,7 +38,12 @@ Required Airtable schema (create these in your base before running the app):
                                               legacy plaintext cells still
                                               verify and are rewritten as
                                               hashes on first login
-      SubscriptionStatus  Single select     - options: "Active", "Expired"
+      SubscriptionStatus  Single select     - options: "Active", "Expired",
+                                              "Inactive" (trial ran out)
+      TrialExpiry         Date+time         - end of the 15-day free trial
+                                              (UTC ISO, set at registration);
+                                              blank on paying accounts — the
+                                              Stripe activation clears it
       Email               Single line text  - the password-reset flow's
                                               lookup key (and the Stripe
                                               webhook's fallback match when
@@ -170,20 +175,6 @@ def _delete_records(table, record_ids):
 
 
 # --- Users ------------------------------------------------------------------
-def get_subscription_status(username):
-    """Return the tenant's SubscriptionStatus ("Active" / "Expired").
-
-    Returns None when the tenant has no row in the Users table — the app
-    treats anything other than an existing row with "Active" as access denied.
-    Raises AirtableError on API failures, including a missing Users table.
-    """
-    formula = f"{{Username}}='{_sanitize(username)}'"
-    records = _select(AIRTABLE_USERS_TABLE, formula)
-    if not records:
-        return None
-    return records[0]["fields"].get("SubscriptionStatus")
-
-
 def find_user(username=None, email=None):
     """Return the first matching Users record ({id, fields, ...}) or None.
 
@@ -209,17 +200,19 @@ def find_user(username=None, email=None):
     return None
 
 
-def create_user(username, email, hashed_password):
+def create_user(username, email, hashed_password, trial_expiry_iso):
     """Create a Users row for the self-registration form (app.py).
 
     Password arrives ALREADY hashed (passwords.hash_password) — plaintext
-    never reaches Airtable. SubscriptionStatus is deliberately left blank:
-    the fresh account logs straight into the paywall gateway, and the
-    Stripe webhook flips the row to "Active" after checkout. The caller is
-    responsible for uniqueness checks (find_user) before creating.
+    never reaches Airtable. The account starts "Active" on a free trial:
+    TrialExpiry (UTC ISO) marks when the subscription gate auto-flips it to
+    "Inactive" and shows the Stripe paywall. The caller is responsible for
+    uniqueness checks (find_user) before creating.
     """
     fields = {"Username": username, "Email": email,
-              "Password": hashed_password}
+              "Password": hashed_password,
+              "SubscriptionStatus": "Active",
+              "TrialExpiry": trial_expiry_iso}
     return _request("POST", AIRTABLE_USERS_TABLE,
                     json={"fields": fields, "typecast": True})
 
@@ -270,14 +263,21 @@ def update_user_password(record_id, hashed_password):
 
 
 def set_subscription_status(record_id, status):
-    """Flip one Users row's SubscriptionStatus ("Active" / "Expired").
+    """Flip one Users row's SubscriptionStatus ("Active" / "Expired" /
+    "Inactive").
+
+    Setting "Active" also clears TrialExpiry: activation comes from a PAID
+    Stripe checkout, and a leftover past trial date would make the
+    subscription gate flip the paying account straight back to Inactive.
 
     typecast lets Airtable create the select option if it's missing, so a
     base whose SubscriptionStatus choices were hand-typed differently can't
     silently reject the webhook's activation.
     """
-    body = {"records": [{"id": record_id,
-                         "fields": {"SubscriptionStatus": status}}],
+    fields = {"SubscriptionStatus": status}
+    if status == "Active":
+        fields["TrialExpiry"] = None
+    body = {"records": [{"id": record_id, "fields": fields}],
             "typecast": True}
     return _request("PATCH", AIRTABLE_USERS_TABLE, json=body)
 

@@ -15,8 +15,13 @@ cached Airtable logic and the data-retention hooks are unchanged:
        Password) -> code + new password -> pbkdf2 hash written to Airtable
        (ResetToken / ResetTokenExpiry columns; 15-min TTL, 5 attempts).
        "Εγγραφή εδώ": self-registration (Username/Email/Password) creates
-       the Users row with a hashed password and NO SubscriptionStatus, so
-       the first login lands on the paywall gateway for Stripe checkout.
+       the Users row with a hashed password, SubscriptionStatus "Active"
+       and TrialExpiry = now + 15 days (free trial, no card). While the
+       trial runs, the sidebar shows "⏳ Απομένουν X ημέρες δοκιμής"; once
+       TrialExpiry passes, the subscription gate flips the row to
+       "Inactive" in Airtable and the paywall takes over. A paid Stripe
+       activation clears TrialExpiry, so subscribers never re-trip the
+       trial check.
     2. Executive dashboard: a merged header row — the Συνολικά έσοδα (soft
        green) and Συνολικά έξοδα (soft red) KPI cards are REAL clickable
        buttons; tapping one toggles its inline Amount/Date/Category/
@@ -106,6 +111,9 @@ UPLOAD_TYPES = ["pdf", "jpg", "jpeg", "png", "webp"]
 SESSION_TTL_SECONDS = 12 * 3600
 # A password-reset code emailed by "Ξέχασα τον κωδικό μου" is valid this long.
 RESET_CODE_TTL_MINUTES = 15
+# Self-registered accounts start "Active" on a free trial this long; the
+# subscription gate flips them to "Inactive" (-> Stripe paywall) afterwards.
+TRIAL_DAYS = 15
 
 st.set_page_config(
     page_title="AuditAgent.ai",
@@ -230,6 +238,13 @@ ul[data-baseweb="menu"] li:hover { background: var(--aud-border) !important; }
 }
 .aud-brand-small span { color: var(--aud-accent-text); }
 .aud-user { color: var(--aud-muted); font-size: .82rem; margin: 2px 0 14px; word-break: break-all; }
+/* Free-trial countdown pill under the username. */
+.aud-trial {
+    display: inline-block; margin: -8px 0 14px; padding: 4px 10px;
+    border-radius: 999px; font-size: .78rem; font-weight: 600;
+    color: var(--aud-accent-text); background: rgba(0, 230, 118, .10);
+    border: 1px solid rgba(0, 230, 118, .35);
+}
 
 /* --- KPI cards ----------------------------------------------------------- */
 .aud-kpi-row { display: flex; gap: 12px; flex-wrap: wrap; margin: 2px 0 14px; }
@@ -1070,6 +1085,8 @@ def login_screen():
         st.session_state["session_token"] = _issue_session_token(username)
         st.session_state["subscription_verified"] = True
         st.session_state["subscription_status"] = record.get("SubscriptionStatus")
+        st.session_state["trial_expiry"] = record.get("TrialExpiry")
+        st.session_state["user_record_id"] = user["id"]
         st.rerun()
 
 
@@ -1130,9 +1147,11 @@ def _normalize_reset_token(value):
     return str(value).strip()
 
 
-def _parse_reset_expiry(value):
-    """UTC datetime from the ResetTokenExpiry cell, or None when unusable
-    (missing/garbled -> the caller treats it as expired: fail closed)."""
+def _parse_utc_datetime(value):
+    """UTC datetime from an Airtable date cell (ResetTokenExpiry,
+    TrialExpiry), or None when unusable (missing/garbled). Reset treats
+    None as expired (fail closed); the trial gate treats None as "no trial
+    running" — a paying account simply has no expiry date."""
     if not value:
         return None
     try:
@@ -1250,7 +1269,7 @@ def _reset_verify_form():
         _normalize_reset_token(stored), code)
 
     if code_matches:
-        expiry = _parse_reset_expiry(fields.get("ResetTokenExpiry"))
+        expiry = _parse_utc_datetime(fields.get("ResetTokenExpiry"))
         if expiry is None or expiry < datetime.now(timezone.utc):
             try:
                 db.clear_reset_token(record_id)
@@ -1297,14 +1316,16 @@ def _reset_verify_form():
 # --------------------------------------------------------------------------
 def _register_screen():
     """Create a Users row from the login card. The password is hashed
-    before it leaves the process (passwords.hash_password) and
-    SubscriptionStatus stays blank, so the new account lands on the paywall
-    gateway after its first login — Stripe checkout activates it there."""
+    before it leaves the process (passwords.hash_password) and the account
+    starts on a TRIAL_DAYS free trial (SubscriptionStatus "Active" +
+    TrialExpiry); when it lapses, the subscription gate flips the row to
+    "Inactive" and the paywall takes over — Stripe checkout reactivates."""
     _, mid, _ = st.columns([1, 1.7, 1])
     with mid:
         st.markdown("#### 📝 Δημιουργία Λογαριασμού")
-        st.caption("Το email χρειάζεται για την επαναφορά κωδικού και τις "
-                   "ειδοποιήσεις συνδρομής.")
+        st.caption(f"Με την εγγραφή ξεκινά δωρεάν δοκιμή {TRIAL_DAYS} "
+                   "ημερών — χωρίς κάρτα. Το email χρειάζεται για την "
+                   "επαναφορά κωδικού και τις ειδοποιήσεις συνδρομής.")
         with st.form("register"):
             username = st.text_input(
                 "Όνομα Χρήστη (Username)", placeholder="π.χ. mystore",
@@ -1350,7 +1371,10 @@ def _handle_registration(username, email, password):
             st.error("Το email αντιστοιχεί ήδη σε λογαριασμό. Δοκιμάστε "
                      "«Ξέχασα τον κωδικό μου».")
             return
-        db.create_user(username, email, passwords.hash_password(password))
+        trial_expiry = (datetime.now(timezone.utc)
+                        + timedelta(days=TRIAL_DAYS))
+        db.create_user(username, email, passwords.hash_password(password),
+                       trial_expiry.strftime("%Y-%m-%dT%H:%M:%SZ"))
     except db.AirtableError as exc:
         print(f"[WARN] Registration failed for {username!r}: {exc}")
         st.error("Η δημιουργία λογαριασμού απέτυχε προσωρινά. Παρακαλώ "
@@ -1358,7 +1382,8 @@ def _handle_registration(username, email, password):
         return
     st.session_state.pop("show_register", None)
     st.session_state["login_flash"] = (
-        "success", "Ο λογαριασμός δημιουργήθηκε επιτυχώς! Συνδεθείτε με τα "
+        "success", f"Ο λογαριασμός δημιουργήθηκε επιτυχώς — η δωρεάν δοκιμή "
+                   f"{TRIAL_DAYS} ημερών ξεκίνησε! Συνδεθείτε με τα "
                    "στοιχεία σας.")
     st.rerun()
 
@@ -1371,6 +1396,7 @@ def logout():
     for key in ("username", "session_token", "pending_invoice",
                 "processed_upload", "extraction_error",
                 "subscription_verified", "subscription_status",
+                "trial_expiry", "user_record_id",
                 "confirm_close", "flash", "confirm_delete_txn", "flash_recap",
                 "flash_toast", "flash_toast_alert", "nav_page",
                 "show_archived", "show_income_form", "show_expense_form"):
@@ -1423,8 +1449,9 @@ def _paywall_screen(username):
         # row — by then the Stripe webhook has flipped it to Active.
         if st.button("🔄 Πλήρωσα — Έλεγχος ενεργοποίησης", width="stretch",
                      key="paywall_recheck"):
-            st.session_state.pop("subscription_verified", None)
-            st.session_state.pop("subscription_status", None)
+            for key in ("subscription_verified", "subscription_status",
+                        "trial_expiry", "user_record_id"):
+                st.session_state.pop(key, None)
             st.rerun()
         if st.button("Αποσύνδεση", width="stretch", key="paywall_logout"):
             logout()
@@ -1445,30 +1472,67 @@ def subscription_gate(username):
     errors matters — failing open would let anyone in whenever the Users
     table is unreachable. Lookup FAILURES are never cached, so a transient
     outage doesn't lock the user out for the rest of the session.
+
+    Free trial: an "Active" row whose TrialExpiry lies in the past is a
+    lapsed trial — the row is flipped to "Inactive" in Airtable and the
+    paywall shows. Paying accounts carry no TrialExpiry (the Stripe
+    activation clears it), so they never hit the flip.
     """
     if not st.session_state.get("subscription_verified"):
         try:
-            status = db.get_subscription_status(username)
+            user = db.find_user(username=username)
         except db.AirtableError as exc:
             print(f"[WARN] Subscription check failed for {username!r}: {exc}")
             _lock_screen("Ο έλεγχος του λογαριασμού σας απέτυχε προσωρινά. "
                          "Παρακαλώ δοκιμάστε ξανά σε λίγο.")
             return False
+        fields = user["fields"] if user else {}
         st.session_state["subscription_verified"] = True
-        st.session_state["subscription_status"] = status
+        st.session_state["subscription_status"] = fields.get("SubscriptionStatus")
+        st.session_state["trial_expiry"] = fields.get("TrialExpiry")
+        st.session_state["user_record_id"] = user["id"] if user else None
 
     status = (st.session_state.get("subscription_status") or "").strip().lower()
     if status == "active":
-        return True
+        expiry = _parse_utc_datetime(st.session_state.get("trial_expiry"))
+        if expiry is None or expiry > datetime.now(timezone.utc):
+            return True  # paying account (no expiry) or trial still running
+        # Trial lapsed: persist the verdict to Airtable (best effort — access
+        # is denied this session either way, and if the write failed the next
+        # session's gate re-runs the same check) and show the paywall.
+        record_id = st.session_state.get("user_record_id")
+        if record_id:
+            try:
+                db.set_subscription_status(record_id, "Inactive")
+            except db.AirtableError as exc:
+                print(f"[WARN] Trial-lapse flip failed for {username!r}: {exc}")
+        st.session_state["subscription_status"] = "Inactive"
+        st.session_state.pop("trial_expiry", None)
 
     # Login already required an existing Users row with a matching password,
     # so EVERY non-Active verdict here — "Expired", "Inactive", "Unpaid",
-    # blank, or a row deleted mid-session — is a billing situation, not an
-    # error: show the payment gateway (subscribe link + re-check + logout)
-    # instead of a dead-end message. Access stays denied either way, so the
-    # strict allow-list is unchanged.
+    # blank, a lapsed trial, or a row deleted mid-session — is a billing
+    # situation, not an error: show the payment gateway (subscribe link +
+    # re-check + logout) instead of a dead-end message. Access stays denied
+    # either way, so the strict allow-list is unchanged.
     _paywall_screen(username)
     return False
+
+
+def _trial_days_left():
+    """Whole days of free trial remaining, or None when no badge belongs in
+    the sidebar (paying account without TrialExpiry, lapsed trial, verdict
+    not yet cached). Rounds UP — 4.2 days shows as 5, matching the user's
+    'it still works today' intuition."""
+    if (st.session_state.get("subscription_status") or "").strip().lower() != "active":
+        return None
+    expiry = _parse_utc_datetime(st.session_state.get("trial_expiry"))
+    if expiry is None:
+        return None
+    remaining = (expiry - datetime.now(timezone.utc)).total_seconds()
+    if remaining <= 0:
+        return None
+    return int(remaining // 86400) + 1
 
 
 # --------------------------------------------------------------------------
@@ -2159,6 +2223,16 @@ def _render_sidebar(username):
         if username:
             st.markdown(f'<div class="aud-user">{html.escape(username)}</div>',
                         unsafe_allow_html=True)
+            # Trial countdown. Reads the gate's cached verdict, so on the
+            # very first render of a restored session (sidebar paints before
+            # subscription_gate runs) it stays absent and appears from the
+            # next rerun on.
+            days = _trial_days_left()
+            if days is not None:
+                text = ("Απομένει 1 ημέρα δοκιμής" if days == 1
+                        else f"Απομένουν {days} ημέρες δοκιμής")
+                st.markdown(f'<div class="aud-trial">⏳ {text}</div>',
+                            unsafe_allow_html=True)
             _section("Πλοήγηση")
             st.radio("Πλοήγηση", PAGES, key="nav_page",
                      label_visibility="collapsed")
@@ -2179,8 +2253,9 @@ def _render_sidebar(username):
         # the analytics automatically.
         if st.button("🔄 Ανανέωση", width="stretch"):
             _invalidate_caches()
-            st.session_state.pop("subscription_verified", None)
-            st.session_state.pop("subscription_status", None)
+            for key in ("subscription_verified", "subscription_status",
+                        "trial_expiry", "user_record_id"):
+                st.session_state.pop(key, None)
             st.rerun()
 
 
