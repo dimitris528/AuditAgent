@@ -38,9 +38,15 @@ cached Airtable logic and the data-retention hooks are unchanged:
        Έσοδα of the same category. All amount fields across the app are
        plain manual text inputs (no +/- steppers), parsed leniently
        ("150", "12,50", "1.204,80").
-       Each active category card carries a small inline "🔒 Αρχειοθέτηση"
-       ghost button to its right; archived categories hide behind a large
-       KPI-styled "📂 Αρχειοθετημένες Κατηγορίες" toggle button. New
+       Each active category card carries small inline "🔒 Αρχειοθέτηση" and
+       "✏️ Επεξεργασία" ghost buttons to its right. Επεξεργασία reveals an
+       inline editor with two manual amount fields (Έσοδα / Έξοδα) and a
+       READ-ONLY Καθαρό preview that always equals Έσοδα − Έξοδα; saving
+       writes the difference from the current sums as signed correction
+       rows ("Χειροκίνητη διόρθωση…") in the Transactions table, so every
+       analytics view recalculates from the same source of truth. Archived
+       categories hide behind a large KPI-styled "📂 Αρχειοθετημένες
+       Κατηγορίες" toggle button. New
        categories are created inline from ANY category dropdown via the
        permanent trailing "➕ Δημιουργία Νέας Κατηγορίας..." option (there
        is no standalone creation form). The UI speaks generic business
@@ -58,10 +64,14 @@ cached Airtable logic and the data-retention hooks are unchanged:
        so dashboard/recap analytics update without a manual refresh; the
        confirmation arrives as a toast.
     4. Smart-period recap (current month / quarter / year / custom range) of
-       archived categories, plus the period's individual transactions with a
-       confirm-then-delete control on each row. Its totals row wears the
-       same palette as the dashboard header (green/red/sign-colored net),
-       and each transaction row is color-coded: income green, expense red.
+       archived categories. Its totals row wears the same palette as the
+       dashboard header, and — like the dashboard — the Συνολικά έσοδα /
+       Συνολικά έξοδα cards are REAL clickable buttons: tapping one reveals
+       the period's matching transaction list (income or expense rows,
+       color-coded, each with a confirm-then-delete control) directly
+       beneath the row; opening one closes the other. There is no separate
+       "Κινήσεις περιόδου" list anymore — recap only; the dashboard keeps
+       its own layout and quick-entry behavior untouched.
     5. Πληρωμές page: Stripe billing center — Payment Link for subscribing
        (10€/μήνα) and Customer Portal link for card changes/cancellation,
        both opening in a new browser tab. Logged-in users with ANY
@@ -303,9 +313,13 @@ ul[data-baseweb="menu"] li:hover { background: var(--aud-border) !important; }
    hexes by design — the same look in BOTH themes, so the label/value colors
    are pinned too (the theme's muted grey would wash out on these). The two
    cards are REAL st.buttons (keys qe_card_income / qe_card_expense) dressed
-   as KPI cards; tapping one toggles its inline quick-entry form. The div
-   prefix keeps specificity above the generic button[kind="secondary"] rules
-   below (same trick as the st-key-close_/st-key-del_ ghosts). */
+   as KPI cards; tapping one toggles its inline quick-entry form. The recap
+   (Ανασκόπηση) totals cards reuse these EXACT rules by suffixing the same
+   keys (qe_card_income_recap / qe_card_expense_recap / qe_card_net_recap):
+   every selector here matches on a class*= substring, so the suffixed keys
+   inherit the full treatment with zero extra CSS. The div prefix keeps
+   specificity above the generic button[kind="secondary"] rules below (same
+   trick as the st-key-close_/st-key-del_ ghosts). */
 div[class*="st-key-qe_card_"] button {
     width: 100%; min-height: 92px; border-radius: 16px; padding: 14px 20px;
     display: flex; flex-direction: column; align-items: flex-start;
@@ -389,12 +403,18 @@ div[class*="st-key-projcard_"]:hover { border-color: var(--aud-border-strong); }
 .aud-proj-value.accent { color: var(--aud-accent-text); }
 .aud-proj-value.loss { color: var(--aud-loss); }
 
-/* --- Close-project control --------------------------------------------------
-   Small "Αρχειοθέτηση" pill rendered INSIDE each category card (right
-   column, vertically centered): quiet rounded outline that warms to the
-   loss red on hover — it belongs to the card instead of floating beside it. */
-div[class*="st-key-close_"] { margin: 0; display: flex; justify-content: flex-end; }
-div[class*="st-key-close_"] button {
+/* --- Close / edit category controls ------------------------------------------
+   Small "Αρχειοθέτηση" and "Επεξεργασία" pills rendered INSIDE each category
+   card (right column, stacked, right-aligned): quiet rounded outlines that
+   warm on hover — Αρχειοθέτηση to the loss red, Επεξεργασία to the accent
+   green — so they belong to the card instead of floating beside it.
+   (editcat_ on purpose, NOT edit_: the inline editor's edit_rev_/edit_exp_
+   text inputs must never match these button rules.) */
+div[class*="st-key-close_"], div[class*="st-key-editcat_"] {
+    margin: 0; display: flex; justify-content: flex-end;
+}
+div[class*="st-key-editcat_"] { margin-top: 6px; }
+div[class*="st-key-close_"] button, div[class*="st-key-editcat_"] button {
     width: auto; min-height: 0;
     background: transparent; color: var(--aud-muted);
     border: 1px solid var(--aud-border-strong); border-radius: 999px;
@@ -404,6 +424,10 @@ div[class*="st-key-close_"] button {
 div[class*="st-key-close_"] button:hover {
     color: var(--aud-loss); border-color: rgba(255, 107, 87, .55);
     background: rgba(255, 107, 87, .08);
+}
+div[class*="st-key-editcat_"] button:hover {
+    color: var(--aud-accent-text); border-color: rgba(0, 230, 118, .55);
+    background: rgba(0, 230, 118, .08);
 }
 
 /* --- Transaction rows (recap) + ghost delete button -------------------------
@@ -859,8 +883,17 @@ def _amount(record):
 
 
 def _is_revenue(record):
-    """Revenue vs expense lives in the SIGN of Amount (the Type column is a
-    label only): positive/zero = Έσοδο, negative = Έξοδο."""
+    """Revenue vs expense classification. The explicit Type label wins when
+    present: the manual category editor writes correction rows whose Amount
+    sign is the DIRECTION of the correction (e.g. a negative Έσοδο row is a
+    downward revenue adjustment, not an expense). Rows without a label —
+    the AI-scanning path — keep the classic rule: the sign of Amount,
+    positive/zero = Έσοδο, negative = Έξοδο."""
+    type_ = (record["fields"].get("Type") or "").strip()
+    if type_ == "Έσοδο":
+        return True
+    if type_ == "Έξοδο":
+        return False
     return _amount(record) >= 0
 
 
@@ -884,11 +917,15 @@ def _split_debts(transactions):
 
 
 def _sum_by_type(records):
-    """Return (expense_total, revenue_total) — both positive magnitudes."""
+    """Return (expense_total, revenue_total) — positive magnitudes for
+    ordinary rows. Each row lands in the bucket _is_revenue picks and is
+    summed SIGNED there, so a manual correction row adjusts its own bucket
+    in either direction (a -200 Έσοδο row takes 200 OFF revenue instead of
+    inflating expenses)."""
     expense = revenue = 0.0
     for rec in records:
         amount = _amount(rec)
-        if amount >= 0:
+        if _is_revenue(rec):
             revenue += amount
         else:
             expense += -amount
@@ -1752,11 +1789,26 @@ def _archive_button(proj, name):
     """Small "🔒 Αρχειοθέτηση" pill inside one active category card (the
     CSS right-aligns and rounds it; no width stretch — it hugs its label).
     First tap arms the confirmation (stored in session state);
-    _close_project_control renders it full-width beneath the card."""
+    _close_project_control renders it full-width beneath the card. Arming
+    also closes an open inline editor so the two panels never stack."""
     record_id = proj["id"]
     if st.button("🔒 Αρχειοθέτηση", key=f"close_{record_id}",
                  help=f"Αρχειοθέτηση της κατηγορίας «{name}»"):
         st.session_state["confirm_close"] = record_id
+        st.session_state.pop("edit_project", None)
+        st.rerun()
+
+
+def _edit_button(proj, name):
+    """Small "✏️ Επεξεργασία" pill right below the Αρχειοθέτηση one (same
+    ghost treatment — see st-key-editcat_ in the CSS). Tapping it opens the
+    inline Έσοδα/Έξοδα editor beneath the card (_edit_project_control) and
+    disarms any pending archive confirmation."""
+    record_id = proj["id"]
+    if st.button("✏️ Επεξεργασία", key=f"editcat_{record_id}",
+                 help=f"Χειροκίνητη επεξεργασία των ποσών της κατηγορίας «{name}»"):
+        st.session_state["edit_project"] = record_id
+        st.session_state.pop("confirm_close", None)
         st.rerun()
 
 
@@ -1789,6 +1841,98 @@ def _close_project_control(proj, name):
         if st.button("✕ Άκυρο", key=f"no_{record_id}", width="stretch"):
             st.session_state.pop("confirm_close", None)
             st.rerun()
+
+
+def _amount_text(value):
+    """Prefill text for a manual amount field: "1204,50" — plain digits with
+    a decimal comma, exactly the shape _parse_amount reads back."""
+    return f"{float(value or 0):.2f}".replace(".", ",")
+
+
+def _edit_project_control(username, proj, name, rev, exp):
+    """Inline manual editor for one active category, revealed by its
+    ✏️ Επεξεργασία pill: two manual amount fields (Έσοδα / Έξοδα) plus a
+    READ-ONLY Καθαρό card that always shows Έσοδα − Έξοδα — the user never
+    types the net; it recomputes from the fields (or the stored sums while
+    a field holds unparseable text) and again on save."""
+    record_id = proj["id"]
+    if st.session_state.get("edit_project") != record_id:
+        return
+    st.info(f"Επεξεργασία ποσών της κατηγορίας «{name}». Το Καθαρό "
+            "υπολογίζεται αυτόματα ως Έσοδα − Έξοδα.")
+    col_rev, col_exp = st.columns(2)
+    with col_rev:
+        rev_text = st.text_input("Έσοδα (€)", value=_amount_text(rev),
+                                 key=f"edit_rev_{record_id}")
+    with col_exp:
+        exp_text = st.text_input("Έξοδα (€)", value=_amount_text(exp),
+                                 key=f"edit_exp_{record_id}")
+    new_rev = _parse_amount(rev_text)
+    new_exp = _parse_amount(exp_text)
+    net_preview = ((new_rev if new_rev is not None else rev)
+                   - (new_exp if new_exp is not None else exp))
+    _kpi_row([("Καθαρό (υπολογίζεται αυτόματα)", _money(net_preview),
+               _net_kind(net_preview))])
+    col_save, col_cancel = st.columns(2)
+    with col_save:
+        if st.button("💾 Αποθήκευση", key=f"saveedit_{record_id}",
+                     type="primary", width="stretch"):
+            _save_project_edit(username, name, rev, exp, new_rev, new_exp)
+    with col_cancel:
+        if st.button("✕ Άκυρο", key=f"canceledit_{record_id}",
+                     width="stretch"):
+            st.session_state.pop("edit_project", None)
+            st.rerun()
+
+
+def _save_project_edit(username, name, rev, exp, new_rev, new_exp):
+    """Persist a manual category edit. The category's Έσοδα/Έξοδα are SUMS
+    of its Transactions rows — there is nothing to overwrite in Projects —
+    so the edit lands as signed correction rows: the delta between each
+    target and the current sum, labeled Type Έσοδο/Έξοδο with the direction
+    in the sign (see _is_revenue). After the write every view — category
+    card, dashboard header, recap — recomputes to exactly the typed values,
+    and Καθαρό falls out as Έσοδα − Έξοδα."""
+    if (new_rev is None or new_rev < 0 or new_exp is None or new_exp < 0):
+        st.error("Παρακαλώ εισάγετε έγκυρα ποσά (0 ή μεγαλύτερα) στα πεδία "
+                 "Έσοδα και Έξοδα (π.χ. 150,00).")
+        return
+    rev_delta = round(new_rev - rev, 2)
+    exp_delta = round(new_exp - exp, 2)
+    if not rev_delta and not exp_delta:
+        st.session_state.pop("edit_project", None)
+        st.rerun()
+    written = False
+    try:
+        if rev_delta:
+            db.create_transaction(
+                username, name, rev_delta,
+                description=("Χειροκίνητη διόρθωση εσόδων "
+                             f"({'+' if rev_delta > 0 else '-'}"
+                             f"{_money(rev_delta)})"),
+                date=date.today(), type_="Έσοδο", source="Manual")
+            written = True
+        if exp_delta:
+            db.create_transaction(
+                username, name, -exp_delta,
+                description=("Χειροκίνητη διόρθωση εξόδων "
+                             f"({'+' if exp_delta > 0 else '-'}"
+                             f"{_money(exp_delta)})"),
+                date=date.today(), type_="Έξοδο", source="Manual")
+            written = True
+    except db.AirtableError as exc:
+        # A partial write (revenue row saved, expense row failed) must not
+        # leave the stale sums as the next retry's baseline.
+        if written:
+            _invalidate_caches()
+        st.error(f"❌ Η αποθήκευση της διόρθωσης απέτυχε: {exc}")
+        return
+    st.session_state.pop("edit_project", None)
+    _invalidate_caches()
+    st.session_state["flash"] = (
+        f"Η κατηγορία «{name}» ενημερώθηκε: Έσοδα {_money(new_rev)}, "
+        f"Έξοδα {_money(new_exp)}, Καθαρό {_money(new_rev - new_exp)}.")
+    st.rerun()
 
 
 _QUICK_ENTRY_FLAGS = ("show_income_form", "show_expense_form",
@@ -2112,15 +2256,17 @@ def dashboard_tab(username):
         for proj, (rev, exp, pnet) in zip(active, totals):
             name = proj["fields"].get("Name") or "—"
             # The keyed container IS the card (full row width); info and the
-            # archive pill share its inside via columns.
+            # stacked archive/edit pills share its inside via columns.
             with st.container(key=f"projcard_{proj['id']}"):
-                col_info, col_archive = st.columns(
+                col_info, col_actions = st.columns(
                     [3.4, 1.1], vertical_alignment="center")
                 with col_info:
                     _project_card_body(name, rev, exp, pnet)
-                with col_archive:
+                with col_actions:
                     _archive_button(proj, name)
+                    _edit_button(proj, name)
             _close_project_control(proj, name)
+            _edit_project_control(username, proj, name, rev, exp)
 
     if completed:
         _closed_projects_section(completed, grouped)
@@ -2359,18 +2505,19 @@ def _delete_txn_control(record_id):
             st.rerun()
 
 
-def _period_transactions_section(period_txns):
-    """List the period's individual transactions, each with a delete control.
+def _recap_txn_list(title, txns):
+    """One flow's transaction list under its clickable recap totals card,
+    each row with its confirm-then-delete control.
 
-    Receives the ALREADY date-filtered period scope built in recap_tab — the
-    same list the summary table and KPI totals sum — so the rows shown here
-    always add up to exactly the figures above them."""
-    period = sorted(period_txns, key=_txn_date, reverse=True)
-    _section(f"Κινήσεις περιόδου ({len(period)})")
-    if not period:
+    Receives an ALREADY date-filtered slice of the period scope built in
+    recap_tab — the same rows the summary table and KPI totals sum — so the
+    list always adds up to exactly the card that revealed it."""
+    txns = sorted(txns, key=_txn_date, reverse=True)
+    _section(f"{title} ({len(txns)})")
+    if not txns:
         _empty_state("Δεν υπάρχουν κινήσεις στην επιλεγμένη περίοδο.")
         return
-    for txn in period:
+    for txn in txns:
         fields = txn["fields"]
         is_revenue = _is_revenue(txn)
         detail = (fields.get("Description")
@@ -2399,6 +2546,41 @@ def _period_transactions_section(period_txns):
                 st.session_state["confirm_delete_txn"] = txn["id"]
                 st.rerun()
         _delete_txn_control(txn["id"])
+
+
+_RECAP_LIST_FLAGS = ("recap_show_income", "recap_show_expense")
+
+
+def _toggle_recap_list(which):
+    """on_click for the recap Συνολικά έσοδα/έξοδα card-buttons: toggle one
+    transaction list and close the other — mutually exclusive, exactly like
+    the dashboard's quick-entry cards."""
+    was_open = st.session_state.get(which, False)
+    for flag in _RECAP_LIST_FLAGS:
+        st.session_state[flag] = False
+    st.session_state[which] = not was_open
+
+
+def _recap_totals_row(total_rev, total_exp, net):
+    """The recap totals row, recast in the dashboard header's mold: the
+    Συνολικά έσοδα / Συνολικά έξοδα cards are REAL clickable buttons (their
+    qe_card_*_recap keys ride the dashboard cards' CSS via the class*=
+    substring match) that reveal the period's matching transaction list
+    beneath the row; Καθαρό κέρδος stays a static sign-colored card."""
+    col_rev, col_exp, col_net = st.columns(3)
+    with col_rev:
+        st.button(f"Συνολικά έσοδα\n\n{_money(total_rev)}",
+                  key="qe_card_income_recap", width="stretch",
+                  help="Πατήστε για τις κινήσεις εσόδων της περιόδου",
+                  on_click=_toggle_recap_list, args=("recap_show_income",))
+    with col_exp:
+        st.button(f"Συνολικά έξοδα\n\n{_money(total_exp)}",
+                  key="qe_card_expense_recap", width="stretch",
+                  help="Πατήστε για τις κινήσεις εξόδων της περιόδου",
+                  on_click=_toggle_recap_list, args=("recap_show_expense",))
+    with col_net:
+        with st.container(key="qe_card_net_recap"):
+            _kpi_row([("Καθαρό κέρδος", _money(net), _net_kind(net))])
 
 
 def recap_tab(username):
@@ -2455,7 +2637,7 @@ def recap_tab(username):
     # (yet) — once resolved, their Type flips to "Έσοδο" and they show here.
     transactions, _debts = _split_debts(transactions)
     # ONE period scope feeds everything below — the summary table, the KPI
-    # totals and the Κινήσεις list — so the three can never disagree. The
+    # totals and the per-card Κινήσεις lists — so they can never disagree. The
     # old flow summed the LIFETIME totals of categories archived INSIDE the
     # range instead: entries living in active (or long-archived) categories
     # were dropped, so the cards showed a fraction of what the list summed.
@@ -2508,15 +2690,19 @@ def recap_tab(username):
         )
 
         net = total_rev - total_exp
-        # Same visual language as the dashboard header: green revenue card,
-        # red expense card, sign-colored net card.
-        _kpi_row([
-            ("Συνολικά έσοδα", _money(total_rev), "revenue"),
-            ("Συνολικά έξοδα", _money(total_exp), "expense"),
-            ("Καθαρό κέρδος", _money(net), _net_kind(net)),
-        ])
-
-    _period_transactions_section(period_txns)
+        # Same visual language as the dashboard header — and the same
+        # interaction: the old standalone «Κινήσεις περιόδου» list at the
+        # bottom is gone; tapping Συνολικά έσοδα or Συνολικά έξοδα reveals
+        # the period's matching transactions (with their delete controls)
+        # right under the cards instead. Recap only — the dashboard's
+        # cards keep toggling their quick-entry forms.
+        _recap_totals_row(total_rev, total_exp, net)
+        if st.session_state.get("recap_show_income"):
+            _recap_txn_list("Κινήσεις εσόδων περιόδου",
+                            [t for t in period_txns if _is_revenue(t)])
+        elif st.session_state.get("recap_show_expense"):
+            _recap_txn_list("Κινήσεις εξόδων περιόδου",
+                            [t for t in period_txns if not _is_revenue(t)])
 
 
 # --------------------------------------------------------------------------
