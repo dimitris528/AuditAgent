@@ -1969,19 +1969,28 @@ def _category_picker(category_names, key, default_index=0):
     return choice, new_name
 
 
-def _resolve_category(username, choice, new_name):
+def _resolve_category(username, choice, new_name, category_names):
     """Turn a picker result into a real category name at save time, creating
     the Projects row when the "create new" option was chosen (an existing
     active category of the same name is simply reused). Returns None — with
-    the error already rendered — when the save must be aborted."""
+    the error already rendered — when the save must be aborted.
+
+    The existence check reads `category_names` — the caller's already-loaded
+    (cached) active-projects list — instead of issuing a fresh
+    find_active_project API call: that list was just fetched via
+    _load_active_projects moments earlier, so re-querying Airtable here would
+    be a redundant read on every single transaction save."""
     if choice != NEW_CATEGORY_OPTION:
         return choice
     name = new_name.strip()
     if not name:
         st.error("Παρακαλώ εισάγετε το όνομα της νέας κατηγορίας.")
         return None
+    already_exists = name.strip().lower() in {
+        (n or "").strip().lower() for n in category_names
+    }
     try:
-        if not db.find_active_project(username, name):
+        if not already_exists:
             db.create_project(username, name)
             _invalidate_caches()
     except db.AirtableError as exc:
@@ -2023,7 +2032,7 @@ def _quick_entry_form(username, category_names, entry_type):
         st.error("Παρακαλώ εισάγετε έγκυρο ποσό μεγαλύτερο από 0 "
                  "(π.χ. 150,00).")
         return
-    category = _resolve_category(username, choice, new_category)
+    category = _resolve_category(username, choice, new_category, category_names)
     if category is None:
         return
     signed = amount if entry_type == "Έσοδο" else -amount
@@ -2071,7 +2080,7 @@ def _debt_entry_panel(username, category_names, debts):
             st.error("Παρακαλώ εισάγετε έγκυρο ποσό μεγαλύτερο από 0 "
                      "(π.χ. 150,00).")
         else:
-            category = _resolve_category(username, choice, new_category)
+            category = _resolve_category(username, choice, new_category, category_names)
             if category is not None:
                 try:
                     # Positive Amount + Type "Χρεωστούμενο": the row carries
@@ -2391,7 +2400,7 @@ def _invoice_flow(username):
             return
         # Resolve the picker first: a "create new" choice with a blank name
         # aborts before anything touches Airtable.
-        category = _resolve_category(username, choice, new_category)
+        category = _resolve_category(username, choice, new_category, category_names)
         if category is None:
             return
         # Duplicate-receipt guard: the SHA-256 fingerprint computed at upload
@@ -2404,7 +2413,15 @@ def _invoice_flow(username):
             part for part in (provider.strip(), description.strip()) if part
         ) or None
         try:
-            if file_hash and db.find_transaction_by_hash(username, file_hash):
+            # Reuses the cached transaction list instead of issuing a fresh
+            # find_transaction_by_hash API call on every single invoice save;
+            # every create_transaction below invalidates the cache right
+            # after the write, so this stays exactly as fresh as the rest of
+            # the app's cached reads.
+            if file_hash and any(
+                (t["fields"].get("FileHash") or "") == file_hash
+                for t in _load_transactions(username)
+            ):
                 st.error("⚠️ Αυτό το παραστατικό έχει ήδη καταχωρηθεί στο σύστημα!")
                 return
             # Invoices are expenses -> stored negative; a credit note typed as
