@@ -23,26 +23,48 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 # System prompt: force the model into a deterministic, JSON-only data extractor.
 SYSTEM_PROMPT = (
     "You are a data extraction engine for the technical office of a construction "
-    "company. You receive the raw text of a supplier invoice for building "
-    "materials. Extract the requested fields and respond with STRICTLY a single "
-    "valid JSON object. Do NOT wrap it in markdown code fences. Do NOT add any "
-    "conversational text, explanations, or comments. Use exactly these keys:\n"
-    '  "provider_name"      -> the name of the supplier/vendor (string)\n'
-    '  "date"               -> the invoice date (string, as printed)\n'
+    "company. You receive the raw text (or image) of a business document: either "
+    "a supplier invoice/receipt for building materials, or a sales invoice/receipt "
+    "the company itself issued to a customer. Extract the requested fields and "
+    "respond with STRICTLY a single valid JSON object. Do NOT wrap it in markdown "
+    "code fences. Do NOT add any conversational text, explanations, or comments. "
+    "Use exactly these keys:\n"
+    '  "provider_name"      -> the name of the supplier/vendor issuing a purchase '
+    "document, OR the name of the customer/client on a sales document the company "
+    "issued (string)\n"
+    '  "date"               -> the document date (string, as printed)\n'
     '  "total_amount"       -> the final total payable including VAT\n'
-    '  "materials_summary"  -> a short summary of the materials/line items (string)\n'
+    '  "materials_summary"  -> a short summary of the materials/line items or '
+    "services (string)\n"
     '  "project_name"       -> the construction project / building site / job name '
-    "this invoice explicitly refers to (e.g. a site address, a building name, or a "
+    "this document explicitly refers to (e.g. a site address, a building name, or a "
     'reference like "Έργο: ..."). Return null if no specific project is named — do '
     "NOT guess or invent one.\n"
+    '  "document_type"      -> classify the document as "income" or "expense". Use '
+    "these rules:\n"
+    "      * \"income\" — the document is a SALES invoice or receipt ISSUED BY the "
+    "company/user to a customer (money coming IN). Greek documents titled "
+    '"ΤΙΜΟΛΟΓΙΟ ΠΩΛΗΣΗΣ", "ΑΠΟΔΕΙΞΗ ΠΑΡΟΧΗΣ ΥΠΗΡΕΣΙΩΝ", "ΑΠΟΔΕΙΞΗ ΛΙΑΝΙΚΗΣ '
+    'ΠΩΛΗΣΗΣ", "ΤΙΜΟΛΟΓΙΟ ΠΑΡΟΧΗΣ ΥΠΗΡΕΣΙΩΝ", or English "Sales Invoice"/"Sales '
+    'Receipt" are income.\n'
+    "      * \"expense\" — the document is a PURCHASE receipt or a VENDOR/supplier "
+    "invoice issued TO the company/user (money going OUT), e.g. a materials "
+    'supplier\'s "ΤΙΜΟΛΟΓΙΟ ΑΓΟΡΑΣ", "ΔΕΛΤΙΟ ΑΠΟΣΤΟΛΗΣ", or any purchase receipt. '
+    "This is the default when the document's direction is unclear.\n"
+    "      Base the classification on who ISSUED the document relative to who "
+    "RECEIVES it, not just the presence of the word \"invoice\" — the deciding "
+    "question is whether the company is the seller (income) or the buyer "
+    "(expense) in this transaction.\n"
     "\n"
     "LANGUAGE RULES:\n"
     "- The JSON KEYS must always stay in English exactly as listed above "
-    "(provider_name, date, total_amount, materials_summary, project_name) for "
-    "database compatibility.\n"
-    "- The VALUES must be returned in the SAME language as the invoice. If the "
-    "invoice is in Greek, keep provider_name in Greek and write the "
-    "materials_summary in Greek. Do NOT translate the values to English.\n"
+    "(provider_name, date, total_amount, materials_summary, project_name, "
+    "document_type) for database compatibility.\n"
+    "- The VALUES must be returned in the SAME language as the invoice, EXCEPT "
+    "document_type which must always be the literal English string \"income\" or "
+    "\"expense\". If the invoice is in Greek, keep provider_name in Greek and "
+    "write the materials_summary in Greek. Do NOT translate the values to "
+    "English.\n"
     "\n"
     "NUMERIC RULES:\n"
     "- For total_amount, return the numeric value cleanly. Preserve the original "
@@ -50,7 +72,9 @@ SYSTEM_PROMPT = (
     '"1.450,00 €" -> "1450.00 €"). Use a dot as the decimal separator and do not '
     "include thousands separators.\n"
     "\n"
-    "If a field cannot be found, use the value null. Output JSON only."
+    "If a field cannot be found, use the value null (document_type must still be "
+    "\"income\" or \"expense\" — never null; default to \"expense\" if genuinely "
+    "ambiguous). Output JSON only."
 )
 
 

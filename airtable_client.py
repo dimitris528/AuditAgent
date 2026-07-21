@@ -23,16 +23,18 @@ Required Airtable schema (create these in your base before running the app):
                                           per-tenant duplicate-receipt guard
                                           (AI scanning path only)
       Type          Single select       - "Έσοδο" / "Έξοδο" / "Χρεωστούμενο"
-                                          label (optional; manual entries
-                                          only — the sign of Amount stays the
-                                          source of truth for revenue vs
-                                          expense). "Χρεωστούμενο" rows are
-                                          DEBTS/receivables: positive Amount,
+                                          label (optional; set by both the
+                                          manual-entry and AI-scan paths — the
+                                          sign of Amount stays the source of
+                                          truth for revenue vs expense).
+                                          "Χρεωστούμενο" rows are DEBTS/
+                                          receivables: positive Amount,
                                           excluded from every revenue/expense
                                           figure until resolve_debt_transaction
                                           flips the Type to "Έσοδο"
-      Source        Single select       - e.g. "Manual" (optional; manual
-                                          entries only)
+      Source        Single select       - "Manual" (quick-entry/debt forms) or
+                                          "AI Scan" (invoice/receipt upload
+                                          flow); optional
       The save payload NEVER contains any key outside these columns —
       enforced by _TRANSACTION_COLUMNS below — so a failed write can only
       mean one of them is missing/renamed in the base.
@@ -83,8 +85,8 @@ API_ROOT = "https://api.airtable.com/v0"
 
 # The ONLY columns a Transactions write may carry (case-sensitive — they must
 # match the Airtable base exactly). Type and Source are optional labels the
-# manual-entry flow sends; the analytics still derive revenue/expense from
-# the sign of Amount.
+# manual-entry and AI-scan flows send; the analytics still derive revenue/
+# expense from the sign of Amount.
 _TRANSACTION_COLUMNS = frozenset(
     {"Username", "Amount", "Date", "Category", "FileHash", "Description",
      "Type", "Source"}

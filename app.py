@@ -186,6 +186,16 @@ html, body, .stApp, .stApp * {
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI',
                  Roboto, 'Helvetica Neue', Arial, sans-serif;
 }
+/* Belt-and-braces for auto-translate extensions (Samsung Internet Translate,
+   Chrome's built-in translate, etc.): the CSS Translate Level 4 property is
+   the modern equivalent of the notranslate class/attribute/meta trio that
+   _install_notranslate_guard stamps onto html/body/.stApp via JS. Rewriting
+   text nodes inside React's tree is what triggers the removeChild crash on
+   Samsung devices, so every layer that can say "don't touch this" is
+   applied. */
+.notranslate, html.notranslate, body.notranslate, .stApp.notranslate {
+    translate: no;
+}
 /* Material icon glyphs are ligatures — they must keep their icon font or they
    render as raw words ("keyboard_arrow_right"). Re-assert after the override. */
 [data-testid="stIconMaterial"], [class*="material-symbols"], [class*="material-icons"] {
@@ -886,9 +896,10 @@ def _is_revenue(record):
     """Revenue vs expense classification. The explicit Type label wins when
     present: the manual category editor writes correction rows whose Amount
     sign is the DIRECTION of the correction (e.g. a negative Έσοδο row is a
-    downward revenue adjustment, not an expense). Rows without a label —
-    the AI-scanning path — keep the classic rule: the sign of Amount,
-    positive/zero = Έσοδο, negative = Έξοδο."""
+    downward revenue adjustment, not an expense), and the AI-scan path now
+    also stamps Type from the user-reviewed prediction. Older rows without a
+    label fall back to the classic rule: the sign of Amount, positive/zero =
+    Έσοδο, negative = Έξοδο."""
     type_ = (record["fields"].get("Type") or "").strip()
     if type_ == "Έσοδο":
         return True
@@ -2363,13 +2374,23 @@ def _invoice_flow(username):
     # Prefill the manual amount input with the extracted total (dot-decimal,
     # two places); _parse_amount re-reads whatever the user types.
     extracted_amount = _parse_amount(pending.get("total_amount"))
+    # The AI's income/expense call ("document_type") pre-selects this toggle,
+    # but the user has the final say before anything is saved — e.g. a sales
+    # receipt the model missed, or a purchase invoice it misread as income.
+    type_options = ["Έξοδο", "Έσοδο"]
+    predicted_index = 1 if pending.get("document_type") == "income" else 0
     with st.form("confirm_invoice"):
-        provider = st.text_input("Προμηθευτής", value=pending.get("provider_name") or "")
-        # Plain manual text input (no +/- steppers). Negatives are allowed:
-        # credit notes legitimately carry negative totals.
+        provider = st.text_input("Προμηθευτής / Πελάτης",
+                                 value=pending.get("provider_name") or "")
+        entry_type = st.selectbox(
+            "Τύπος", type_options, index=predicted_index,
+            help="Προτεινόμενο από την ανάλυση AI — ελέγξτε πριν την αποθήκευση.",
+        )
+        # Plain manual text input (no +/- steppers); the Τύπος selectbox above
+        # carries the income/expense sign now, so this is always a magnitude.
         amount_text = st.text_input(
             "Συνολικό ποσό (€)",
-            value=f"{extracted_amount:.2f}" if extracted_amount is not None else "",
+            value=f"{abs(extracted_amount):.2f}" if extracted_amount is not None else "",
             placeholder="π.χ. 150,00",
         )
         # A real date picker: the user can't submit a malformed date, and the
@@ -2395,8 +2416,9 @@ def _invoice_flow(username):
 
     if save:
         amount = _parse_amount(amount_text)
-        if amount is None:
-            st.error("Παρακαλώ εισάγετε έγκυρο ποσό (π.χ. 150,00).")
+        if amount is None or amount <= 0:
+            st.error("Παρακαλώ εισάγετε έγκυρο ποσό μεγαλύτερο από 0 "
+                     "(π.χ. 150,00).")
             return
         # Resolve the picker first: a "create new" choice with a blank name
         # aborts before anything touches Airtable.
@@ -2412,6 +2434,9 @@ def _invoice_flow(username):
         full_description = " · ".join(
             part for part in (provider.strip(), description.strip()) if part
         ) or None
+        # Τύπος selectbox (AI-predicted, user-reviewable) is now the source of
+        # truth for the sign, not a heuristic on the typed amount.
+        signed = amount if entry_type == "Έσοδο" else -amount
         try:
             # Reuses the cached transaction list instead of issuing a fresh
             # find_transaction_by_hash API call on every single invoice save;
@@ -2424,13 +2449,13 @@ def _invoice_flow(username):
             ):
                 st.error("⚠️ Αυτό το παραστατικό έχει ήδη καταχωρηθεί στο σύστημα!")
                 return
-            # Invoices are expenses -> stored negative; a credit note typed as
-            # a negative total flips to positive (revenue), which is correct.
             db.create_transaction(
-                username, category, -amount,
+                username, category, signed,
                 description=full_description,
                 date=inv_date,  # date object; normalized to ISO in the client
                 file_hash=file_hash,
+                type_=entry_type,
+                source="AI Scan",
             )
         except db.AirtableError as exc:
             st.error(f"❌ Η αποθήκευση στο Airtable απέτυχε: {exc}")
@@ -2452,7 +2477,7 @@ def _invoice_flow(username):
             f"Το παραστατικό αποθηκεύτηκε επιτυχώς στην Κατηγορία "
             f"«{category}» — {_money(amount)}."
         )
-        if amount > HIGH_EXPENSE_THRESHOLD:
+        if entry_type == "Έξοδο" and amount > HIGH_EXPENSE_THRESHOLD:
             st.session_state["flash_toast_alert"] = (
                 f"ΠΡΟΕΙΔΟΠΟΙΗΣΗ ΥΨΗΛΟΥ ΕΞΟΔΟΥ — "
                 f"{provider.strip() or 'άγνωστος προμηθευτής'}: {_money(amount)} "
@@ -2840,6 +2865,58 @@ def _render_sidebar(username):
             st.rerun()
 
 
+def _install_notranslate_guard():
+    """Stop browser/OS auto-translate engines (Samsung Internet Translate,
+    Chrome's built-in translate, etc.) from rewriting text nodes inside the
+    tree React/Streamlit owns.
+
+    Those engines swap translated text into place by mutating existing DOM
+    nodes; when React later reconciles the same subtree it can try to
+    remove a node the extension has already detached, throwing an uncaught
+    `NotFoundError: Failed to execute 'removeChild' on 'Node'` that crashes
+    the whole app — observed on Samsung devices. Marking the tree
+    notranslate (the <meta name="google" content="notranslate"> tag, the
+    `notranslate` class, and the `translate="no"` attribute — the trio every
+    major engine checks) tells them to leave it alone before they ever get a
+    chance to touch it.
+
+    Runs once per page load, unconditionally (login screen included), same
+    guarded-parent-window pattern as _install_sidebar_autocollapse below:
+    st.markdown strips <script>, so this rides st.iframe and reaches the
+    real document via window.parent. Idempotent — safe to call on every
+    rerun since the guard flag short-circuits everything after the first."""
+    st.iframe(
+        """
+        <script>
+        (function () {
+            const root = window.parent;
+            if (root.__audNotranslateGuard) return;  // once per page load
+            root.__audNotranslateGuard = true;
+            const doc = root.document;
+
+            function mark(el) {
+                if (!el) return;
+                el.classList.add('notranslate');
+                el.setAttribute('translate', 'no');
+            }
+
+            if (!doc.querySelector('meta[name="google"][content="notranslate"]')) {
+                const meta = doc.createElement('meta');
+                meta.name = 'google';
+                meta.content = 'notranslate';
+                doc.head.appendChild(meta);
+            }
+            doc.documentElement.lang = 'el';
+            mark(doc.documentElement);
+            mark(doc.body);
+            mark(doc.querySelector('.stApp'));
+        })();
+        </script>
+        """,
+        height=1,
+    )
+
+
 def _install_sidebar_autocollapse():
     """Global listener: ANY tap on a nav_page menu option closes the sidebar
     on EVERY device — phones, laptops, desktops — for every page change:
@@ -2921,6 +2998,7 @@ def _flush_toasts():
 
 def main():
     _inject_css()
+    _install_notranslate_guard()
     _run_retention_cleanup()
     _restore_session()
 
