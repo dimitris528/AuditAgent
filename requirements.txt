@@ -12,6 +12,13 @@ stripe==15.3.0           # webhook signature verification + event types
 flask==3.1.3             # the /webhook POST endpoint
 gunicorn==26.0.0         # production WSGI server on Render (linux-only)
 
+# Web dashboard backend (server/main.py — FastAPI JSON API for the Next.js UI;
+# wraps airtable_client + finance, no new business logic). Run with:
+#   uvicorn server.main:app --port 8000
+fastapi==0.115.6         # REST endpoints for the Next.js dashboard
+uvicorn[standard]==0.34.0  # ASGI server (dev + prod)
+PyJWT==2.10.1            # JWT auth (auth.py) — Bearer tokens for the dashboard
+
 # --- Transitive binary deps, pinned to segfault-proof the deploy ------------
 # Exit 139 (SIGSEGV) on Render comes from compiled wheels mismatching the
 # interpreter build, so the packages that ship native code are locked to

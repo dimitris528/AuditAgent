@@ -52,3 +52,63 @@ services:
         sync: false
       - key: AIRTABLE_BASE_ID
         sync: false
+
+  # ========================================================================
+  # Web dashboard — two cooperating services:
+  #   accounting-api  (FastAPI, server/main.py)  ← the data + auth API
+  #   accounting-web  (Next.js, web/)            ← the dashboard UI
+  # The browser only ever talks to accounting-web (same-origin); the Next
+  # server calls accounting-api server-to-server with the tenant's Bearer
+  # token, so no cross-origin CORS is needed in production.
+  # ========================================================================
+
+  # --- FastAPI backend (native Python runtime) ----------------------------
+  - type: web
+    name: accounting-api
+    runtime: python
+    plan: free
+    autoDeploy: true
+    healthCheckPath: /api/health
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn server.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      # Airtable creds (same base as the Streamlit app). sync:false → set in
+      # the Render dashboard; never committed.
+      - key: AIRTABLE_PAT
+        sync: false
+      - key: AIRTABLE_BASE_ID
+        sync: false
+      # JWT signing key — Render generates a strong random value and keeps it
+      # stable across deploys.
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRE_HOURS
+        value: "12"
+      # Live data only in production (no demo fallback).
+      - key: DASHBOARD_DEMO
+        value: "0"
+      - key: DASHBOARD_TREND_MONTHS
+        value: "12"
+
+  # --- Next.js frontend (native Node runtime) -----------------------------
+  - type: web
+    name: accounting-web
+    runtime: node
+    plan: free
+    autoDeploy: true
+    rootDir: web
+    healthCheckPath: /login
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start
+    envVars:
+      # Base URL of the API service. fromService injects the hostname; the app
+      # upgrades a bare host to https (see web/src/lib/constants.ts → apiBase).
+      - key: API_BASE_URL
+        fromService:
+          type: web
+          name: accounting-api
+          property: host
+      - key: NODE_ENV
+        value: production

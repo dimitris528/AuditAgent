@@ -121,10 +121,25 @@ class AirtableError(RuntimeError):
     """Raised on configuration, network, or Airtable API failures."""
 
 
+# The placeholder values config.py falls back to when a secret is unset.
+_PAT_PLACEHOLDER = "YOUR_PERSONAL_ACCESS_TOKEN"
+_BASE_PLACEHOLDER = "YOUR_BASE_ID"
+
+
+def is_configured():
+    """True when a real Airtable PAT + Base ID are present (not the placeholder
+    defaults). Lets the web backend decide between live data and the demo
+    dataset WITHOUT issuing a failing request first."""
+    return bool(
+        AIRTABLE_PAT and AIRTABLE_PAT != _PAT_PLACEHOLDER
+        and AIRTABLE_BASE_ID and AIRTABLE_BASE_ID != _BASE_PLACEHOLDER
+    )
+
+
 def _headers():
-    if not AIRTABLE_PAT or AIRTABLE_PAT == "YOUR_PERSONAL_ACCESS_TOKEN":
+    if not AIRTABLE_PAT or AIRTABLE_PAT == _PAT_PLACEHOLDER:
         raise AirtableError("Airtable PAT is not configured (set AIRTABLE_PAT in .env).")
-    if not AIRTABLE_BASE_ID or AIRTABLE_BASE_ID == "YOUR_BASE_ID":
+    if not AIRTABLE_BASE_ID or AIRTABLE_BASE_ID == _BASE_PLACEHOLDER:
         raise AirtableError("Airtable Base ID is not configured (set AIRTABLE_BASE_ID in .env).")
     return {
         "Authorization": f"Bearer {AIRTABLE_PAT}",

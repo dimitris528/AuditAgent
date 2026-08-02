@@ -125,6 +125,7 @@ from email.message import EmailMessage
 import streamlit as st
 
 import airtable_client as db
+import finance
 import passwords
 from airtable_client import _subtract_years
 from config import SMTP_EMAIL, SMTP_HOST, SMTP_PASSWORD, SMTP_PORT
@@ -135,28 +136,20 @@ RETENTION_YEARS = 2
 UPLOAD_TYPES = ["pdf", "jpg", "jpeg", "png", "webp"]
 
 # --------------------------------------------------------------------------
-# Φ.Π.Α. (VAT) — per-transaction rate model
+# Φ.Π.Α. (VAT) + income-tax parameters — sourced from the shared finance module
 # --------------------------------------------------------------------------
 # Each transaction carries its OWN ΦΠΑ rate (Greek scale: 24 % standard, 13 %
-# reduced, 6 % super-reduced, 0 % exempt/intra-community). The VAT euro amount
-# is derived from the GROSS figure (Amount already includes VAT) as
-# gross × rate/(1+rate), rounded to cents ONCE and stored per row, so every
-# aggregate is a pure partition-sum and total VAT == Σ per-client VATs.
-VAT_RATES = (0.24, 0.13, 0.06, 0.0)
-DEFAULT_VAT_RATE = 0.24
-VAT_RATE_LABELS = {0.24: "24 %", 0.13: "13 %", 0.06: "6 %",
-                   0.0: "0 % (Απαλλαγή)"}
-
-# --------------------------------------------------------------------------
-# Φόρος Εισοδήματος — foundational per-client progress bar (placeholder scale)
-# --------------------------------------------------------------------------
-# Net taxable income (= net-of-VAT profit) is tracked toward a scale limit; the
-# bar changes status/colour once the income crosses from the low bracket into
-# the high one. Simplified two-bracket placeholder — swap for the full Greek
-# scale later.
-TAX_BRACKET_LIMIT = 10000.0   # € net taxable income where the rate steps up
-TAX_RATE_LOW = 0.22           # bracket below the limit
-TAX_RATE_HIGH = 0.29          # bracket at/above the limit
+# reduced, 6 % super-reduced, 0 % exempt). The VAT euro amount is derived from
+# the GROSS figure as gross × rate/(1+rate), rounded to cents ONCE and stored
+# per row, so every aggregate is a pure partition-sum and total VAT == Σ
+# per-client VATs. These constants and the pure helpers now live in finance.py
+# (single source of truth for Streamlit AND the web API).
+VAT_RATES = finance.VAT_RATES
+DEFAULT_VAT_RATE = finance.DEFAULT_VAT_RATE
+VAT_RATE_LABELS = finance.VAT_RATE_LABELS
+TAX_BRACKET_LIMIT = finance.TAX_BRACKET_LIMIT   # € net taxable income step-up
+TAX_RATE_LOW = finance.TAX_RATE_LOW             # bracket below the limit
+TAX_RATE_HIGH = finance.TAX_RATE_HIGH           # bracket at/above the limit
 # A login survives browser refreshes for this long (sliding window, renewed
 # on every restored page load).
 SESSION_TTL_SECONDS = 12 * 3600
@@ -983,186 +976,27 @@ def _money(value):
     return f"{abs(float(value or 0)):,.2f} €"
 
 
-def _amount(record):
-    return float(record["fields"].get("Amount") or 0)
-
-
-def _is_revenue(record):
-    """Revenue vs expense classification. The explicit Type label wins when
-    present: the manual category editor writes correction rows whose Amount
-    sign is the DIRECTION of the correction (e.g. a negative Έσοδο row is a
-    downward revenue adjustment, not an expense), and the AI-scan path now
-    also stamps Type from the user-reviewed prediction. Older rows without a
-    label fall back to the classic rule: the sign of Amount, positive/zero =
-    Έσοδο, negative = Έξοδο."""
-    type_ = (record["fields"].get("Type") or "").strip()
-    if type_ == "Έσοδο":
-        return True
-    if type_ == "Έξοδο":
-        return False
-    return _amount(record) >= 0
-
-
-# Χρεωστούμενα (debts/receivables) ride the Transactions table as rows whose
-# Type carries this label: positive Amount, excluded from every revenue/
-# expense figure until Εξόφληση flips the Type to "Έσοδο".
-DEBT_TYPE = "Χρεωστούμενο"
-
-
-def _is_debt(record):
-    return (record["fields"].get("Type") or "").strip() == DEBT_TYPE
-
-
-def _split_debts(transactions):
-    """Return (regular, debts): debts never enter the revenue/expense math —
-    only the yellow Χρεωστούμενα KPI card and its panel see them."""
-    regular, debts = [], []
-    for txn in transactions:
-        (debts if _is_debt(txn) else regular).append(txn)
-    return regular, debts
-
-
-def _sum_by_type(records):
-    """Return (expense_total, revenue_total) — positive magnitudes for
-    ordinary rows. Each row lands in the bucket _is_revenue picks and is
-    summed SIGNED there, so a manual correction row adjusts its own bucket
-    in either direction (a -200 Έσοδο row takes 200 OFF revenue instead of
-    inflating expenses)."""
-    expense = revenue = 0.0
-    for rec in records:
-        amount = _amount(rec)
-        if _is_revenue(rec):
-            revenue += amount
-        else:
-            expense += -amount
-    return expense, revenue
-
-
-# --------------------------------------------------------------------------
-# Φ.Π.Α. (VAT) helpers — see the module constants above
-# --------------------------------------------------------------------------
-def _vat_of(gross, rate):
-    """The ΦΠΑ portion of a GROSS (VAT-inclusive) figure at `rate`, in euro,
-    rounded to cents. Sign follows `gross` so signed correction rows stay
-    correct; a 0 rate yields exactly 0."""
-    if not rate:
-        return 0.0
-    return round(gross * rate / (1 + rate), 2)
-
-
-def _vat_for_write(signed_amount, is_revenue, rate):
-    """The VAT_Amount to STORE for a new/edited row. Mirrors the bucket
-    orientation of _sum_by_type (revenue rows use the signed amount, expense
-    rows its negation), so the stored cents drop straight into the same
-    bucket at read time — output VAT on revenue, input VAT on expenses,
-    positive for ordinary rows and correctly signed for corrections."""
-    bucket = signed_amount if is_revenue else -signed_amount
-    return _vat_of(bucket, rate)
-
-
-def _txn_vat(record):
-    """One row's VAT in its bucket's orientation. Prefers the STORED
-    VAT_Amount (persisted at creation/edit); legacy rows without it fall back
-    to the identical derivation at the DEFAULT rate, so mixing stored and
-    derived rows never introduces a discrepancy."""
-    stored = record["fields"].get("VAT_Amount")
-    if stored is not None:
-        return float(stored)
-    bucket = _amount(record) if _is_revenue(record) else -_amount(record)
-    return _vat_of(bucket, DEFAULT_VAT_RATE)
-
-
-def _vat_by_type(records):
-    """Return (expense_vat, revenue_vat): the input/output ΦΠΑ magnitudes,
-    bucketed exactly like _sum_by_type so they align cent-for-cent with the
-    revenue/expense figures."""
-    expense_vat = revenue_vat = 0.0
-    for rec in records:
-        vat = _txn_vat(rec)
-        if _is_revenue(rec):
-            revenue_vat += vat
-        else:
-            expense_vat += vat
-    return expense_vat, revenue_vat
-
-
-def _debts_by_client(debts):
-    """Sum of OUTSTANDING debt amounts per client (category key)."""
-    totals = {}
-    for txn in debts:
-        key = (txn["fields"].get("Category") or "").strip().lower()
-        totals[key] = totals.get(key, 0.0) + _amount(txn)
-    return totals
-
-
-def _client_metrics(name, grouped, client_debt=0.0):
-    """Full accounting snapshot for one client: gross AND net-of-VAT flows,
-    the net ΦΠΑ balance, this client's outstanding debts, and the net-of-VAT
-    profit (Καθαρό Αποτέλεσμα). Every euro figure is rounded to cents; net_vat
-    is the per-client VAT the total KPI sums."""
-    recs = grouped.get((name or "").strip().lower(), [])
-    gross_exp, gross_rev = _sum_by_type(recs)
-    exp_vat, rev_vat = _vat_by_type(recs)
-    net_vat = round(rev_vat - exp_vat, 2)          # output − input VAT
-    net_rev = round(gross_rev - rev_vat, 2)
-    net_exp = round(gross_exp - exp_vat, 2)
-    net_profit = round(net_rev - net_exp, 2)       # net-of-VAT result
-    return {
-        "gross_rev": round(gross_rev, 2),
-        "net_rev": net_rev,
-        "gross_exp": round(gross_exp, 2),
-        "net_exp": net_exp,
-        "net_vat": net_vat,
-        "debt": round(client_debt, 2),
-        "net_profit": net_profit,
-        "taxable": net_profit,
-    }
-
-
-def _transactions_by_category(transactions):
-    grouped = {}
-    for txn in transactions:
-        key = (txn["fields"].get("Category") or "").strip().lower()
-        grouped.setdefault(key, []).append(txn)
-    return grouped
-
-
-def _project_financials(name, grouped):
-    exp, rev = _sum_by_type(grouped.get((name or "").strip().lower(), []))
-    return rev, exp, rev - exp
-
-
-def _closed_date(record):
-    raw = (record["fields"].get("ClosedDate") or "")[:10]
-    try:
-        return date.fromisoformat(raw) if raw else None
-    except ValueError:
-        return None
-
-
-def _txn_date(record):
-    """A transaction's effective date as a datetime.date.
-
-    The Date column is a plain ISO day ("YYYY-MM-DD" — create_transaction
-    funnels every input through to_iso_date), so it parses directly and
-    compares cleanly against st.date_input values. Rows without a Date fall
-    back to Airtable's createdTime, a UTC timestamp: convert it to LOCAL
-    time BEFORE taking the date, otherwise an entry keyed in near midnight
-    lands on the neighbouring day and silently falls out of month/quarter
-    boundaries in the recap filter.
-    """
-    raw = (record["fields"].get("Date") or "")[:10]
-    if raw:
-        try:
-            return date.fromisoformat(raw)
-        except ValueError:
-            return None
-    created = record.get("createdTime") or ""
-    try:
-        stamp = datetime.fromisoformat(created.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return stamp.astimezone().date()
+# The pure financial helpers below are re-exported from the shared `finance`
+# module under the app's existing private names, so every call site is
+# unchanged while Streamlit and the FastAPI web backend compute from ONE source
+# of truth (the VAT-summation guarantee can never drift between them). Only the
+# display/HTML helpers (_money, _net_kind, the *_block renderers …) stay here.
+_amount = finance.amount
+_is_revenue = finance.is_revenue
+DEBT_TYPE = finance.DEBT_TYPE
+_is_debt = finance.is_debt
+_split_debts = finance.split_debts
+_sum_by_type = finance.sum_by_type
+_vat_of = finance.vat_of
+_vat_for_write = finance.vat_for_write
+_txn_vat = finance.txn_vat
+_vat_by_type = finance.vat_by_type
+_debts_by_client = finance.debts_by_client
+_client_metrics = finance.client_metrics
+_transactions_by_category = finance.transactions_by_category
+_project_financials = finance.project_financials
+_closed_date = finance.closed_date
+_txn_date = finance.txn_date
 
 
 def _extract_uploaded_invoice(uploaded):
