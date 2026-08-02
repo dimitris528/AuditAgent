@@ -25,34 +25,39 @@ cached Airtable logic and the data-retention hooks are unchanged:
        trial check.
     2. Executive dashboard: a merged header row — the Συνολικά έσοδα (soft
        green) and Συνολικά έξοδα (soft red) KPI cards are REAL clickable
-       buttons; tapping one toggles its inline Amount/Date/Category/
+       buttons; tapping one toggles its inline Amount/VAT-rate/Date/Client/
        Description quick-entry form beneath the row (opening one closes the
        other). The third card, Καθαρό, stays static and colors itself by
        sign: green when positive, red when negative, neutral grey at zero.
        The fourth card, Χρεωστούμενα (debts/receivables), is ALWAYS yellow
        (#f1c40f family) in both themes and doubles as the debts action
-       button: tapping it opens the inline «Ποσό προς προσθήκη»/«Κατηγορία»
+       button: tapping it opens the inline «Ποσό προς προσθήκη»/«Πελάτης»
        form plus the list of outstanding debts, each with an «Εξόφληση»
        control — resolving one flips the row's Type to "Έσοδο" in Airtable,
        so the amount automatically leaves Χρεωστούμενα and lands in the
-       Έσοδα of the same category. All amount fields across the app are
+       Έσοδα of the same client. All amount fields across the app are
        plain manual text inputs (no +/- steppers), parsed leniently
        ("150", "12,50", "1.204,80").
-       Each active category card carries small inline "🔒 Αρχειοθέτηση" and
+       Each active client card carries small inline "🔒 Αρχειοθέτηση" and
        "✏️ Επεξεργασία" ghost buttons to its right. Επεξεργασία reveals an
        inline editor with two manual amount fields (Έσοδα / Έξοδα) and a
        READ-ONLY Καθαρό preview that always equals Έσοδα − Έξοδα; saving
        writes the difference from the current sums as signed correction
        rows ("Χειροκίνητη διόρθωση…") in the Transactions table, so every
-       analytics view recalculates from the same source of truth. Archived
-       categories hide behind a large KPI-styled "📂 Αρχειοθετημένες
-       Κατηγορίες" toggle button. New
-       categories are created inline from ANY category dropdown via the
-       permanent trailing "➕ Δημιουργία Νέας Κατηγορίας..." option (there
-       is no standalone creation form). The UI speaks generic business
-       Greek ("Κατηγορίες") for retail merchants and shop owners; the
-       Airtable schema underneath (Projects/Status/Name columns) is
-       unchanged.
+       analytics view recalculates from the same source of truth. Each active
+       client card shows the 5 core accounting metrics in a structured grid —
+       Έσοδα (gross & net), Έξοδα (gross & net), Φ.Π.Α. (net tax balance),
+       Χρεωστούμενα, Καθαρό Αποτέλεσμα (net-of-VAT profit) — plus a
+       foundational Μπάρα Φόρου Εισοδήματος (income-tax progress bar). Archived
+       clients hide behind a large KPI-styled "📂 Αρχειοθετημένοι
+       Πελάτες" toggle button. New
+       clients are created inline from ANY client dropdown via the
+       permanent trailing "➕ Δημιουργία Νέου Πελάτη..." option (there
+       is no standalone creation form). The UI speaks accounting Greek
+       ("Πελάτες" / Clients) for accounting professionals; the Airtable schema
+       underneath (Projects/Status/Name + the Category column on Transactions)
+       is UNCHANGED — only the visible terminology moved from Κατηγορία to
+       Πελάτης.
     3. Single-tap document upload (camera photo or PDF) -> GPT-4o extraction
        -> confirmation screen -> saved to Airtable. If extraction fails for
        ANY reason the form degrades to blank manual entry instead of blocking.
@@ -128,6 +133,30 @@ from extractor import extract_invoice_data
 
 RETENTION_YEARS = 2
 UPLOAD_TYPES = ["pdf", "jpg", "jpeg", "png", "webp"]
+
+# --------------------------------------------------------------------------
+# Φ.Π.Α. (VAT) — per-transaction rate model
+# --------------------------------------------------------------------------
+# Each transaction carries its OWN ΦΠΑ rate (Greek scale: 24 % standard, 13 %
+# reduced, 6 % super-reduced, 0 % exempt/intra-community). The VAT euro amount
+# is derived from the GROSS figure (Amount already includes VAT) as
+# gross × rate/(1+rate), rounded to cents ONCE and stored per row, so every
+# aggregate is a pure partition-sum and total VAT == Σ per-client VATs.
+VAT_RATES = (0.24, 0.13, 0.06, 0.0)
+DEFAULT_VAT_RATE = 0.24
+VAT_RATE_LABELS = {0.24: "24 %", 0.13: "13 %", 0.06: "6 %",
+                   0.0: "0 % (Απαλλαγή)"}
+
+# --------------------------------------------------------------------------
+# Φόρος Εισοδήματος — foundational per-client progress bar (placeholder scale)
+# --------------------------------------------------------------------------
+# Net taxable income (= net-of-VAT profit) is tracked toward a scale limit; the
+# bar changes status/colour once the income crosses from the low bracket into
+# the high one. Simplified two-bracket placeholder — swap for the full Greek
+# scale later.
+TAX_BRACKET_LIMIT = 10000.0   # € net taxable income where the rate steps up
+TAX_RATE_LOW = 0.22           # bracket below the limit
+TAX_RATE_HIGH = 0.29          # bracket at/above the limit
 # A login survives browser refreshes for this long (sliding window, renewed
 # on every restored page load).
 SESSION_TTL_SECONDS = 12 * 3600
@@ -401,17 +430,83 @@ div[class*="st-key-qe_card_net"] .aud-kpi {
    The keyed container IS the surface card, so it always stretches to the
    full row width; the category info and the inline Αρχειοθέτηση pill live
    in columns INSIDE it (they stack naturally on narrow phones). */
-div[class*="st-key-projcard_"] {
+div[class*="st-key-projcard_"], div[class*="st-key-clientcard_"] {
     width: 100%; background: var(--aud-surface); border: 1px solid var(--aud-border);
     border-radius: 16px; padding: 16px 20px; margin-bottom: 12px;
     transition: border-color .18s ease;
 }
-div[class*="st-key-projcard_"]:hover { border-color: var(--aud-border-strong); }
+div[class*="st-key-projcard_"]:hover,
+div[class*="st-key-clientcard_"]:hover { border-color: var(--aud-border-strong); }
 .aud-proj-name { color: var(--aud-text); font-weight: 600; font-size: 1.02rem; margin-bottom: 10px; }
 .aud-proj-stats { display: flex; gap: 26px; flex-wrap: wrap; }
 .aud-proj-value { color: var(--aud-text-soft); font-size: .98rem; font-weight: 600; }
 .aud-proj-value.accent { color: var(--aud-accent-text); }
 .aud-proj-value.loss { color: var(--aud-loss); }
+
+/* --- Client accounting block (5-metric grid + income-tax bar) --------------
+   Rendered inside the same projcard_/clientcard_ surface. The grid auto-fits
+   as many metric tiles per row as fit (min 140px), so it reflows cleanly from
+   desktop (5 across) down to a single column on narrow phones. */
+.aud-client-name {
+    color: var(--aud-text); font-weight: 700; font-size: 1.05rem;
+    margin-bottom: 12px; display: flex; align-items: center; gap: 10px;
+    flex-wrap: wrap;
+}
+.aud-client-badge {
+    font-size: .72rem; font-weight: 600; color: var(--aud-muted);
+    background: var(--aud-bg); border: 1px solid var(--aud-border);
+    border-radius: 999px; padding: 2px 9px;
+}
+.aud-metric-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px; margin-bottom: 4px;
+}
+.aud-metric {
+    background: var(--aud-bg); border: 1px solid var(--aud-border);
+    border-radius: 12px; padding: 11px 13px; min-width: 0;
+}
+.aud-metric-label {
+    color: var(--aud-muted); font-size: .74rem; font-weight: 600;
+    letter-spacing: .01em; margin-bottom: 5px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.aud-metric-value {
+    color: var(--aud-text-soft); font-size: 1.12rem; font-weight: 700;
+    line-height: 1.1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.aud-metric-value.accent { color: var(--aud-accent-text); }
+.aud-metric-value.loss { color: var(--aud-loss); }
+.aud-metric-value.debt { color: #b7950b; }
+.aud-metric-value.vat-credit { color: var(--aud-accent-text); }
+.aud-metric-sub {
+    color: var(--aud-muted); font-size: .74rem; font-weight: 500; margin-top: 3px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* --- Income-tax progress bar (foundational placeholder) -------------------- */
+.aud-tax { margin-top: 14px; }
+.aud-tax-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 6px;
+}
+.aud-tax-title { color: var(--aud-text-soft); font-size: .82rem; font-weight: 600; }
+.aud-tax-rate {
+    font-size: .74rem; font-weight: 700; border-radius: 999px; padding: 2px 10px;
+}
+.aud-tax-rate.low { color: #1e7e34; background: rgba(0, 230, 118, .12);
+                    border: 1px solid rgba(0, 230, 118, .35); }
+.aud-tax-rate.high { color: #a71d2a; background: rgba(214, 58, 34, .12);
+                     border: 1px solid rgba(214, 58, 34, .40); }
+.aud-tax-track {
+    height: 9px; border-radius: 999px; background: var(--aud-border);
+    overflow: hidden;
+}
+.aud-tax-fill {
+    height: 100%; border-radius: 999px; transition: width .3s ease;
+    background: linear-gradient(90deg, #00c853, #00e676);
+}
+.aud-tax-fill.high { background: linear-gradient(90deg, #e67e22, #d63a22); }
+.aud-tax-meta { color: var(--aud-muted); font-size: .76rem; margin-top: 6px; }
 
 /* --- Close / edit category controls ------------------------------------------
    Small "Αρχειοθέτηση" and "Επεξεργασία" pills rendered INSIDE each category
@@ -943,6 +1038,87 @@ def _sum_by_type(records):
     return expense, revenue
 
 
+# --------------------------------------------------------------------------
+# Φ.Π.Α. (VAT) helpers — see the module constants above
+# --------------------------------------------------------------------------
+def _vat_of(gross, rate):
+    """The ΦΠΑ portion of a GROSS (VAT-inclusive) figure at `rate`, in euro,
+    rounded to cents. Sign follows `gross` so signed correction rows stay
+    correct; a 0 rate yields exactly 0."""
+    if not rate:
+        return 0.0
+    return round(gross * rate / (1 + rate), 2)
+
+
+def _vat_for_write(signed_amount, is_revenue, rate):
+    """The VAT_Amount to STORE for a new/edited row. Mirrors the bucket
+    orientation of _sum_by_type (revenue rows use the signed amount, expense
+    rows its negation), so the stored cents drop straight into the same
+    bucket at read time — output VAT on revenue, input VAT on expenses,
+    positive for ordinary rows and correctly signed for corrections."""
+    bucket = signed_amount if is_revenue else -signed_amount
+    return _vat_of(bucket, rate)
+
+
+def _txn_vat(record):
+    """One row's VAT in its bucket's orientation. Prefers the STORED
+    VAT_Amount (persisted at creation/edit); legacy rows without it fall back
+    to the identical derivation at the DEFAULT rate, so mixing stored and
+    derived rows never introduces a discrepancy."""
+    stored = record["fields"].get("VAT_Amount")
+    if stored is not None:
+        return float(stored)
+    bucket = _amount(record) if _is_revenue(record) else -_amount(record)
+    return _vat_of(bucket, DEFAULT_VAT_RATE)
+
+
+def _vat_by_type(records):
+    """Return (expense_vat, revenue_vat): the input/output ΦΠΑ magnitudes,
+    bucketed exactly like _sum_by_type so they align cent-for-cent with the
+    revenue/expense figures."""
+    expense_vat = revenue_vat = 0.0
+    for rec in records:
+        vat = _txn_vat(rec)
+        if _is_revenue(rec):
+            revenue_vat += vat
+        else:
+            expense_vat += vat
+    return expense_vat, revenue_vat
+
+
+def _debts_by_client(debts):
+    """Sum of OUTSTANDING debt amounts per client (category key)."""
+    totals = {}
+    for txn in debts:
+        key = (txn["fields"].get("Category") or "").strip().lower()
+        totals[key] = totals.get(key, 0.0) + _amount(txn)
+    return totals
+
+
+def _client_metrics(name, grouped, client_debt=0.0):
+    """Full accounting snapshot for one client: gross AND net-of-VAT flows,
+    the net ΦΠΑ balance, this client's outstanding debts, and the net-of-VAT
+    profit (Καθαρό Αποτέλεσμα). Every euro figure is rounded to cents; net_vat
+    is the per-client VAT the total KPI sums."""
+    recs = grouped.get((name or "").strip().lower(), [])
+    gross_exp, gross_rev = _sum_by_type(recs)
+    exp_vat, rev_vat = _vat_by_type(recs)
+    net_vat = round(rev_vat - exp_vat, 2)          # output − input VAT
+    net_rev = round(gross_rev - rev_vat, 2)
+    net_exp = round(gross_exp - exp_vat, 2)
+    net_profit = round(net_rev - net_exp, 2)       # net-of-VAT result
+    return {
+        "gross_rev": round(gross_rev, 2),
+        "net_rev": net_rev,
+        "gross_exp": round(gross_exp, 2),
+        "net_exp": net_exp,
+        "net_vat": net_vat,
+        "debt": round(client_debt, 2),
+        "net_profit": net_profit,
+        "taxable": net_profit,
+    }
+
+
 def _transactions_by_category(transactions):
     grouped = {}
     for txn in transactions:
@@ -1042,26 +1218,86 @@ def _net_value_kind(net):
     return "accent" if net_r > 0 else "loss" if net_r < 0 else ""
 
 
-def _project_card_body(name, rev, exp, net):
-    """Name + Έσοδα/Έξοδα/Καθαρό stats for one active category. The card
-    chrome (surface, border, radius, full row width) lives on the keyed
-    st.container wrapping the row — see st-key-projcard_ in the CSS — so
-    the inline Αρχειοθέτηση pill renders INSIDE the card, not beside it.
+def _metric_tile(label, value, kind="", sub=None):
+    """One tile in a client's metric grid: muted label, colored main value
+    (kind ∈ {"", "accent", "loss", "debt", "vat-credit"}), optional muted
+    subvalue line (e.g. the net-of-VAT figure under a gross one)."""
+    sub_html = (f'<div class="aud-metric-sub">{html.escape(sub)}</div>'
+                if sub else "")
+    return (f'<div class="aud-metric">'
+            f'<div class="aud-metric-label">{html.escape(label)}</div>'
+            f'<div class="aud-metric-value {kind}">{html.escape(value)}</div>'
+            f'{sub_html}</div>')
 
-    Flow colors: Έσοδα ALWAYS green, Έξοδα ALWAYS red (accent/loss — the
-    same theme-aware pair the recap rows use), Καθαρό by sign."""
-    stats = "".join(
-        f'<div><div class="aud-kpi-label">{html.escape(label)}</div>'
-        f'<div class="aud-proj-value {kind}">{html.escape(value)}</div></div>'
-        for label, value, kind in [
-            ("Έσοδα", _money(rev), "accent"),
-            ("Έξοδα", _money(exp), "loss"),
-            ("Καθαρό", _money(net), _net_value_kind(net)),
-        ]
+
+def _tax_progress_html(taxable):
+    """Foundational per-client income-tax progress bar: net taxable income
+    (net-of-VAT profit) filling toward TAX_BRACKET_LIMIT, flipping status and
+    colour once it crosses from the low (22 %) bracket into the high (29 %)
+    one. A deliberate placeholder for the full Greek scale."""
+    limit = TAX_BRACKET_LIMIT
+    low = f"{int(round(TAX_RATE_LOW * 100))}%"
+    high = f"{int(round(TAX_RATE_HIGH * 100))}%"
+    pct = min(max(taxable, 0.0) / limit, 1.0) * 100 if limit > 0 else 0.0
+    if taxable <= 0:
+        cls, rate_label = "low", low
+        status = "Χωρίς φορολογητέο εισόδημα ακόμη"
+    elif taxable >= limit:
+        cls, rate_label = "high", high
+        status = f"Υπέρβαση ορίου {_money(limit)} — κλίμακα {high}"
+    else:
+        cls, rate_label = "low", low
+        status = f"Εντός κλίμακας {low} (όριο {_money(limit)})"
+    return (
+        f'<div class="aud-tax">'
+        f'<div class="aud-tax-head">'
+        f'<span class="aud-tax-title">Μπάρα Φόρου Εισοδήματος</span>'
+        f'<span class="aud-tax-rate {cls}">{html.escape(rate_label)}</span>'
+        f'</div>'
+        f'<div class="aud-tax-track">'
+        f'<div class="aud-tax-fill {cls}" style="width:{pct:.1f}%"></div>'
+        f'</div>'
+        f'<div class="aud-tax-meta">'
+        f'{html.escape(_money(taxable))} / {html.escape(_money(limit))} · '
+        f'{html.escape(status)}</div>'
+        f'</div>'
     )
+
+
+def _client_metrics_block(name, m, archived_label=None, with_name=True):
+    """The full accounting block for ONE client (Dashboard & Ανασκόπηση): a
+    structured grid of the 5 core metrics — Έσοδα (gross & net), Έξοδα (gross &
+    net), Φ.Π.Α. (net balance), Χρεωστούμενα, Καθαρό Αποτέλεσμα — plus the
+    income-tax progress bar. Card chrome lives on the keyed st.container
+    (st-key-projcard_ / st-key-clientcard_).
+
+    `with_name` prepends the client name (+ optional «Αρχειοθετήθηκε …» badge);
+    the dashboard renders the name alongside its action pills instead and calls
+    with with_name=False. All euro values render as magnitudes, colour-coded by
+    sign, matching the rest of the app."""
+    header = ""
+    if with_name:
+        badge = (f'<span class="aud-client-badge">{html.escape(archived_label)}</span>'
+                 if archived_label else "")
+        header = f'<div class="aud-client-name">{html.escape(name)}{badge}</div>'
+    vat = m["net_vat"]
+    vat_kind = "vat-credit" if round(vat, 2) < 0 else ""
+    vat_sub = ("προς επιστροφή" if round(vat, 2) < 0
+               else "προς απόδοση" if round(vat, 2) > 0 else "μηδενικό")
+    tiles = "".join([
+        _metric_tile("Έσοδα", _money(m["gross_rev"]), "accent",
+                     sub=f"Καθαρά {_money(m['net_rev'])}"),
+        _metric_tile("Έξοδα", _money(m["gross_exp"]), "loss",
+                     sub=f"Καθαρά {_money(m['net_exp'])}"),
+        _metric_tile("Φ.Π.Α.", _money(vat), vat_kind, sub=vat_sub),
+        _metric_tile("Χρεωστούμενα", _money(m["debt"]), "debt"),
+        _metric_tile("Καθαρό Αποτέλεσμα", _money(m["net_profit"]),
+                     _net_value_kind(m["net_profit"])),
+    ])
     st.markdown(
-        f'<div class="aud-proj-name">{html.escape(name)}</div>'
-        f'<div class="aud-proj-stats">{stats}</div>',
+        f'{header}'
+        f'<div class="aud-metric-grid">{tiles}</div>'
+        f'{_tax_progress_html(m["taxable"])}',
         unsafe_allow_html=True,
     )
 
@@ -1804,7 +2040,7 @@ def _archive_button(proj, name):
     also closes an open inline editor so the two panels never stack."""
     record_id = proj["id"]
     if st.button("🔒 Αρχειοθέτηση", key=f"close_{record_id}",
-                 help=f"Αρχειοθέτηση της κατηγορίας «{name}»"):
+                 help=f"Αρχειοθέτηση του πελάτη «{name}»"):
         st.session_state["confirm_close"] = record_id
         st.session_state.pop("edit_project", None)
         st.rerun()
@@ -1817,7 +2053,7 @@ def _edit_button(proj, name):
     disarms any pending archive confirmation."""
     record_id = proj["id"]
     if st.button("✏️ Επεξεργασία", key=f"editcat_{record_id}",
-                 help=f"Χειροκίνητη επεξεργασία των ποσών της κατηγορίας «{name}»"):
+                 help=f"Χειροκίνητη επεξεργασία των ποσών του πελάτη «{name}»"):
         st.session_state["edit_project"] = record_id
         st.session_state.pop("confirm_close", None)
         st.rerun()
@@ -1830,8 +2066,8 @@ def _close_project_control(proj, name):
     record_id = proj["id"]
     if st.session_state.get("confirm_close") != record_id:
         return
-    st.warning(f"Να αρχειοθετηθεί η κατηγορία «{name}»; Θα μεταφερθεί "
-               "στις Αρχειοθετημένες Κατηγορίες.")
+    st.warning(f"Να αρχειοθετηθεί ο πελάτης «{name}»; Θα μεταφερθεί "
+               "στους Αρχειοθετημένους Πελάτες.")
     col_yes, col_no = st.columns(2)
     with col_yes:
         if st.button("✅ Ναι, αρχειοθέτηση", key=f"yes_{record_id}",
@@ -1839,12 +2075,12 @@ def _close_project_control(proj, name):
             try:
                 db.close_project(record_id, date.today())
             except db.AirtableError as exc:
-                st.error(f"Δεν ήταν δυνατή η αρχειοθέτηση της κατηγορίας: {exc}")
+                st.error(f"Δεν ήταν δυνατή η αρχειοθέτηση του πελάτη: {exc}")
             else:
                 st.session_state.pop("confirm_close", None)
                 st.session_state["flash"] = (
-                    f"Η κατηγορία «{name}» αρχειοθετήθηκε επιτυχώς και "
-                    "μεταφέρθηκε στις Αρχειοθετημένες Κατηγορίες."
+                    f"Ο πελάτης «{name}» αρχειοθετήθηκε επιτυχώς και "
+                    "μεταφέρθηκε στους Αρχειοθετημένους Πελάτες."
                 )
                 _invalidate_caches()
                 st.rerun()
@@ -1869,15 +2105,18 @@ def _edit_project_control(username, proj, name, rev, exp):
     record_id = proj["id"]
     if st.session_state.get("edit_project") != record_id:
         return
-    st.info(f"Επεξεργασία ποσών της κατηγορίας «{name}». Το Καθαρό "
+    st.info(f"Επεξεργασία ποσών του πελάτη «{name}». Το Καθαρό "
             "υπολογίζεται αυτόματα ως Έσοδα − Έξοδα.")
     col_rev, col_exp = st.columns(2)
     with col_rev:
-        rev_text = st.text_input("Έσοδα (€)", value=_amount_text(rev),
+        rev_text = st.text_input("Έσοδα (€, με Φ.Π.Α.)", value=_amount_text(rev),
                                  key=f"edit_rev_{record_id}")
     with col_exp:
-        exp_text = st.text_input("Έξοδα (€)", value=_amount_text(exp),
+        exp_text = st.text_input("Έξοδα (€, με Φ.Π.Α.)", value=_amount_text(exp),
                                  key=f"edit_exp_{record_id}")
+    # The correction rows carry this ΦΠΑ rate, so the client's net VAT stays
+    # consistent with the edited totals.
+    vat_rate = _vat_rate_selectbox(f"edit_vat_{record_id}")
     new_rev = _parse_amount(rev_text)
     new_exp = _parse_amount(exp_text)
     net_preview = ((new_rev if new_rev is not None else rev)
@@ -1888,7 +2127,8 @@ def _edit_project_control(username, proj, name, rev, exp):
     with col_save:
         if st.button("💾 Αποθήκευση", key=f"saveedit_{record_id}",
                      type="primary", width="stretch"):
-            _save_project_edit(username, name, rev, exp, new_rev, new_exp)
+            _save_project_edit(username, name, rev, exp, new_rev, new_exp,
+                               vat_rate)
     with col_cancel:
         if st.button("✕ Άκυρο", key=f"canceledit_{record_id}",
                      width="stretch"):
@@ -1896,14 +2136,16 @@ def _edit_project_control(username, proj, name, rev, exp):
             st.rerun()
 
 
-def _save_project_edit(username, name, rev, exp, new_rev, new_exp):
-    """Persist a manual category edit. The category's Έσοδα/Έξοδα are SUMS
-    of its Transactions rows — there is nothing to overwrite in Projects —
-    so the edit lands as signed correction rows: the delta between each
-    target and the current sum, labeled Type Έσοδο/Έξοδο with the direction
-    in the sign (see _is_revenue). After the write every view — category
-    card, dashboard header, recap — recomputes to exactly the typed values,
-    and Καθαρό falls out as Έσοδα − Έξοδα."""
+def _save_project_edit(username, name, rev, exp, new_rev, new_exp,
+                       vat_rate=DEFAULT_VAT_RATE):
+    """Persist a manual client edit. The client's Έσοδα/Έξοδα are SUMS of its
+    Transactions rows — there is nothing to overwrite in Projects — so the
+    edit lands as signed correction rows: the delta between each target and
+    the current sum, labeled Type Έσοδο/Έξοδο with the direction in the sign
+    (see _is_revenue). Each correction also carries the ΦΠΑ (at `vat_rate`) of
+    its delta, so the client's net VAT tracks the edited totals. After the
+    write every view — client card, dashboard header, recap — recomputes to
+    exactly the typed values, and Καθαρό falls out as Έσοδα − Έξοδα."""
     if (new_rev is None or new_rev < 0 or new_exp is None or new_exp < 0):
         st.error("Παρακαλώ εισάγετε έγκυρα ποσά (0 ή μεγαλύτερα) στα πεδία "
                  "Έσοδα και Έξοδα (π.χ. 150,00).")
@@ -1921,7 +2163,9 @@ def _save_project_edit(username, name, rev, exp, new_rev, new_exp):
                 description=("Χειροκίνητη διόρθωση εσόδων "
                              f"({'+' if rev_delta > 0 else '-'}"
                              f"{_money(rev_delta)})"),
-                date=date.today(), type_="Έσοδο", source="Manual")
+                date=date.today(), type_="Έσοδο", source="Manual",
+                vat_amount=_vat_for_write(rev_delta, True, vat_rate),
+                vat_rate=vat_rate)
             written = True
         if exp_delta:
             db.create_transaction(
@@ -1929,7 +2173,9 @@ def _save_project_edit(username, name, rev, exp, new_rev, new_exp):
                 description=("Χειροκίνητη διόρθωση εξόδων "
                              f"({'+' if exp_delta > 0 else '-'}"
                              f"{_money(exp_delta)})"),
-                date=date.today(), type_="Έξοδο", source="Manual")
+                date=date.today(), type_="Έξοδο", source="Manual",
+                vat_amount=_vat_for_write(-exp_delta, False, vat_rate),
+                vat_rate=vat_rate)
             written = True
     except db.AirtableError as exc:
         # A partial write (revenue row saved, expense row failed) must not
@@ -1941,7 +2187,7 @@ def _save_project_edit(username, name, rev, exp, new_rev, new_exp):
     st.session_state.pop("edit_project", None)
     _invalidate_caches()
     st.session_state["flash"] = (
-        f"Η κατηγορία «{name}» ενημερώθηκε: Έσοδα {_money(new_rev)}, "
+        f"Ο πελάτης «{name}» ενημερώθηκε: Έσοδα {_money(new_rev)}, "
         f"Έξοδα {_money(new_exp)}, Καθαρό {_money(new_rev - new_exp)}.")
     st.rerun()
 
@@ -1960,22 +2206,35 @@ def _toggle_quick_entry(which):
     st.session_state[which] = not was_open
 
 
-NEW_CATEGORY_OPTION = "➕ Δημιουργία Νέας Κατηγορίας..."
+NEW_CATEGORY_OPTION = "➕ Δημιουργία Νέου Πελάτη..."
+
+
+def _vat_rate_selectbox(key, default=DEFAULT_VAT_RATE):
+    """ΦΠΑ-rate dropdown (24 / 13 / 6 / 0 %) returning the chosen DECIMAL rate.
+    Safe inside an st.form — the rate is only read on submit, never mid-edit."""
+    rates = list(VAT_RATES)
+    return st.selectbox(
+        "Συντελεστής Φ.Π.Α.", rates,
+        index=rates.index(default) if default in rates else 0,
+        format_func=lambda r: VAT_RATE_LABELS.get(r, f"{r:.0%}"),
+        key=key,
+        help="Ο συντελεστής ΦΠΑ αυτής της κίνησης — αποθηκεύεται ανά παραστατικό.",
+    )
 
 
 def _category_picker(category_names, key, default_index=0):
-    """Category dropdown with the permanent trailing "create new" option.
+    """Client dropdown with the permanent trailing "create new" option.
 
     Lives OUTSIDE any st.form on purpose: widgets inside a form don't rerun
-    on change, so the conditional "Όνομα Νέας Κατηγορίας" input could never
+    on change, so the conditional "Όνομα Νέου Πελάτη" input could never
     appear dynamically there. Returns (choice, new_name)."""
     options = list(category_names) + [NEW_CATEGORY_OPTION]
-    choice = st.selectbox("Κατηγορία", options,
+    choice = st.selectbox("Πελάτης", options,
                           index=min(default_index, len(options) - 1), key=key)
     new_name = ""
     if choice == NEW_CATEGORY_OPTION:
-        new_name = st.text_input("Όνομα Νέας Κατηγορίας",
-                                 placeholder="π.χ. Λειτουργικά Έξοδα",
+        new_name = st.text_input("Όνομα Νέου Πελάτη",
+                                 placeholder="π.χ. Παπαδόπουλος Α.Ε.",
                                  key=f"{key}_new")
     return choice, new_name
 
@@ -1995,7 +2254,7 @@ def _resolve_category(username, choice, new_name, category_names):
         return choice
     name = new_name.strip()
     if not name:
-        st.error("Παρακαλώ εισάγετε το όνομα της νέας κατηγορίας.")
+        st.error("Παρακαλώ εισάγετε το όνομα του νέου πελάτη.")
         return None
     already_exists = name.strip().lower() in {
         (n or "").strip().lower() for n in category_names
@@ -2005,7 +2264,7 @@ def _resolve_category(username, choice, new_name, category_names):
             db.create_project(username, name)
             _invalidate_caches()
     except db.AirtableError as exc:
-        st.error(f"Δεν ήταν δυνατή η δημιουργία της κατηγορίας: {exc}")
+        st.error(f"Δεν ήταν δυνατή η δημιουργία του πελάτη: {exc}")
         return None
     return name
 
@@ -2027,8 +2286,10 @@ def _quick_entry_form(username, category_names, entry_type):
     with st.form(f"quick_entry_{entry_type}", clear_on_submit=True):
         # Plain manual text input (no +/- steppers); parsed leniently on
         # submit — "150", "12,50" and "1.204,80" all work.
-        amount_text = st.text_input("Ποσό (€)", placeholder="π.χ. 150,00",
+        amount_text = st.text_input("Ποσό (€, με Φ.Π.Α.)",
+                                    placeholder="π.χ. 150,00",
                                     key=f"qe_amount_{entry_type}")
+        vat_rate = _vat_rate_selectbox(f"qe_vat_{entry_type}")
         entry_date = st.date_input("Ημερομηνία", value=date.today(),
                                    format="DD/MM/YYYY",
                                    key=f"qe_date_{entry_type}")
@@ -2050,13 +2311,16 @@ def _quick_entry_form(username, category_names, entry_type):
     try:
         # Type/Source are explicit labels on manual rows; FileHash
         # (and the supplier folded into Description) stay reserved
-        # for the AI scanning path.
+        # for the AI scanning path. VAT_Amount is derived from the gross
+        # figure and stored so per-client/total ΦΠΑ stay exact.
         db.create_transaction(
             username, category, signed,
             description=notes.strip() or None,
             date=entry_date,
             type_=entry_type,
             source="Manual",
+            vat_amount=_vat_for_write(signed, entry_type == "Έσοδο", vat_rate),
+            vat_rate=vat_rate,
         )
     except db.AirtableError as exc:
         st.error(f"❌ Η αποθήκευση στο Airtable απέτυχε: {exc}")
@@ -2066,23 +2330,26 @@ def _quick_entry_form(username, category_names, entry_type):
         st.session_state[flag] = False
     _invalidate_caches()
     st.session_state["flash_toast"] = (
-        f"Η κίνηση ({entry_type}) αποθηκεύτηκε επιτυχώς στην "
-        f"Κατηγορία «{category}» — {_money(amount)}."
+        f"Η κίνηση ({entry_type}) αποθηκεύτηκε επιτυχώς στον "
+        f"Πελάτη «{category}» — {_money(amount)}."
     )
     st.rerun()
 
 
 def _debt_entry_panel(username, category_names, debts):
     """The inline Χρεωστούμενα panel, revealed by the yellow KPI card: the
-    «Ποσό προς προσθήκη»/«Κατηγορία» entry form, then the list of
+    «Ποσό προς προσθήκη»/«Πελάτης» entry form, then the list of
     outstanding debts with their Εξόφληση controls. The panel stays open
     after a save so the fresh row is immediately visible in the list."""
     choice, new_category = _category_picker(category_names,
                                             key="qe_category_debt")
     with st.form("quick_entry_debt", clear_on_submit=True):
-        amount_text = st.text_input("Ποσό προς προσθήκη (€)",
+        amount_text = st.text_input("Ποσό προς προσθήκη (€, με Φ.Π.Α.)",
                                     placeholder="π.χ. 150,00",
                                     key="qe_amount_debt")
+        # The ΦΠΑ rate rides the debt row now, so Εξόφληση can stamp the exact
+        # output VAT when the amount becomes realised revenue.
+        vat_rate = _vat_rate_selectbox("qe_vat_debt")
         submitted = st.form_submit_button("💾 Καταχώρηση Χρεωστούμενου",
                                           type="primary", width="stretch")
     if submitted:
@@ -2095,17 +2362,19 @@ def _debt_entry_panel(username, category_names, debts):
             if category is not None:
                 try:
                     # Positive Amount + Type "Χρεωστούμενο": the row carries
-                    # its category but stays OUT of the revenue math until
-                    # Εξόφληση flips the Type to "Έσοδο".
+                    # its client but stays OUT of the revenue/VAT math until
+                    # Εξόφληση flips the Type to "Έσοδο". VAT_Rate is stored
+                    # now; VAT_Amount is stamped only on resolution.
                     db.create_transaction(
                         username, category, amount,
-                        date=date.today(), type_=DEBT_TYPE, source="Manual")
+                        date=date.today(), type_=DEBT_TYPE, source="Manual",
+                        vat_rate=vat_rate)
                 except db.AirtableError as exc:
                     st.error(f"❌ Η αποθήκευση στο Airtable απέτυχε: {exc}")
                 else:
                     _invalidate_caches()
                     st.session_state["flash_toast"] = (
-                        f"Το χρεωστούμενο καταχωρήθηκε στην Κατηγορία "
+                        f"Το χρεωστούμενο καταχωρήθηκε στον Πελάτη "
                         f"«{category}» — {_money(amount)}.")
                     st.rerun()
 
@@ -2133,7 +2402,7 @@ def _debt_entry_panel(username, category_names, debts):
             )
         with col_paid:
             if st.button("✅ Εξόφληση", key=f"paid_{txn['id']}",
-                         help="Μεταφορά του ποσού στα Έσοδα της κατηγορίας"):
+                         help="Μεταφορά του ποσού στα Έσοδα του πελάτη"):
                 st.session_state["confirm_paid_debt"] = txn["id"]
                 st.rerun()
         _resolve_debt_control(txn)
@@ -2143,20 +2412,29 @@ def _resolve_debt_control(txn):
     """Two-step Εξόφληση confirmation for one outstanding debt: the explicit
     «Ναι» tap flips the row's Type to "Έσοδο" (Date -> today), so the amount
     automatically leaves Χρεωστούμενα and lands in the Έσοδα of the same
-    category — no second row, nothing to reconcile."""
+    client — no second row, nothing to reconcile. The row's stored VAT_Rate
+    (default 24 %) turns into the output VAT_Amount at this moment."""
     if st.session_state.get("confirm_paid_debt") != txn["id"]:
         return
-    category = txn["fields"].get("Category") or "—"
-    amount = _money(txn["fields"].get("Amount"))
+    fields = txn["fields"]
+    category = fields.get("Category") or "—"
+    amount = _money(fields.get("Amount"))
     st.warning(f"Εξόφληση χρεωστούμενου {amount}; Θα αφαιρεθεί από τα "
-               f"Χρεωστούμενα και θα προστεθεί στα Έσοδα της κατηγορίας "
+               f"Χρεωστούμενα και θα προστεθεί στα Έσοδα του πελάτη "
                f"«{category}».")
     col_yes, col_no = st.columns(2)
     with col_yes:
         if st.button("✅ Ναι, εξόφληση", key=f"yespaid_{txn['id']}",
                      type="primary", width="stretch"):
+            # The debt becomes realised revenue: stamp output VAT from the
+            # stored rate (its gross Amount is positive) so ΦΠΑ stays exact.
+            rate = fields.get("VAT_Rate")
+            rate = float(rate) if rate is not None else DEFAULT_VAT_RATE
+            vat_amount = _vat_for_write(_amount(txn), True, rate)
             try:
-                db.resolve_debt_transaction(txn["id"], date.today())
+                db.resolve_debt_transaction(
+                    txn["id"], date.today(),
+                    vat_amount=vat_amount, vat_rate=rate)
             except db.AirtableError as exc:
                 st.error(f"Δεν ήταν δυνατή η εξόφληση: {exc}")
             else:
@@ -2164,7 +2442,7 @@ def _resolve_debt_control(txn):
                 _invalidate_caches()
                 st.session_state["flash_toast"] = (
                     f"Το χρεωστούμενο εξοφλήθηκε — {amount} προστέθηκε στα "
-                    f"Έσοδα της κατηγορίας «{category}».")
+                    f"Έσοδα του πελάτη «{category}».")
                 st.rerun()
     with col_no:
         if st.button("✕ Άκυρο", key=f"nopaid_{txn['id']}", width="stretch"):
@@ -2208,14 +2486,28 @@ def _kpi_entry_row(username, category_names, total_rev, total_exp, net,
         _debt_entry_panel(username, category_names, debts)
 
 
+def _vat_total_row(total_vat, label="Συνολικό Φ.Π.Α."):
+    """A single KPI card for the total ΦΠΑ — the EXACT sum of the per-client
+    net VATs shown on the cards below (never recomputed from aggregate
+    totals). Green when it's a credit (refundable), neutral when payable."""
+    v = round(total_vat, 2)
+    if v < 0:
+        lbl, kind = f"{label} (προς επιστροφή)", "accent"
+    elif v > 0:
+        lbl, kind = f"{label} (προς απόδοση)", ""
+    else:
+        lbl, kind = label, ""
+    _kpi_row([(lbl, _money(v), kind)])
+
+
 def _closed_projects_section(completed, grouped):
     """Large KPI-styled toggle button (key archived_toggle — see the CSS);
-    tapping it shows/hides the archived-categories list in place via the
+    tapping it shows/hides the archived-clients list in place via the
     show_archived session flag, so the archive never clutters the daily flow."""
     # on_click flips the flag BEFORE the rerun executes, so the arrow in the
     # label and the list below always agree within a single paint.
     arrow = "▲" if st.session_state.get("show_archived") else "▼"
-    st.button(f"📂 Αρχειοθετημένες Κατηγορίες ({len(completed)})  {arrow}",
+    st.button(f"📂 Αρχειοθετημένοι Πελάτες ({len(completed)})  {arrow}",
               key="archived_toggle", width="stretch",
               on_click=lambda: st.session_state.update(
                   show_archived=not st.session_state.get("show_archived", False)))
@@ -2249,15 +2541,24 @@ def dashboard_tab(username):
         return
     grouped = _transactions_by_category(regular)
 
-    totals = [_project_financials(p["fields"].get("Name") or "—", grouped)
-              for p in active]
+    # This client's outstanding debts feed metric 4 on each card.
+    debt_by_client = _debts_by_client(debts)
+    # Full accounting snapshot per active client (gross+net flows, net ΦΠΑ,
+    # debts, net-of-VAT profit). _project_financials is kept only for the
+    # archived-client one-liners below.
+    metrics = [
+        _client_metrics(p["fields"].get("Name") or "—", grouped,
+                        debt_by_client.get(
+                            (p["fields"].get("Name") or "").strip().lower(), 0.0))
+        for p in active
+    ]
     _section("Επισκόπηση")
     if not active:
-        _empty_state("Δεν υπάρχουν ενεργές κατηγορίες ακόμη — πατήστε "
+        _empty_state("Δεν υπάρχουν ενεργοί πελάτες ακόμη — πατήστε "
                      "«Συνολικά έσοδα» ή «Συνολικά έξοδα» και επιλέξτε "
-                     "«➕ Δημιουργία Νέας Κατηγορίας...» για να ξεκινήσετε.")
+                     "«➕ Δημιουργία Νέου Πελάτη...» για να ξεκινήσετε.")
     # Header totals come from the transactions THEMSELVES: summing the
-    # per-active-category tuples silently dropped every row whose Category
+    # per-active-client tuples silently dropped every row whose Category
     # no longer matches an active project (archived, renamed, or free-typed),
     # leaving the cards showing only a fraction of the real money.
     total_exp, total_rev = _sum_by_type(regular)
@@ -2265,28 +2566,37 @@ def dashboard_tab(username):
     total_debt = sum(_amount(d) for d in debts)
     # Merged header: the Έσοδα/Έξοδα/Χρεωστούμενα cards ARE the quick-entry
     # buttons; tapping one opens its inline panel directly beneath the row.
-    # Rendered even with zero categories — the forms' category dropdown can
-    # create the first one via "➕ Δημιουργία Νέας Κατηγορίας...".
+    # Rendered even with zero clients — the forms' client dropdown can
+    # create the first one via "➕ Δημιουργία Νέου Πελάτη...".
     _kpi_entry_row(
         username, [p["fields"].get("Name") or "—" for p in active],
         total_rev, total_exp, net, total_debt, debts)
 
     if active:
-        _section("Ενεργές κατηγορίες")
-        for proj, (rev, exp, pnet) in zip(active, totals):
+        # Total Period VAT KPI: STRICTLY the sum of the active clients' net
+        # VATs rendered on the cards below, so the two can never disagree.
+        _vat_total_row(round(sum(m["net_vat"] for m in metrics), 2))
+
+        _section("Ενεργοί πελάτες")
+        for proj, m in zip(active, metrics):
             name = proj["fields"].get("Name") or "—"
-            # The keyed container IS the card (full row width); info and the
-            # stacked archive/edit pills share its inside via columns.
+            # The keyed container IS the card (full row width): the name and
+            # its stacked archive/edit pills share a top row; the 5-metric
+            # grid and the income-tax bar fill the full width beneath.
             with st.container(key=f"projcard_{proj['id']}"):
                 col_info, col_actions = st.columns(
                     [3.4, 1.1], vertical_alignment="center")
                 with col_info:
-                    _project_card_body(name, rev, exp, pnet)
+                    st.markdown(
+                        f'<div class="aud-client-name">{html.escape(name)}</div>',
+                        unsafe_allow_html=True)
                 with col_actions:
                     _archive_button(proj, name)
                     _edit_button(proj, name)
+                _client_metrics_block(name, m, with_name=False)
             _close_project_control(proj, name)
-            _edit_project_control(username, proj, name, rev, exp)
+            _edit_project_control(username, proj, name,
+                                  m["gross_rev"], m["gross_exp"])
 
     if completed:
         _closed_projects_section(completed, grouped)
@@ -2347,7 +2657,7 @@ def _invoice_flow(username):
     try:
         active = _load_active_projects(username)
     except db.AirtableError as exc:
-        st.error(f"Δεν ήταν δυνατή η φόρτωση των κατηγοριών σας: {exc}")
+        st.error(f"Δεν ήταν δυνατή η φόρτωση των πελατών σας: {exc}")
         return
 
     _section("Επιβεβαίωση των στοιχείων")
@@ -2362,8 +2672,8 @@ def _invoice_flow(username):
         if closest:
             default_index = lowered.index(closest[0])
 
-    # The picker sits ABOVE the form so choosing "➕ Δημιουργία Νέας
-    # Κατηγορίας..." can reveal its name input immediately (form widgets
+    # The picker sits ABOVE the form so choosing "➕ Δημιουργία Νέου
+    # Πελάτη..." can reveal its name input immediately (form widgets
     # don't rerun on change). Keying by the upload fingerprint re-applies
     # the fuzzy preselection for each new document.
     picker_key = ("invoice_category_"
@@ -2380,7 +2690,11 @@ def _invoice_flow(username):
     type_options = ["Έξοδο", "Έσοδο"]
     predicted_index = 1 if pending.get("document_type") == "income" else 0
     with st.form("confirm_invoice"):
-        provider = st.text_input("Προμηθευτής / Πελάτης",
+        # The counterparty printed on the document (supplier on a purchase,
+        # buyer on a sale). Labeled «Επωνυμία» — NOT «Πελάτης» — so it never
+        # clashes with the client-account picker above; it rides inside
+        # Description (the schema has no Provider column).
+        provider = st.text_input("Προμηθευτής / Επωνυμία παραστατικού",
                                  value=pending.get("provider_name") or "")
         entry_type = st.selectbox(
             "Τύπος", type_options, index=predicted_index,
@@ -2389,10 +2703,13 @@ def _invoice_flow(username):
         # Plain manual text input (no +/- steppers); the Τύπος selectbox above
         # carries the income/expense sign now, so this is always a magnitude.
         amount_text = st.text_input(
-            "Συνολικό ποσό (€)",
+            "Συνολικό ποσό (€, με Φ.Π.Α.)",
             value=f"{abs(extracted_amount):.2f}" if extracted_amount is not None else "",
             placeholder="π.χ. 150,00",
         )
+        # ΦΠΑ rate per document (default 24 %); the extractor gives only the
+        # gross total, so VAT is derived from it and this rate.
+        vat_rate = _vat_rate_selectbox("invoice_vat")
         # A real date picker: the user can't submit a malformed date, and the
         # extracted EU-format string ("26/06/2026") is parsed to prefill it.
         detected_iso = db.to_iso_date(pending.get("date"))
@@ -2403,7 +2720,7 @@ def _invoice_flow(username):
         )
         description = st.text_area("Υλικά / περιγραφή",
                                    value=pending.get("materials_summary") or "")
-        save = st.form_submit_button("✅ Επιβεβαίωση & Αποθήκευση στην Κατηγορία",
+        save = st.form_submit_button("✅ Επιβεβαίωση & Αποθήκευση στον Πελάτη",
                                      type="primary", width="stretch")
         discard = st.form_submit_button("🗑 Απόρριψη", width="stretch")
 
@@ -2456,6 +2773,8 @@ def _invoice_flow(username):
                 file_hash=file_hash,
                 type_=entry_type,
                 source="AI Scan",
+                vat_amount=_vat_for_write(signed, entry_type == "Έσοδο", vat_rate),
+                vat_rate=vat_rate,
             )
         except db.AirtableError as exc:
             st.error(f"❌ Η αποθήκευση στο Airtable απέτυχε: {exc}")
@@ -2474,7 +2793,7 @@ def _invoice_flow(username):
         st.session_state.pop("processed_upload", None)
         st.session_state["uploader_key_suffix"] += 1
         st.session_state["flash_toast"] = (
-            f"Το παραστατικό αποθηκεύτηκε επιτυχώς στην Κατηγορία "
+            f"Το παραστατικό αποθηκεύτηκε επιτυχώς στον Πελάτη "
             f"«{category}» — {_money(amount)}."
         )
         if entry_type == "Έξοδο" and amount > HIGH_EXPENSE_THRESHOLD:
@@ -2499,9 +2818,6 @@ PERIOD_MONTH = "Τρέχων Μήνας"
 PERIOD_QUARTER = "Τρέχον Τρίμηνο"
 PERIOD_YEAR = "Τρέχον Έτος"
 PERIOD_CUSTOM = "Προσαρμοσμένο Εύρος"
-
-# Column order of the recap table (also the keys of each row dict).
-_RECAP_COLUMNS = ("Κατηγορία", "Αρχειοθετήθηκε", "Έσοδα", "Έξοδα", "Καθαρό")
 
 
 def _resolve_period(choice, today, earliest):
@@ -2631,8 +2947,8 @@ def recap_tab(username):
     if flash:
         st.success(flash)
     st.markdown(
-        f'<div class="aud-upload-hint">Συγκεντρωτικά έσοδα και έξοδα ανά '
-        f"κατηγορία για την περίοδο που επιλέγετε. Δεδομένα "
+        f'<div class="aud-upload-hint">Συγκεντρωτικά έσοδα, έξοδα και Φ.Π.Α. '
+        f"ανά πελάτη για την περίοδο που επιλέγετε. Δεδομένα "
         f"παλαιότερα των {RETENTION_YEARS} ετών διαγράφονται "
         f"αυτόματα, οπότε η ανασκόπηση καλύπτει έως τα τελευταία "
         f"{RETENTION_YEARS} έτη.</div>",
@@ -2677,16 +2993,18 @@ def recap_tab(username):
         return
     # Outstanding debts stay off the recap analytics: they aren't revenue
     # (yet) — once resolved, their Type flips to "Έσοδο" and they show here.
-    transactions, _debts = _split_debts(transactions)
-    # ONE period scope feeds everything below — the summary table, the KPI
+    # They still feed each client card's Χρεωστούμενα metric as CURRENT state.
+    transactions, debts = _split_debts(transactions)
+    debt_by_client = _debts_by_client(debts)
+    # ONE period scope feeds everything below — the per-client cards, the KPI
     # totals and the per-card Κινήσεις lists — so they can never disagree. The
-    # old flow summed the LIFETIME totals of categories archived INSIDE the
-    # range instead: entries living in active (or long-archived) categories
-    # were dropped, so the cards showed a fraction of what the list summed.
+    # old flow summed the LIFETIME totals of clients archived INSIDE the range
+    # instead: entries living in active (or long-archived) clients were
+    # dropped, so the cards showed a fraction of what the list summed.
     period_txns = [t for t in transactions
                    if (d := _txn_date(t)) and start <= d <= end]
     grouped = _transactions_by_category(period_txns)
-    # Latest archive date per category name, for the table's second column.
+    # Latest archive date per client name, for the card's «Αρχειοθετήθηκε» badge.
     closed_by_key = {}
     for proj in completed:
         key = (proj["fields"].get("Name") or "").strip().lower()
@@ -2697,54 +3015,45 @@ def recap_tab(username):
     if not period_txns:
         _empty_state(f"Δεν υπάρχουν κινήσεις μεταξύ "
                      f"{start.strftime('%d/%m/%Y')} και {end.strftime('%d/%m/%Y')}.")
-    else:
-        rows = []
-        for key in sorted(grouped):
-            txns = grouped[key]
-            exp, rev = _sum_by_type(txns)
-            name = next((t["fields"].get("Category") for t in txns
-                         if t["fields"].get("Category")), "—")
-            closed_day = closed_by_key.get(key)
-            rows.append({
-                "Κατηγορία": name,
-                "Αρχειοθετήθηκε": (closed_day.strftime("%d/%m/%Y")
-                                   if closed_day else "Ενεργή"),
-                "Έσοδα": _money(rev),
-                "Έξοδα": _money(exp),
-                "Καθαρό": _money(rev - exp),
-            })
-        total_exp, total_rev = _sum_by_type(period_txns)
+        return
 
-        # A plain HTML table instead of st.dataframe: the dataframe paints
-        # its cells on a <canvas> from the NATIVE (dark) theme and ignores
-        # CSS — this one follows the active palette in both modes.
-        head = "".join(f"<th>{html.escape(col)}</th>" for col in _RECAP_COLUMNS)
-        body = "".join(
-            "<tr>" + "".join(
-                f"<td>{html.escape(str(row[col]))}</td>"
-                for col in _RECAP_COLUMNS) + "</tr>"
-            for row in rows
-        )
-        st.markdown(
-            f'<div class="aud-table-wrap"><table class="aud-table">'
-            f'<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>',
-            unsafe_allow_html=True,
-        )
+    total_exp, total_rev = _sum_by_type(period_txns)
+    net = total_rev - total_exp
+    # Same clickable header as the dashboard: tapping Συνολικά έσοδα / έξοδα
+    # reveals the period's matching transactions (with their delete controls)
+    # at the bottom. Recap only — the dashboard's cards toggle entry forms.
+    _recap_totals_row(total_rev, total_exp, net)
 
-        net = total_rev - total_exp
-        # Same visual language as the dashboard header — and the same
-        # interaction: the old standalone «Κινήσεις περιόδου» list at the
-        # bottom is gone; tapping Συνολικά έσοδα or Συνολικά έξοδα reveals
-        # the period's matching transactions (with their delete controls)
-        # right under the cards instead. Recap only — the dashboard's
-        # cards keep toggling their quick-entry forms.
-        _recap_totals_row(total_rev, total_exp, net)
-        if st.session_state.get("recap_show_income"):
-            _recap_txn_list("Κινήσεις εσόδων περιόδου",
-                            [t for t in period_txns if _is_revenue(t)])
-        elif st.session_state.get("recap_show_expense"):
-            _recap_txn_list("Κινήσεις εξόδων περιόδου",
-                            [t for t in period_txns if not _is_revenue(t)])
+    # Per-client accounting cards for the period (the plain summary table is
+    # gone — these carry strictly more: gross & net flows, net ΦΠΑ, debts,
+    # net-of-VAT profit and the income-tax bar). Debts are current-state.
+    per_client = []
+    for key in sorted(grouped):
+        name = next((t["fields"].get("Category") for t in grouped[key]
+                     if t["fields"].get("Category")), "—")
+        per_client.append(
+            (key, name,
+             _client_metrics(name, grouped, debt_by_client.get(key, 0.0))))
+
+    # Total Period VAT KPI: STRICTLY the sum of the per-client net VATs below.
+    _vat_total_row(round(sum(m["net_vat"] for _, _, m in per_client), 2),
+                   label="Συνολικό Φ.Π.Α. περιόδου")
+
+    _section("Πελάτες περιόδου")
+    for key, name, m in per_client:
+        closed_day = closed_by_key.get(key)
+        archived = (f"Αρχειοθετήθηκε {closed_day.strftime('%d/%m/%Y')}"
+                    if closed_day else None)
+        with st.container(key=f"clientcard_{key}"):
+            _client_metrics_block(name, m, archived_label=archived)
+
+    # Drill-down transaction lists (toggled by the totals cards above).
+    if st.session_state.get("recap_show_income"):
+        _recap_txn_list("Κινήσεις εσόδων περιόδου",
+                        [t for t in period_txns if _is_revenue(t)])
+    elif st.session_state.get("recap_show_expense"):
+        _recap_txn_list("Κινήσεις εξόδων περιόδου",
+                        [t for t in period_txns if not _is_revenue(t)])
 
 
 # --------------------------------------------------------------------------

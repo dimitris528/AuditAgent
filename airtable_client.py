@@ -35,9 +35,28 @@ Required Airtable schema (create these in your base before running the app):
       Source        Single select       - "Manual" (quick-entry/debt forms) or
                                           "AI Scan" (invoice/receipt upload
                                           flow); optional
+      VAT_Amount    Number              - the ΦΠΑ (VAT) portion of this row's
+                                          gross Amount, in euro, rounded to
+                                          cents and STORED at creation/edit
+                                          so per-client and total VAT are
+                                          exact partition-sums (revenue rows
+                                          carry output VAT, expense rows input
+                                          VAT). OPTIONAL — see the VAT-column
+                                          note below.
+      VAT_Rate      Number              - the ΦΠΑ rate applied to this row as a
+                                          decimal (0.24 / 0.13 / 0.06 / 0.0);
+                                          per-transaction, chosen at entry.
+                                          OPTIONAL.
       The save payload NEVER contains any key outside these columns —
       enforced by _TRANSACTION_COLUMNS below — so a failed write can only
       mean one of them is missing/renamed in the base.
+
+      VAT-column note: VAT_Amount / VAT_Rate are recent OPTIONAL additions. If
+      the base does not have them yet, create_transaction/resolve_debt_
+      transaction catch the resulting UNKNOWN_FIELD_NAME and RETRY the write
+      without the VAT fields, so saves keep working (VAT just isn't persisted
+      until you add the two Number columns). The app derives VAT on the fly
+      for any row missing VAT_Amount, so analytics never break either.
 
   Users table  (env AIRTABLE_USERS_TABLE, default "Users")
       Username            Single line text  - tenant key (login name)
@@ -89,8 +108,13 @@ API_ROOT = "https://api.airtable.com/v0"
 # expense from the sign of Amount.
 _TRANSACTION_COLUMNS = frozenset(
     {"Username", "Amount", "Date", "Category", "FileHash", "Description",
-     "Type", "Source"}
+     "Type", "Source", "VAT_Amount", "VAT_Rate"}
 )
+
+# The OPTIONAL VAT columns. A base that hasn't added them yet rejects a write
+# that carries them (UNKNOWN_FIELD_NAME); _write_transaction_fields transparently
+# retries WITHOUT these keys so saves never break before the columns exist.
+_VAT_COLUMNS = frozenset({"VAT_Amount", "VAT_Rate"})
 
 
 class AirtableError(RuntimeError):
@@ -370,17 +394,52 @@ def to_iso_date(value):
 
 
 # --- Transactions ---------------------------------------------------------
+def _looks_like_missing_vat_column(exc):
+    """True when an AirtableError is an UNKNOWN_FIELD_NAME naming a VAT column.
+
+    Lets create/resolve retry without the optional VAT fields when the base
+    hasn't added them yet, instead of failing the whole save."""
+    text = str(exc)
+    return "UNKNOWN_FIELD_NAME" in text and any(col in text for col in _VAT_COLUMNS)
+
+
+def _write_transaction_fields(method, fields, record_id=None):
+    """POST (create) or PATCH (update by record_id) a Transactions row, with a
+    one-shot fallback that strips the OPTIONAL VAT columns if the base rejects
+    them as unknown — so VAT support degrades gracefully on a base that hasn't
+    added VAT_Amount / VAT_Rate yet."""
+    def body(payload):
+        if record_id is None:
+            return {"fields": payload, "typecast": True}
+        return {"records": [{"id": record_id, "fields": payload}],
+                "typecast": True}
+
+    try:
+        return _request(method, AIRTABLE_TRANSACTIONS_TABLE, json=body(fields))
+    except AirtableError as exc:
+        if _VAT_COLUMNS & set(fields) and _looks_like_missing_vat_column(exc):
+            trimmed = {k: v for k, v in fields.items() if k not in _VAT_COLUMNS}
+            print("[WARN] Transactions base has no VAT_Amount/VAT_Rate column — "
+                  "saving without VAT (add the columns to persist ΦΠΑ).")
+            return _request(method, AIRTABLE_TRANSACTIONS_TABLE, json=body(trimmed))
+        raise
+
+
 def create_transaction(username, category, amount,
                        description=None, date=None, file_hash=None,
-                       type_=None, source=None):
+                       type_=None, source=None, vat_amount=None, vat_rate=None):
     """Save one transaction row.
 
     `amount` is SIGNED: positive = revenue (Έσοδο), negative = expense
     (Έξοδο) — the analytics read the sign, not the Type column. `type_`
     ("Έσοδο"/"Έξοδο") and `source` (e.g. "Manual") are optional labels,
-    written only when provided. The payload is restricted to the schema
-    columns and any accidental extra key raises BEFORE the API call, so a
-    save can never fail because of a stray field name.
+    written only when provided. `vat_amount` (euro, already rounded to cents
+    by the caller) and `vat_rate` (decimal, e.g. 0.24) persist this row's
+    per-transaction ΦΠΑ; both are optional and, if the base lacks the columns,
+    are dropped by _write_transaction_fields so the save still succeeds. The
+    payload is restricted to the schema columns and any accidental extra key
+    raises BEFORE the API call, so a save can never fail because of a stray
+    field name.
     """
     fields = {
         "Username": username,
@@ -395,6 +454,10 @@ def create_transaction(username, category, amount,
         fields["Type"] = type_
     if source:
         fields["Source"] = source
+    if vat_amount is not None:
+        fields["VAT_Amount"] = vat_amount
+    if vat_rate is not None:
+        fields["VAT_Rate"] = vat_rate
     # Airtable's Date column rejects non-ISO strings with a 422, so normalize
     # here — every caller is covered. An unparseable date is dropped rather
     # than allowed to fail the whole save.
@@ -407,26 +470,31 @@ def create_transaction(username, category, amount,
         raise AirtableError(
             f"Εσωτερικό σφάλμα: μη έγκυρες στήλες στο payload: {sorted(unexpected)}"
         )
-    return _request("POST", AIRTABLE_TRANSACTIONS_TABLE,
-                    json={"fields": fields, "typecast": True})
+    return _write_transaction_fields("POST", fields)
 
 
-def resolve_debt_transaction(record_id, paid_date=None):
+def resolve_debt_transaction(record_id, paid_date=None,
+                             vat_amount=None, vat_rate=None):
     """Mark a Χρεωστούμενο row as paid: Type -> "Έσοδο" and Date -> the
     payment date (today by default).
 
     The Amount is already stored positive, so the Type flip alone moves the
     value out of the Χρεωστούμενα KPI and into the same Category's revenue —
-    one row, nothing to keep in sync. typecast lets Airtable create the
-    "Έσοδο" select option if the base doesn't have it yet.
+    one row, nothing to keep in sync. Now that the row becomes REALISED
+    revenue, its output ΦΠΑ is stamped too (vat_amount/vat_rate, computed by
+    the caller from the stored rate); both are optional and stripped
+    automatically on a base without the VAT columns. typecast lets Airtable
+    create the "Έσοδο" select option if the base doesn't have it yet.
     """
     fields = {
         "Type": "Έσοδο",
         "Date": to_iso_date(paid_date) or date.today().isoformat(),
     }
-    body = {"records": [{"id": record_id, "fields": fields}],
-            "typecast": True}
-    return _request("PATCH", AIRTABLE_TRANSACTIONS_TABLE, json=body)
+    if vat_amount is not None:
+        fields["VAT_Amount"] = vat_amount
+    if vat_rate is not None:
+        fields["VAT_Rate"] = vat_rate
+    return _write_transaction_fields("PATCH", fields, record_id=record_id)
 
 
 def find_transaction_by_hash(username, file_hash):
