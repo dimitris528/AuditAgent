@@ -15,18 +15,17 @@ gunicorn==26.0.0         # production WSGI server on Render (linux-only)
 # Web dashboard backend (server/main.py — FastAPI JSON API for the Next.js UI;
 # wraps airtable_client + finance, no new business logic). Run with:
 #   uvicorn server.main:app --port 8000
-# FastAPI + Starlette are pinned TOGETHER to a known-good, mutually compatible
-# pair. FastAPI 0.109.2 predates the `DEFAULT_EXCLUDED_CONTENT_TYPES` import
-# (introduced in FastAPI 0.116 / Starlette 0.42.0), so this pair is IMMUNE to:
-#   ImportError: cannot import name 'DEFAULT_EXCLUDED_CONTENT_TYPES'
-#                from 'starlette.middleware.gzip'
-# — regardless of what a build's resolver would otherwise pick. FastAPI 0.109.2
-# requires starlette>=0.35,<0.37, so 0.36.3 is the exact matching build. Do NOT
-# bump one without the other. Verified locally: `uvicorn server.main:app` starts
-# and serves (health/meta/openapi/auth), with pydantic 2.11.10, against live
-# Airtable.
-fastapi==0.109.2         # REST endpoints for the Next.js dashboard
-starlette==0.36.3        # ASGI toolkit under FastAPI — kept in lockstep
+# FastAPI + Starlette are pinned TOGETHER, inside the ONE window that satisfies
+# every user of Starlette in this shared requirements file:
+#   * streamlit 1.58.0 (app.py) requires  starlette>=0.40.0
+#   * fastapi 0.115.6   (server/)   requires  starlette>=0.40.0,<0.42.0
+#   => the overlap is [0.40.0, 0.42.0); starlette 0.41.3 sits inside it.
+# Staying <0.42.0 (and fastapi <0.116) also keeps the build clear of the
+# `DEFAULT_EXCLUDED_CONTENT_TYPES` import (added in Starlette 0.42.0 / FastAPI
+# 0.116) that crashed earlier deploys. Do NOT downgrade fastapi below 0.115 —
+# older FastAPI caps starlette <0.40 and hard-conflicts with streamlit.
+fastapi==0.115.6         # REST endpoints for the Next.js dashboard
+starlette==0.41.3        # ASGI toolkit shared by FastAPI AND streamlit 1.58
 uvicorn[standard]==0.34.0  # ASGI server (dev + prod)
 PyJWT==2.10.1            # JWT auth (auth.py) — Bearer tokens for the dashboard
 
