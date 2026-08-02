@@ -16,6 +16,12 @@ gunicorn==26.0.0         # production WSGI server on Render (linux-only)
 # wraps airtable_client + finance, no new business logic). Run with:
 #   uvicorn server.main:app --port 8000
 fastapi==0.115.6         # REST endpoints for the Next.js dashboard
+# Starlette MUST be pinned alongside FastAPI: leaving it unpinned let a build
+# resolve a newer FastAPI (which imports `DEFAULT_EXCLUDED_CONTENT_TYPES` from
+# starlette.middleware.gzip, added only in Starlette 0.42.0) against an older
+# Starlette, crashing on import. FastAPI 0.115.6 requires starlette>=0.40,<0.42;
+# 0.41.3 is the matching build (and does NOT need/define that symbol).
+starlette==0.41.3        # ASGI toolkit under FastAPI — kept in lockstep
 uvicorn[standard]==0.34.0  # ASGI server (dev + prod)
 PyJWT==2.10.1            # JWT auth (auth.py) — Bearer tokens for the dashboard
 
