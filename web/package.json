@@ -9,19 +9,18 @@
     "start": "next start",
     "lint": "next lint"
   },
+  "//": "Everything `next build` needs lives in dependencies, NOT devDependencies. Render runs the build with NODE_ENV=production (see render.yaml), which npm reads as --omit=dev, so `npm ci` would skip devDependencies entirely and the build would die on `Cannot find module 'tailwindcss'`. The tailwind/postcss toolchain and the TS type packages are all build-time requirements here.",
   "dependencies": {
-    "lucide-react": "0.454.0",
-    "next": "14.2.35",
-    "react": "18.3.1",
-    "react-dom": "18.3.1",
-    "recharts": "2.13.3"
-  },
-  "devDependencies": {
     "@types/node": "20.16.11",
     "@types/react": "18.3.11",
     "@types/react-dom": "18.3.0",
     "autoprefixer": "10.4.20",
+    "lucide-react": "0.454.0",
+    "next": "14.2.35",
     "postcss": "8.4.47",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "recharts": "2.13.3",
     "tailwindcss": "3.4.14",
     "typescript": "5.6.3"
   }
