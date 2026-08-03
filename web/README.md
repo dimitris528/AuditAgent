@@ -17,8 +17,7 @@ reads/writes through it).
 ```
 
 - **`finance.py`** (repo root) is the single source of truth for all financial
-  math — the exact VAT-summation logic the Streamlit app uses, so
-  `total VAT == Σ per-client VATs` on both surfaces. `app.py` now imports it too.
+  math, so `total VAT == Σ per-client VATs` by construction.
 - **`server/`** is a thin FastAPI layer that shapes JSON; all Airtable I/O stays
   in `airtable_client.py`.
 - **`web/`** is this Next.js dashboard.

@@ -1,10 +1,10 @@
 """
 Canonical financial logic for the accounting SaaS — the SINGLE source of truth
-shared by the Streamlit app (app.py) and the FastAPI web backend (server/).
+for the FastAPI web backend (server/).
 
 Everything here is PURE Python (stdlib only): it operates on Airtable record
 dicts of the shape ``{"id": ..., "fields": {...}, "createdTime": ...}`` and
-never touches Streamlit, Airtable I/O, or config. That keeps the VAT-summation
+never touches a UI framework, Airtable I/O, or config. That keeps the VAT-summation
 guarantees identical everywhere: VAT is rounded ONCE at the transaction level
 and every aggregate is a pure partition-sum, so total VAT == Σ per-client VATs
 by construction (see the module tests / vat-summation-consistency notes).

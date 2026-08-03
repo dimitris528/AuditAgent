@@ -14,11 +14,9 @@ recorded count, new ones get the new count.
 
 Migrating existing plaintext passwords in Airtable
 --------------------------------------------------
-Nothing breaks on deploy: the login gate (app.py _password_matches) accepts
-BOTH formats. A Password cell that doesn't start with "pbkdf2_sha256$" is
-treated as legacy plaintext, and on the first successful login the app
-rewrites that cell with the hash automatically (see login_screen). So the
-options are:
+Nothing breaks on deploy: the login gate (auth.password_matches) accepts BOTH
+formats. A Password cell that doesn't start with "pbkdf2_sha256$" is treated as
+legacy plaintext and still verifies. So the options are:
 
   A. Do nothing — every account self-migrates the next time it logs in.
   B. Migrate a row by hand — run locally:
