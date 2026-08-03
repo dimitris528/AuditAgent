@@ -38,7 +38,7 @@ export async function POST(req: Request) {
   }
 
   const maxAge = (data.expires_hours ?? 12) * 3600;
-  cookies().set(SESSION_COOKIE, data.access_token, {
+  (await cookies()).set(SESSION_COOKIE, data.access_token, {
     httpOnly: true,
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",

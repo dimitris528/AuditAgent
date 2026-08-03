@@ -15,12 +15,12 @@ export const metadata: Metadata = {
   description: "Enterprise accounting dashboard — έσοδα, έξοδα, Φ.Π.Α. & φόρος ανά πελάτη",
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
-  const authed = Boolean(cookies().get(SESSION_COOKIE)?.value);
+  const authed = Boolean((await cookies()).get(SESSION_COOKIE)?.value);
   return (
     <html lang="el" suppressHydrationWarning>
       <head>

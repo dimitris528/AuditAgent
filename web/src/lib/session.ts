@@ -7,6 +7,8 @@ import { SESSION_COOKIE, apiBase } from "./constants";
 export { SESSION_COOKIE };
 export const API_BASE_URL = apiBase();
 
-export function getToken(): string | undefined {
-  return cookies().get(SESSION_COOKIE)?.value;
+// Async since Next 15: cookies() returns a Promise there, so every caller must
+// await this.
+export async function getToken(): Promise<string | undefined> {
+  return (await cookies()).get(SESSION_COOKIE)?.value;
 }

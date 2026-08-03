@@ -8,7 +8,7 @@ const API_BASE_URL = apiBase();
 // with the Bearer token. The tenant is derived server-side from the token, so
 // the client cannot spoof another user.
 export async function POST(req: Request) {
-  const token = cookies().get(SESSION_COOKIE)?.value;
+  const token = (await cookies()).get(SESSION_COOKIE)?.value;
   if (!token) {
     return NextResponse.json({ error: "Απαιτείται σύνδεση." }, { status: 401 });
   }

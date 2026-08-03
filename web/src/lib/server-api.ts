@@ -5,7 +5,7 @@ import { ApiError } from "./errors";
 import type { DashboardData } from "./types";
 
 export async function getDashboard(): Promise<DashboardData> {
-  const token = getToken();
+  const token = await getToken();
   if (!token) throw new ApiError("unauthenticated", 401);
   const res = await fetch(`${API_BASE_URL}/api/dashboard`, {
     cache: "no-store",

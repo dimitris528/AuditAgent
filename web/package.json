@@ -12,16 +12,21 @@
   "//": "Everything `next build` needs lives in dependencies, NOT devDependencies. Render runs the build with NODE_ENV=production (see render.yaml), which npm reads as --omit=dev, so `npm ci` would skip devDependencies entirely and the build would die on `Cannot find module 'tailwindcss'`. The tailwind/postcss toolchain and the TS type packages are all build-time requirements here.",
   "dependencies": {
     "@types/node": "20.16.11",
-    "@types/react": "18.3.11",
-    "@types/react-dom": "18.3.0",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
     "autoprefixer": "10.4.20",
     "lucide-react": "0.454.0",
-    "next": "14.2.35",
-    "postcss": "8.4.47",
-    "react": "18.3.1",
-    "react-dom": "18.3.1",
-    "recharts": "2.13.3",
+    "next": "15.5.22",
+    "postcss": "8.5.25",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "recharts": "2.15.4",
     "tailwindcss": "3.4.14",
     "typescript": "5.6.3"
+  },
+  "//overrides": "Both entries force a PATCHED copy of a transitive dependency that Next pins below the fixed version; npm audit stays clean only while these are here. postcss: Next pins an exact 8.4.31, below the 8.5.18 that patches GHSA-qx2v-qp2m-jg93 / GHSA-6g55-p6wh-862q / GHSA-r28c-9q8g-f849 (8.5.x is semver-compatible with 8.4.x). sharp: Next 15 pulls an optional 0.34.5, below the 0.35.0 that patches the inherited libvips CVEs (GHSA-f88m-g3jw-g9cj) -- this app never imports next/image, so sharp is unused weight, but it still lands in the lockfile and still gets flagged.",
+  "overrides": {
+    "postcss": "8.5.25",
+    "sharp": "0.35.3"
   }
 }
