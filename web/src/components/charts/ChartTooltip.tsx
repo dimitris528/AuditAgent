@@ -1,11 +1,22 @@
 "use client";
 
-import type { TooltipProps } from "recharts";
+import type { TooltipContentProps } from "recharts";
 import { money } from "@/lib/format";
 import { useChartColors } from "./useChartColors";
 
-/** Shared themed tooltip that formats every numeric value as EUR. */
-export function ChartTooltip({ active, payload, label }: TooltipProps<number, string>) {
+/**
+ * Shared themed tooltip that formats every numeric value as EUR.
+ *
+ * recharts 3 split the tooltip types: TooltipProps is now what you pass to
+ * <Tooltip>, with the context-supplied fields omitted, while custom content
+ * receives TooltipContentProps (TooltipProps plus active/payload/label). Props
+ * are optional here because recharts also renders content with nothing active.
+ */
+export function ChartTooltip({
+  active,
+  payload,
+  label,
+}: Partial<TooltipContentProps<number, string>>) {
   const c = useChartColors();
   if (!active || !payload || payload.length === 0) return null;
   return (
