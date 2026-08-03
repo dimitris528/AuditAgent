@@ -122,15 +122,29 @@ def get_completed_projects(session, user):
     return [c.to_record(user.username) for c in session.exec(stmt).all()]
 
 
+def _key(name):
+    """The canonical form used to compare client names.
+
+    Case folding happens in PYTHON, not in SQL. Postgres lower() depends on the
+    database collation (under LC_CTYPE=C it leaves Greek untouched) and SQLite's
+    is ASCII-only — so a SQL-side comparison would match "ΠΑΠΑΔΟΠΟΥΛΟΣ" to
+    "Παπαδόπουλος" on one deployment and not another. Client names here are
+    overwhelmingly Greek, so that has to be deterministic.
+    """
+    return (name or "").strip().lower()
+
+
 def find_client(session, user, name):
     """Case-insensitive lookup within this tenant, mirroring how transactions
     are matched to clients everywhere else."""
-    target = (name or "").strip().lower()
+    target = _key(name)
     if not target:
         return None
-    stmt = select(Client).where(
-        Client.user_id == user.id, func.lower(Client.name) == target)
-    return session.exec(stmt).first()
+    for client in session.exec(
+            select(Client).where(Client.user_id == user.id)).all():
+        if _key(client.name) == target:
+            return client
+    return None
 
 
 def ensure_client(session, user, name):
@@ -150,9 +164,84 @@ def ensure_client(session, user, name):
     return client
 
 
-def close_client(session, user, client_id, closed_date=None):
-    client = session.get(Client, client_id)
+def get_client(session, user, client_id):
+    """One client, scoped to the tenant. Returns None for another tenant's id,
+    so a guessed id is indistinguishable from a missing one."""
+    try:
+        pk = int(client_id)
+    except (TypeError, ValueError):
+        return None
+    client = session.get(Client, pk)
     if client is None or client.user_id != user.id:
+        return None
+    return client
+
+
+def list_clients(session, user, include_archived=True):
+    stmt = select(Client).where(Client.user_id == user.id)
+    if not include_archived:
+        stmt = stmt.where(Client.status == STATUS_ACTIVE)
+    return session.exec(stmt.order_by(Client.name)).all()
+
+
+def create_client(session, user, name, afm=None, contact=None, notes=None):
+    client = Client(user_id=user.id, name=(name or "").strip(),
+                    status=STATUS_ACTIVE, afm=afm, contact=contact, notes=notes)
+    session.add(client)
+    session.commit()
+    session.refresh(client)
+    return client
+
+
+def update_client(session, user, client_id, **fields):
+    """Patch a client. Only keys present in `fields` are touched, so the caller
+    can send a partial update without blanking everything else.
+
+    A RENAME also rewrites transactions.client for this client's rows.
+    finance.py groups transactions by name, so leaving the denormalised copy
+    behind would split the client's history in two on the dashboard: the old
+    name would keep its figures and the renamed card would show zero.
+    """
+    client = get_client(session, user, client_id)
+    if client is None:
+        return None
+
+    if "name" in fields:
+        new_name = (fields["name"] or "").strip()
+        if new_name and new_name != client.name:
+            old_key = _key(client.name)
+            client.name = new_name
+            # Rows are matched by the FK when they have one, and by name for
+            # rows predating client_id. Comparison is Python-side — see _key.
+            for txn in session.exec(
+                select(Transaction).where(Transaction.user_id == user.id)
+            ).all():
+                if txn.client_id == client.id or _key(txn.client) == old_key:
+                    txn.client = new_name
+                    txn.client_id = client.id
+                    session.add(txn)
+
+    for key in ("afm", "contact", "notes"):
+        if key in fields:
+            value = fields[key]
+            setattr(client, key, (value or "").strip() or None)
+
+    if "archived" in fields:
+        archived = bool(fields["archived"])
+        client.status = STATUS_COMPLETED if archived else STATUS_ACTIVE
+        # Stamp the close date on archive; clear it on restore so the row does
+        # not look closed while being active.
+        client.closed_date = date.today() if archived else None
+
+    session.add(client)
+    session.commit()
+    session.refresh(client)
+    return client
+
+
+def close_client(session, user, client_id, closed_date=None):
+    client = get_client(session, user, client_id)
+    if client is None:
         return None
     client.status = STATUS_COMPLETED
     client.closed_date = closed_date or date.today()
@@ -162,12 +251,33 @@ def close_client(session, user, client_id, closed_date=None):
     return client
 
 
+def get_client_transactions(session, user, client):
+    """Every transaction belonging to one client, as finance records.
+
+    Matched by client_id OR by name: rows written before client_id existed (and
+    any backfill that could not find a match) still carry only the name, and
+    omitting them would under-report the client's totals.
+    """
+    target = _key(client.name)
+    rows = session.exec(
+        select(Transaction)
+        .where(Transaction.user_id == user.id)
+        .order_by(Transaction.id)
+    ).all()
+    return [t.to_record(user.username) for t in rows
+            if t.client_id == client.id or _key(t.client) == target]
+
+
 # --- Transactions ---------------------------------------------------------
 def get_transactions(session, user, client=None):
-    stmt = select(Transaction).where(Transaction.user_id == user.id)
+    rows = session.exec(
+        select(Transaction)
+        .where(Transaction.user_id == user.id)
+        .order_by(Transaction.id)
+    ).all()
     if client is not None:
-        stmt = stmt.where(func.lower(Transaction.client) == client.strip().lower())
-    rows = session.exec(stmt.order_by(Transaction.id)).all()
+        target = _key(client)
+        rows = [t for t in rows if _key(t.client) == target]
     return [t.to_record(user.username) for t in rows]
 
 
@@ -186,11 +296,23 @@ def get_transaction(session, user, record_id):
 
 def create_transaction(session, user, client, amount, description=None,
                        txn_date=None, type_=None, source=None,
-                       vat_amount=None, vat_rate=None, file_hash=None):
-    ensure_client(session, user, client)
+                       vat_amount=None, vat_rate=None, file_hash=None,
+                       client_id=None):
+    """Save a transaction.
+
+    `client_id` selects an existing client explicitly (what the UI picker
+    sends). Without it the client is resolved — and created if new — from the
+    name, which keeps the older name-only callers working.
+    """
+    row = get_client(session, user, client_id) if client_id else None
+    if row is None:
+        row = ensure_client(session, user, client)
     txn = Transaction(
         user_id=user.id,
-        client=(client or "").strip(),
+        client_id=row.id,
+        # Denormalised from the client row, not from the caller's string, so
+        # the two can never disagree.
+        client=row.name,
         amount=amount,
         type=type_,
         vat_amount=vat_amount,

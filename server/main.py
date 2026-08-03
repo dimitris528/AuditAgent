@@ -122,6 +122,10 @@ class RegisterRequest(BaseModel):
 
 class TransactionCreate(BaseModel):
     client: str = Field(..., min_length=1, description="Client (Category) name")
+    # Preferred over `client` when present: the UI picker sends the id of the
+    # selected client so a rename or a near-duplicate name cannot mis-file the
+    # row. `client` stays required as the fallback for name-only callers.
+    client_id: int | None = None
     amount: float = Field(..., gt=0, description="GROSS amount incl. VAT, > 0")
     type: str = Field(..., description="Έσοδο | Έξοδο | Χρεωστούμενο")
     vat_rate: float = Field(default=finance.DEFAULT_VAT_RATE, ge=0, le=1)
@@ -133,6 +137,24 @@ class DebtResolve(BaseModel):
     amount: float = Field(..., gt=0)
     vat_rate: float = Field(default=finance.DEFAULT_VAT_RATE, ge=0, le=1)
     date: str | None = None
+
+
+class ClientCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    afm: str | None = Field(default=None, max_length=32)
+    contact: str | None = Field(default=None, max_length=200)
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class ClientUpdate(BaseModel):
+    """Every field optional — this is a PATCH-style update sent as PUT, so the
+    drawer can save one field without blanking the rest. Unset (None) means
+    "leave alone"; the store only touches keys present in the payload."""
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    afm: str | None = Field(default=None, max_length=32)
+    contact: str | None = Field(default=None, max_length=200)
+    notes: str | None = Field(default=None, max_length=2000)
+    archived: bool | None = None
 
 
 # --------------------------------------------------------------------------
@@ -349,16 +371,166 @@ def register(body: RegisterRequest):
 # Read endpoints (tenant-scoped by the JWT)
 # --------------------------------------------------------------------------
 @app.get("/api/dashboard")
-def dashboard(user: str = Depends(get_current_user)):
+def dashboard(user: str = Depends(get_current_user),
+              year: int | None = None,
+              quarter: int | None = None,
+              month: int | None = None):
     """The full dashboard payload for the authenticated tenant: executive
     header, rich client cards, and the analytics datasets — all with the exact
-    VAT/net-profit summation."""
+    VAT/net-profit summation.
+
+    Optional year/quarter/month narrow EVERY figure to that period. Only the
+    transactions are filtered: the client list is not period-scoped, so a client
+    with no activity in the window still gets a card (showing zeros) rather than
+    vanishing from the grid.
+    """
     active, completed, transactions, is_demo = _load(user)
-    payload = finance.build_dashboard(active, completed, transactions,
+    start, end = finance.period_bounds(year, quarter, month)
+    scoped = finance.filter_period(transactions, start, end)
+    payload = finance.build_dashboard(active, completed, scoped,
                                       trend_months=TREND_MONTHS)
     payload["username"] = user
     payload["demo"] = is_demo
+    payload["period"] = {
+        "year": year,
+        "quarter": quarter,
+        "month": month,
+        "start": start.isoformat() if start else None,
+        "end": end.isoformat() if end else None,
+        # Years present across ALL history, so the selector can still offer a
+        # year the current filter excludes.
+        "available_years": finance.available_years(transactions),
+        "transactions_in_period": len(scoped),
+        "transactions_total": len(transactions),
+    }
     return payload
+
+
+# --------------------------------------------------------------------------
+# Clients
+# --------------------------------------------------------------------------
+def _client_summary(name, records):
+    """Balance + VAT summary for one client's transactions.
+
+    Delegates to finance.client_metrics — the exact function behind the
+    dashboard card — rather than recomputing, so the drawer and the card cannot
+    drift apart. (Note finance.sum_by_type/vat_by_type return (expense, revenue)
+    TUPLES in that order; recomputing here is an easy way to silently swap
+    them.)
+    """
+    regular, debts = finance.split_debts(records)
+    grouped = finance.transactions_by_category(regular)
+    debt_total = round(sum(finance.amount(d) for d in debts), 2)
+    metrics = finance.client_metrics(name, grouped, debt_total)
+    net_vat = metrics["net_vat"]
+    return {
+        **metrics,
+        "vat_status": ("refund" if net_vat < 0
+                       else "payable" if net_vat > 0 else "zero"),
+        "count": len(records),
+        "open_debts": len(debts),
+    }
+
+
+@app.get("/api/v1/clients")
+def list_clients(user: str = Depends(get_current_user),
+                 include_archived: bool = True):
+    """All of the tenant's clients — the picker uses this for its dropdown."""
+    _require_db()
+    try:
+        with database.session_scope() as session:
+            tenant = _resolve_user(session, user)
+            rows = store.list_clients(session, tenant,
+                                      include_archived=include_archived)
+            return {"clients": [c.to_detail() for c in rows]}
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+
+
+@app.post("/api/v1/clients", status_code=201)
+def create_client(body: ClientCreate, user: str = Depends(get_current_user)):
+    """Create a client, e.g. inline from the transaction form."""
+    _require_db()
+    try:
+        with database.session_scope() as session:
+            tenant = _resolve_user(session, user)
+            if store.find_client(session, tenant, body.name):
+                raise HTTPException(status_code=409,
+                                    detail="Υπάρχει ήδη πελάτης με αυτό το όνομα.")
+            client = store.create_client(
+                session, tenant, body.name,
+                afm=body.afm, contact=body.contact, notes=body.notes)
+            return client.to_detail()
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+
+
+@app.get("/api/v1/clients/{client_id}")
+def get_client(client_id: int, user: str = Depends(get_current_user),
+               year: int | None = None, quarter: int | None = None,
+               month: int | None = None):
+    """One client plus its own transactions and summary — the drawer payload.
+
+    Accepts the same period parameters as the dashboard so the drawer can honour
+    whatever period the page is showing.
+    """
+    _require_db()
+    try:
+        with database.session_scope() as session:
+            tenant = _resolve_user(session, user)
+            client = store.get_client(session, tenant, client_id)
+            if client is None:
+                raise HTTPException(status_code=404, detail="Ο πελάτης δεν βρέθηκε.")
+            records = store.get_client_transactions(session, tenant, client)
+            start, end = finance.period_bounds(year, quarter, month)
+            scoped = finance.filter_period(records, start, end)
+            scoped = sorted(scoped,
+                            key=lambda t: finance.txn_date(t) or _dt.date.min,
+                            reverse=True)
+            return {
+                "client": client.to_detail(),
+                "summary": _client_summary(client.name, scoped),
+                "transactions": [_serialize_txn(t) for t in scoped],
+            }
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+
+
+@app.put("/api/v1/clients/{client_id}")
+def update_client(client_id: int, body: ClientUpdate,
+                  user: str = Depends(get_current_user)):
+    """Update a client's details, or archive/restore it.
+
+    Only the keys actually sent are applied — `exclude_unset` is what makes this
+    a partial update, so saving the notes field cannot blank the ΑΦΜ.
+    """
+    _require_db()
+    fields = body.model_dump(exclude_unset=True)
+    if not fields:
+        raise HTTPException(status_code=422, detail="Κανένα πεδίο προς ενημέρωση.")
+    try:
+        with database.session_scope() as session:
+            tenant = _resolve_user(session, user)
+            if "name" in fields and fields["name"]:
+                clash = store.find_client(session, tenant, fields["name"])
+                if clash is not None and clash.id != client_id:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Υπάρχει ήδη άλλος πελάτης με αυτό το όνομα.")
+            client = store.update_client(session, tenant, client_id, **fields)
+            if client is None:
+                raise HTTPException(status_code=404, detail="Ο πελάτης δεν βρέθηκε.")
+            return client.to_detail()
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
 
 
 @app.get("/api/transactions")
@@ -408,6 +580,7 @@ def create_transaction(body: TransactionCreate,
                 source="Web",
                 vat_amount=vat_amount,
                 vat_rate=body.vat_rate,
+                client_id=body.client_id,
             )
             return {"ok": True, "id": str(txn.id)}
     except HTTPException:

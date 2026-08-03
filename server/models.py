@@ -92,6 +92,11 @@ class Client(SQLModel, table=True):
     name: str = Field(max_length=200)
     status: str = Field(default=STATUS_ACTIVE, index=True, max_length=32)
     closed_date: Optional[dt.date] = Field(default=None)
+    # Α.Φ.Μ. — the Greek tax registration number. Text, not a number: it is an
+    # identifier, and leading zeros are significant.
+    afm: Optional[str] = Field(default=None, max_length=32)
+    contact: Optional[str] = Field(default=None, max_length=200)
+    notes: Optional[str] = Field(default=None, max_length=2000)
     created_at: dt.datetime = Field(default_factory=_utcnow,
                                     sa_column=_tstz(nullable=False))
 
@@ -107,16 +112,35 @@ class Client(SQLModel, table=True):
             },
         }
 
+    def to_detail(self):
+        """Full client record for the detail drawer (not the finance record
+        shape — this one is consumed by the UI directly)."""
+        return {
+            "id": self.id,
+            "name": self.name,
+            "status": self.status,
+            "archived": self.status == STATUS_COMPLETED,
+            "afm": self.afm,
+            "contact": self.contact,
+            "notes": self.notes,
+            "closed_date": self.closed_date.isoformat() if self.closed_date else None,
+            "created_at": _iso_z(self.created_at),
+        }
+
 
 class Transaction(SQLModel, table=True):
     __tablename__ = "transactions"
 
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="users.id", index=True)
-    # Client name rather than a FK: transactions are matched to clients by name
-    # (case-insensitively) throughout finance.py, and rows may reference a
-    # client that was archived. Keeping the name preserves that behaviour and
-    # means a deleted client never cascades away its financial history.
+    # The authoritative link to a client. Nullable because rows backfilled from
+    # Airtable may name a client that never had a Projects row, and losing those
+    # transactions would be worse than leaving the link unset.
+    client_id: Optional[int] = Field(default=None, foreign_key="clients.id", index=True)
+    # The client NAME is kept alongside the FK, denormalised on purpose:
+    # finance.py groups transactions by name (case-insensitively) and that is
+    # the module whose VAT-summation guarantees we do not want to touch. Renames
+    # therefore update both — see store.update_client.
     client: str = Field(index=True, max_length=200)
     # SIGNED, exactly as in Airtable: revenue/debt positive, expense negative.
     # finance.py reads the sign, so flipping this convention silently inverts

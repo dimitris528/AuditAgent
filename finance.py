@@ -18,7 +18,9 @@ Transaction record fields used:
     VAT_Rate    decimal rate applied, e.g. 0.24 (optional)
 """
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+
+_ONE_DAY = timedelta(days=1)
 
 # --------------------------------------------------------------------------
 # Φ.Π.Α. (VAT) — per-transaction rate model
@@ -37,6 +39,75 @@ TAX_RATE_HIGH = 0.29          # bracket at/above the limit
 
 # Χρεωστούμενα (debts/receivables) ride the Transactions table with this Type.
 DEBT_TYPE = "Χρεωστούμενο"
+
+
+# --------------------------------------------------------------------------
+# Περίοδος — period filtering for the dashboard
+# --------------------------------------------------------------------------
+QUARTER_MONTHS = {1: (1, 3), 2: (4, 6), 3: (7, 9), 4: (10, 12)}
+
+
+def period_bounds(year=None, quarter=None, month=None):
+    """Return (start, end) inclusive dates for a period, or (None, None) for
+    "all time".
+
+    Precedence is month > quarter > year, so a caller that sends both a quarter
+    and a month gets the narrower window rather than a contradiction. A quarter
+    or month without a year is meaningless and is treated as all-time.
+    """
+    if not year:
+        return None, None
+    year = int(year)
+    if month:
+        month = int(month)
+        if not 1 <= month <= 12:
+            return None, None
+        start = date(year, month, 1)
+        end = (date(year + 1, 1, 1) if month == 12
+               else date(year, month + 1, 1)) - _ONE_DAY
+        return start, end
+    if quarter:
+        quarter = int(quarter)
+        if quarter not in QUARTER_MONTHS:
+            return None, None
+        first, last = QUARTER_MONTHS[quarter]
+        start = date(year, first, 1)
+        end = (date(year + 1, 1, 1) if last == 12
+               else date(year, last + 1, 1)) - _ONE_DAY
+        return start, end
+    return date(year, 1, 1), date(year, 12, 31)
+
+
+def in_period(record, start, end):
+    """True when a transaction falls inside [start, end].
+
+    A row whose date cannot be determined at all is KEPT for the all-time view
+    and EXCLUDED from any bounded period: silently dropping it from every view
+    would make the totals disagree with the transaction list, while forcing it
+    into an arbitrary period would misstate that period.
+    """
+    if start is None and end is None:
+        return True
+    d = txn_date(record)
+    if d is None:
+        return False
+    if start is not None and d < start:
+        return False
+    if end is not None and d > end:
+        return False
+    return True
+
+
+def filter_period(transactions, start, end):
+    if start is None and end is None:
+        return list(transactions)
+    return [t for t in transactions if in_period(t, start, end)]
+
+
+def available_years(transactions):
+    """Descending list of years present in the data, for the period selector."""
+    years = {d.year for d in (txn_date(t) for t in transactions) if d}
+    return sorted(years, reverse=True)
 
 
 # --------------------------------------------------------------------------

@@ -85,7 +85,10 @@ def _require_url():
             f"un-escaped special character in the password — percent-encode it "
             f"(/ -> %2F, @ -> %40, : -> %3A, ? -> %3F)."
         ) from exc
-    if not url.host or not url.database:
+    # Only meaningful for a network database: this is the signature of the
+    # un-escaped-password failure, where the "/" swallows the host and port.
+    # A file-backed URL (sqlite:///path) legitimately has no host.
+    if url.drivername.startswith("postgresql") and (not url.host or not url.database):
         raise DatabaseNotConfigured(
             "DATABASE_URL is missing a host or database name. An un-escaped "
             "'/' in the password does exactly this — percent-encode it as %2F."
@@ -99,16 +102,31 @@ def get_engine():
     global _engine
     if _engine is None:
         url = _require_url()
-        _engine = create_engine(
-            url,
-            poolclass=NullPool,          # see module docstring: pgbouncer
-            pool_pre_ping=True,
-            connect_args={
+        kwargs = {"pool_pre_ping": True}
+        if is_postgres(url):
+            # psycopg2-specific; passing these to any other driver raises.
+            kwargs["poolclass"] = NullPool   # see module docstring: pgbouncer
+            kwargs["connect_args"] = {
                 "connect_timeout": 10,
                 "options": f"-c statement_timeout={_STATEMENT_TIMEOUT_MS}",
-            },
-        )
+            }
+        _engine = create_engine(url, **kwargs)
     return _engine
+
+
+def is_postgres(url=None):
+    """True when the configured database is PostgreSQL.
+
+    Keeps the Postgres-only pieces (pgbouncer pooling, statement_timeout, the
+    ADD COLUMN IF NOT EXISTS migrations) from firing against another backend —
+    which is what lets the endpoint suite run on a local SQLite file when the
+    Supabase credentials are not to hand.
+    """
+    try:
+        url = url or _require_url()
+    except DatabaseNotConfigured:
+        return False
+    return url.drivername.startswith("postgresql")
 
 
 def is_configured():
@@ -124,17 +142,61 @@ def is_configured():
         return False
 
 
-def init_db():
-    """Create any missing tables. Safe to call on every boot: create_all only
-    issues CREATE TABLE for tables that do not exist and never alters existing
-    ones.
+# Columns added after the tables first shipped. create_all() only issues
+# CREATE TABLE and never ALTERs, so a table that already exists keeps its
+# original shape forever — new model fields simply would not exist in the
+# database, and every query naming them would fail.
+#
+# These statements are ADDITIVE ONLY and idempotent (IF NOT EXISTS). Nothing
+# here drops, renames or retypes a column: that class of change loses data and
+# belongs in a reviewed migration, not in a startup hook.
+_ADDITIVE_MIGRATIONS = (
+    "ALTER TABLE clients ADD COLUMN IF NOT EXISTS afm VARCHAR(32)",
+    "ALTER TABLE clients ADD COLUMN IF NOT EXISTS contact VARCHAR(200)",
+    "ALTER TABLE clients ADD COLUMN IF NOT EXISTS notes VARCHAR(2000)",
+    "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS client_id INTEGER "
+    "REFERENCES clients(id)",
+    "CREATE INDEX IF NOT EXISTS ix_transactions_client_id "
+    "ON transactions (client_id)",
+)
 
-    That last part is the limitation worth knowing — this creates tables, it
-    does not migrate them. Changing a column later needs a real migration
-    (Alembic) or a manual ALTER; create_all will silently leave the old shape
-    in place.
+# Link transactions written before client_id existed to their client, matching
+# on the denormalised name within the same tenant. Only fills NULLs, so it can
+# run on every boot and will never overwrite a real association.
+_BACKFILL_CLIENT_ID = """
+UPDATE transactions t
+   SET client_id = c.id
+  FROM clients c
+ WHERE t.client_id IS NULL
+   AND c.user_id = t.user_id
+   AND lower(btrim(c.name)) = lower(btrim(t.client))
+"""
+
+
+def init_db():
+    """Create missing tables, then apply the additive column migrations.
+
+    Safe to call on every boot: create_all only issues CREATE TABLE for tables
+    that do not exist, and the ALTERs are IF NOT EXISTS.
     """
-    SQLModel.metadata.create_all(get_engine())
+    engine = get_engine()
+    SQLModel.metadata.create_all(engine)
+
+    # The ALTERs below exist purely to bring ALREADY-DEPLOYED Postgres tables up
+    # to the current model. A fresh database of any other dialect just got the
+    # full schema from create_all, so there is nothing to add — and neither the
+    # IF NOT EXISTS form nor the UPDATE...FROM backfill is portable.
+    if not is_postgres():
+        return
+
+    from sqlalchemy import text  # local import keeps the module surface small
+
+    with engine.begin() as conn:
+        for statement in _ADDITIVE_MIGRATIONS:
+            conn.execute(text(statement))
+        linked = conn.execute(text(_BACKFILL_CLIENT_ID)).rowcount
+    if linked:
+        print(f"[INFO] Linked {linked} transaction(s) to their client row.")
 
 
 def get_session():
