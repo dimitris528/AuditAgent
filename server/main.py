@@ -31,9 +31,15 @@ from pydantic import BaseModel, Field
 import airtable_client as db
 import auth
 import finance
+from config import STRIPE_WEBHOOK_SECRET
 from server import demo
+from server.webhooks import router as webhooks_router
 
 app = FastAPI(title="Accounting SaaS API", version="2.0.0")
+
+# Stripe billing webhook (POST /api/v1/webhooks/stripe). Public by design —
+# it authenticates via Stripe's payload signature, not a bearer token.
+app.include_router(webhooks_router)
 
 _origins = os.getenv(
     "FRONTEND_ORIGINS",
@@ -174,7 +180,8 @@ def status():
         "airtable_configured": configured,
         "demo_enabled": DEMO_ENABLED,
         "auth_mode": "airtable" if configured else ("demo" if DEMO_ENABLED else "disabled"),
-        "jwt_secret_set": os.getenv("JWT_SECRET") not in (None, "", "dev-insecure-change-me"),
+        "jwt_secret_set": not auth.JWT_SECRET_IS_DEFAULT,
+        "stripe_webhook_configured": bool(STRIPE_WEBHOOK_SECRET),
     }
     if configured:
         try:
@@ -268,7 +275,7 @@ def transactions(user: str = Depends(get_current_user),
 
 
 # --------------------------------------------------------------------------
-# Write endpoints (reuse the exact app.py write logic; tenant from the JWT)
+# Write endpoints (tenant from the JWT, never from the body)
 # --------------------------------------------------------------------------
 @app.post("/api/transactions", status_code=201)
 def create_transaction(body: TransactionCreate,
@@ -282,8 +289,9 @@ def create_transaction(body: TransactionCreate,
             detail="Οι εγγραφές απαιτούν ρυθμισμένο Airtable (demo = μόνο ανάγνωση).")
     is_debt = body.type == finance.DEBT_TYPE
     is_revenue = body.type == "Έσοδο"
-    # Sign convention identical to the Streamlit quick-entry: revenue/debt are
-    # positive, expense negative. VAT is derived from the gross amount; debts
+    # Sign convention: revenue/debt are positive, expense negative — the
+    # analytics read the sign, not the Type column. VAT is derived from the
+    # gross amount; debts
     # carry only the rate (VAT is stamped on Εξόφληση).
     signed = body.amount if (is_revenue or is_debt) else -body.amount
     vat_amount = None if is_debt else finance.vat_for_write(

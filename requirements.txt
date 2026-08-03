@@ -2,15 +2,14 @@
 # Web backend dependencies — FastAPI + Uvicorn ONLY.
 # ==========================================================================
 # The product has migrated to Next.js (web/) + FastAPI (server/). This file is
-# now scoped to EXACTLY what the FastAPI backend imports, so the API image stays
-# small and can never drag in the old Streamlit/Starlette version conflict.
-# (streamlit 1.58 required starlette>=0.40 — removing it frees the pins.)
+# scoped to EXACTLY what the FastAPI backend imports, so the API image stays
+# small.
 #
 #   Deploy:  uvicorn server.main:app --host 0.0.0.0 --port $PORT
 #
-# The RETIRED Streamlit app (app.py) dependencies are ISOLATED in
-# requirements-legacy.txt and are NOT installed here. Nothing else in this repo
-# should read this file.
+# The Streamlit app and its Flask webhook were deleted outright once the
+# migration completed, so there is no longer a legacy requirements file to keep
+# in step — this is the only dependency list in the repo.
 # --------------------------------------------------------------------------
 
 fastapi==0.115.6           # REST API (server/main.py)
@@ -22,7 +21,11 @@ starlette==0.41.3
 uvicorn[standard]==0.34.0  # ASGI server (dev + prod)
 
 PyJWT==2.10.1              # JWT bearer auth (auth.py — `import jwt`)
-requests==2.34.2           # Airtable REST client (airtable_client.py)
+pyairtable==3.4.2          # Airtable data layer (airtable_client.py)
+requests==2.34.2           # pulled in by pyairtable; pinned here because
+                           # airtable_client catches requests' exception types
+                           # directly when translating API errors
+stripe==15.4.0             # billing webhook signature check (server/webhooks.py)
 python-dotenv==1.1.1       # .env loading (config.py)
 
 # Pydantic powers FastAPI's request/response models. Pinned for reproducible

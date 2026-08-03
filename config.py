@@ -14,46 +14,44 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-# --- OpenAI ---------------------------------------------------------------
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY")
+def _env(name, default=""):
+    """Read an env var and strip surrounding whitespace.
+
+    Secrets pasted into a hosting dashboard (Render) or a .env file routinely
+    pick up a trailing newline or a stray space. An Airtable PAT with a
+    trailing "\\n" produces a 401 on every call, and a Base ID with one
+    produces a 404 — both of which look like "wrong credentials" rather than
+    "credentials with whitespace", so they are miserable to diagnose. Strip
+    once, here, and every consumer is covered. Falls back to `default` when the
+    variable is unset OR set to nothing but whitespace.
+    """
+    value = (os.getenv(name) or "").strip()
+    return value or default
 
 
 # --- Airtable -------------------------------------------------------------
-AIRTABLE_PAT = os.getenv("AIRTABLE_PAT", "YOUR_PERSONAL_ACCESS_TOKEN")
-AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID", "YOUR_BASE_ID")
-AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME", "Invoices")
+AIRTABLE_PAT = _env("AIRTABLE_PAT", "YOUR_PERSONAL_ACCESS_TOKEN")
+AIRTABLE_BASE_ID = _env("AIRTABLE_BASE_ID", "YOUR_BASE_ID")
 
-# Tables backing the conversational Micro-SaaS (see airtable_client.py for schema).
-AIRTABLE_PROJECTS_TABLE = os.getenv("AIRTABLE_PROJECTS_TABLE", "Projects")
-AIRTABLE_TRANSACTIONS_TABLE = os.getenv("AIRTABLE_TRANSACTIONS_TABLE", "Transactions")
-AIRTABLE_USERS_TABLE = os.getenv("AIRTABLE_USERS_TABLE", "Users")
-
-
-# --- Password-reset email (app.py "Ξέχασα τον κωδικό μου") ------------------
-# Sent with stdlib smtplib through a Gmail account. SMTP_PASSWORD is a Gmail
-# App Password (Google Account -> Security -> 2-Step Verification -> App
-# passwords), NOT the account's normal password. Leave both empty to disable
-# the reset flow (requests then fail with a "temporarily unavailable" error).
-SMTP_EMAIL = os.getenv("SMTP_EMAIL", "")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))  # implicit TLS (SMTP_SSL)
+# Tables backing the SaaS (see airtable_client.py for the required schema).
+AIRTABLE_PROJECTS_TABLE = _env("AIRTABLE_PROJECTS_TABLE", "Projects")
+AIRTABLE_TRANSACTIONS_TABLE = _env("AIRTABLE_TRANSACTIONS_TABLE", "Transactions")
+AIRTABLE_USERS_TABLE = _env("AIRTABLE_USERS_TABLE", "Users")
 
 
-# Note: no Stripe settings live here. The webhook service that verified
-# Stripe signatures was retired with the migration to Next.js + FastAPI;
-# nothing in this repo talks to Stripe server-side any more (the legacy
-# Πληρωμές tab only links out to the Payment Link / Customer Portal).
+# --- Stripe ----------------------------------------------------------------
+# Signing secret for the billing webhook (server/webhooks.py, mounted at
+# POST /api/v1/webhooks/stripe). Take it from Stripe Dashboard -> Developers
+# -> Webhooks -> your endpoint ("whsec_..."). Stripped like the Airtable
+# secrets: a trailing newline here makes EVERY signature check fail, which
+# reads as "Stripe is sending bad signatures" rather than as a config typo.
+# Leave empty to disable the endpoint (it then rejects with 503 rather than
+# accepting unverified payloads).
+STRIPE_WEBHOOK_SECRET = _env("STRIPE_WEBHOOK_SECRET")
 
 
-# --- WhatsApp Business Cloud API ------------------------------------------
-# Create an app at https://developers.facebook.com/ -> add the "WhatsApp"
-# product. WHATSAPP_TOKEN is the (permanent) access token; WHATSAPP_PHONE_NUMBER_ID
-# is the "Phone number ID" shown on the WhatsApp > API Setup page. The verify
-# token is any string you invent — you type the same value into the webhook
-# configuration screen so Meta can confirm it's really your endpoint.
-WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "YOUR_WHATSAPP_TOKEN")
-WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "YOUR_PHONE_NUMBER_ID")
-WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "changeme-verify-token")
-WHATSAPP_API_VERSION = os.getenv("WHATSAPP_API_VERSION", "v21.0")
-WHATSAPP_BOT_NAME = os.getenv("WHATSAPP_BOT_NAME", "AI Document Auditor")
+# Removed with the Streamlit retirement, because nothing read them any more:
+# OPENAI_API_KEY and AIRTABLE_TABLE_NAME (invoice OCR / publisher), SMTP_* (the
+# Streamlit password-reset mail), and the WHATSAPP_* block (which already had
+# no consumer anywhere in the repo). Re-add them next to the code that needs
+# them rather than keeping settings nothing reads.

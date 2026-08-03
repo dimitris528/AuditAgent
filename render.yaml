@@ -1,10 +1,11 @@
 # Render Blueprint — New → Blueprint → point at this repo.
 #
 # Post-migration stack: Next.js + FastAPI only. The old Streamlit app and its
-# Stripe webhook (Docker services) were retired; delete any leftover
-# "bakalocharto" / "bakalocharto-webhook" services in the Render dashboard —
-# removing them here stops the blueprint managing them but does not auto-delete
-# existing services.
+# standalone Flask Stripe webhook (Docker services) were retired and their code
+# deleted; the Stripe webhook now lives INSIDE the FastAPI service at
+# /api/v1/webhooks/stripe. Delete any leftover "bakalocharto" /
+# "bakalocharto-webhook" services in the Render dashboard — removing them here
+# stops the blueprint managing them but does not auto-delete existing services.
 #
 #   accounting-api  (FastAPI, server/main.py)  ← the data + auth API
 #   accounting-web  (Next.js, web/)            ← the dashboard UI
@@ -30,6 +31,12 @@ services:
       - key: AIRTABLE_PAT
         sync: false
       - key: AIRTABLE_BASE_ID
+        sync: false
+      # Stripe billing webhook signing secret (whsec_...). Point the Stripe
+      # endpoint at https://<this service>/api/v1/webhooks/stripe and subscribe
+      # it to checkout.session.completed. Unset => the endpoint returns 503
+      # rather than trusting unverified payloads.
+      - key: STRIPE_WEBHOOK_SECRET
         sync: false
       # JWT signing key — Render generates a strong random value and keeps it
       # stable across deploys.

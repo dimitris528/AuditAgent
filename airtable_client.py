@@ -78,11 +78,11 @@ Required Airtable schema (create these in your base before running the app):
                                               client_reference_id); accounts
                                               without it simply can't use
                                               "Ξέχασα τον κωδικό μου"
-      ResetToken          Text              - 6-digit password-reset code
-                                              (app.py); prefer Text — a
-                                              Number column drops leading
-                                              zeros, which the app tolerates
-                                              by zero-padding on comparison
+      ResetToken          Text              - 6-digit password-reset code;
+                                              prefer Text — a Number column
+                                              drops leading zeros, so any
+                                              reset flow must zero-pad on
+                                              comparison
       ResetTokenExpiry    Date+time         - UTC expiry of ResetToken
                                               (written as ISO-8601 …Z)
 """
@@ -91,6 +91,8 @@ import re
 from datetime import date, datetime
 
 import requests
+from pyairtable import Api
+from pyairtable.formulas import AND, EQ, LOWER, Field, to_formula_str
 
 from config import (
     AIRTABLE_PAT,
@@ -100,7 +102,9 @@ from config import (
     AIRTABLE_USERS_TABLE,
 )
 
-API_ROOT = "https://api.airtable.com/v0"
+# (connect, read) seconds. Airtable is occasionally slow to first byte; a
+# hanging request would otherwise pin a uvicorn worker indefinitely.
+_TIMEOUT = (10, 30)
 
 # The ONLY columns a Transactions write may carry (case-sensitive — they must
 # match the Airtable base exactly). Type and Source are optional labels the
@@ -136,33 +140,54 @@ def is_configured():
     )
 
 
-def _headers():
+_api_cache = {}
+
+
+def _log(message):
+    """print() that cannot itself raise.
+
+    These diagnostics carry Greek, and stdout is not always UTF-8 (a Windows
+    console defaults to cp1252). An encoding error raised HERE would happen
+    inside an except: block and replace the real AirtableError with a
+    UnicodeEncodeError, hiding the actual Airtable failure.
+    """
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        print(message.encode("ascii", "backslashreplace").decode("ascii"))
+
+
+def _table(table_name):
+    """Return a pyairtable Table, building (and caching) the Api on first use.
+
+    Lazy on purpose: importing this module must not require credentials, so the
+    demo path and `is_configured()` keep working with no secrets present.
+    """
     if not AIRTABLE_PAT or AIRTABLE_PAT == _PAT_PLACEHOLDER:
         raise AirtableError("Airtable PAT is not configured (set AIRTABLE_PAT in .env).")
     if not AIRTABLE_BASE_ID or AIRTABLE_BASE_ID == _BASE_PLACEHOLDER:
         raise AirtableError("Airtable Base ID is not configured (set AIRTABLE_BASE_ID in .env).")
-    return {
-        "Authorization": f"Bearer {AIRTABLE_PAT}",
-        "Content-Type": "application/json",
-    }
+    api = _api_cache.get(AIRTABLE_PAT)
+    if api is None:
+        # retry_strategy handles Airtable's 429 (5 req/sec/base) and 5xx with
+        # backoff — the hand-rolled client had no retries at all.
+        api = Api(AIRTABLE_PAT, timeout=_TIMEOUT, retry_strategy=True)
+        _api_cache[AIRTABLE_PAT] = api
+    return api.table(AIRTABLE_BASE_ID, table_name)
 
 
-def _url(table):
-    return f"{API_ROOT}/{AIRTABLE_BASE_ID}/{requests.utils.quote(table)}"
-
-
-def _sanitize(value):
-    """Strip single quotes so a value can't break out of a filterByFormula literal."""
-    return str(value).replace("'", "")
-
-
-def _api_error_detail(resp):
-    """Extract Airtable's structured error (type + message) from a response.
+def _error_detail(exc):
+    """Extract Airtable's structured error (type + message) from a failed call.
 
     Airtable reports schema problems here — e.g. UNKNOWN_FIELD_NAME names the
     exact column that broke the write — so surface it verbatim instead of the
-    raw JSON blob.
+    raw JSON blob. Callers grep the resulting message (see
+    _looks_like_missing_vat_column), so the "TYPE — message" shape is load
+    bearing, not cosmetic.
     """
+    resp = getattr(exc, "response", None)
+    if resp is None:
+        return str(exc)
     try:
         err = resp.json().get("error")
     except ValueError:
@@ -174,51 +199,60 @@ def _api_error_detail(resp):
     return str(err) if err else resp.text
 
 
-def _request(method, table, **kwargs):
+def _call(action, table_name, fn, sent_fields=None):
+    """Run one pyairtable operation, translating its exceptions into
+    AirtableError with the same detail the raw-requests client produced.
+
+    pyairtable raises requests.HTTPError (response attached) for API errors and
+    the usual requests exceptions for transport failures.
+    """
     try:
-        resp = requests.request(method, _url(table), headers=_headers(), timeout=30, **kwargs)
+        return fn()
+    except requests.exceptions.HTTPError as exc:
+        status = getattr(getattr(exc, "response", None), "status_code", "?")
+        detail = _error_detail(exc)
+        extra = f" | στάλθηκαν οι στήλες: {sorted(sent_fields)}" if sent_fields else ""
+        _log(f"[ERROR] Airtable {action} '{table_name}' failed ({status}): {detail}{extra}")
+        raise AirtableError(
+            f"Airtable {status} στον πίνακα «{table_name}»: {detail}{extra}"
+        ) from exc
     except requests.exceptions.RequestException as exc:
         raise AirtableError(f"Network error talking to Airtable: {exc}") from exc
-    if resp.status_code >= 400:
-        detail = _api_error_detail(resp)
-        sent_fields = ""
-        payload = kwargs.get("json")
-        if isinstance(payload, dict):
-            fields = payload.get("fields") or {}
-            if not fields and payload.get("records"):
-                fields = payload["records"][0].get("fields", {})
-            if fields:
-                sent_fields = f" | στάλθηκαν οι στήλες: {sorted(fields)}"
-        print(f"[ERROR] Airtable {method} '{table}' failed "
-              f"({resp.status_code}): {detail}{sent_fields}")
-        raise AirtableError(
-            f"Airtable {resp.status_code} στον πίνακα «{table}»: {detail}{sent_fields}"
-        )
-    return resp.json()
 
 
-def _select(table, formula):
-    """Return all records matching an Airtable formula, following pagination."""
-    records = []
-    params = {"filterByFormula": formula, "pageSize": 100}
-    while True:
-        data = _request("GET", table, params=params)
-        records.extend(data.get("records", []))
-        offset = data.get("offset")
-        if not offset:
-            return records
-        params["offset"] = offset
+def _select(table_name, formula):
+    """Return all records matching an Airtable formula.
+
+    `formula` is a pyairtable Formula object (or a raw string). pyairtable
+    follows pagination internally, so this returns every match.
+    """
+    if not isinstance(formula, str):
+        formula = to_formula_str(formula)
+    return _call("SELECT", table_name,
+                 lambda: _table(table_name).all(formula=formula, page_size=100))
 
 
-def _delete_records(table, record_ids):
-    """Delete records by id, batched to Airtable's 10-per-request limit."""
-    deleted = 0
-    for start in range(0, len(record_ids), 10):
-        batch = record_ids[start:start + 10]
-        params = [("records[]", rid) for rid in batch]
-        data = _request("DELETE", table, params=params)
-        deleted += len(data.get("records", []))
-    return deleted
+def _create(table_name, fields):
+    return _call("CREATE", table_name,
+                 lambda: _table(table_name).create(fields, typecast=True),
+                 sent_fields=fields)
+
+
+def _update(table_name, record_id, fields, typecast=True):
+    return _call("UPDATE", table_name,
+                 lambda: _table(table_name).update(record_id, fields, typecast=typecast),
+                 sent_fields=fields)
+
+
+def _delete_records(table_name, record_ids):
+    """Delete records by id. pyairtable batches to Airtable's 10-per-request
+    limit internally; returns the number actually deleted."""
+    record_ids = list(record_ids)
+    if not record_ids:
+        return 0
+    deleted = _call("DELETE", table_name,
+                    lambda: _table(table_name).batch_delete(record_ids))
+    return len(deleted)
 
 
 # --- Users ------------------------------------------------------------------
@@ -232,12 +266,11 @@ def find_user(username=None, email=None):
     yields None instead of erroring the caller.
     """
     if username:
-        records = _select(AIRTABLE_USERS_TABLE,
-                          f"{{Username}}='{_sanitize(username)}'")
+        records = _select(AIRTABLE_USERS_TABLE, EQ(Field("Username"), username))
         if records:
             return records[0]
     if email:
-        formula = f"LOWER({{Email}})='{_sanitize(email).strip().lower()}'"
+        formula = EQ(LOWER(Field("Email")), str(email).strip().lower())
         try:
             records = _select(AIRTABLE_USERS_TABLE, formula)
         except AirtableError:
@@ -248,7 +281,13 @@ def find_user(username=None, email=None):
 
 
 def create_user(username, email, hashed_password, trial_expiry_iso):
-    """Create a Users row for the self-registration form (app.py).
+    """Create a Users row for a self-registration flow.
+
+    NOTE: no caller today — registration and password reset lived in the
+    retired Streamlit app. Kept because the Users data layer is coherent and a
+    Next.js re-implementation needs exactly these calls; delete them if that
+    never lands. The same applies to set_reset_token / clear_reset_token /
+    complete_password_reset / update_user_password below.
 
     Password arrives ALREADY hashed (passwords.hash_password) — plaintext
     never reaches Airtable. The account starts "Active" on a free trial:
@@ -260,8 +299,7 @@ def create_user(username, email, hashed_password, trial_expiry_iso):
               "Password": hashed_password,
               "SubscriptionStatus": "Active",
               "TrialExpiry": trial_expiry_iso}
-    return _request("POST", AIRTABLE_USERS_TABLE,
-                    json={"fields": fields, "typecast": True})
+    return _create(AIRTABLE_USERS_TABLE, fields)
 
 
 def set_reset_token(record_id, token, expiry_iso):
@@ -271,29 +309,25 @@ def set_reset_token(record_id, token, expiry_iso):
     string (and a Number-typed ResetToken coerce — see the schema note on
     leading zeros).
     """
-    body = {"records": [{"id": record_id,
-                         "fields": {"ResetToken": token,
-                                    "ResetTokenExpiry": expiry_iso}}],
-            "typecast": True}
-    return _request("PATCH", AIRTABLE_USERS_TABLE, json=body)
+    return _update(AIRTABLE_USERS_TABLE, record_id,
+                   {"ResetToken": token, "ResetTokenExpiry": expiry_iso})
 
 
 def clear_reset_token(record_id):
     """Blank one Users row's reset columns (expired code / too many tries)."""
-    body = {"records": [{"id": record_id,
-                         "fields": {"ResetToken": None,
-                                    "ResetTokenExpiry": None}}]}
-    return _request("PATCH", AIRTABLE_USERS_TABLE, json=body)
+    return _update(AIRTABLE_USERS_TABLE, record_id,
+                   {"ResetToken": None, "ResetTokenExpiry": None},
+                   typecast=False)
 
 
 def complete_password_reset(record_id, hashed_password):
     """Write the new Password hash and clear both reset columns in ONE
     PATCH, so a verified reset can't leave a still-live code behind."""
-    body = {"records": [{"id": record_id,
-                         "fields": {"Password": hashed_password,
-                                    "ResetToken": None,
-                                    "ResetTokenExpiry": None}}]}
-    return _request("PATCH", AIRTABLE_USERS_TABLE, json=body)
+    return _update(AIRTABLE_USERS_TABLE, record_id,
+                   {"Password": hashed_password,
+                    "ResetToken": None,
+                    "ResetTokenExpiry": None},
+                   typecast=False)
 
 
 def update_user_password(record_id, hashed_password):
@@ -304,9 +338,8 @@ def update_user_password(record_id, hashed_password):
     Password column was created as Number instead of Text, the write fails
     loudly (AirtableError) rather than silently mangling the hash.
     """
-    body = {"records": [{"id": record_id,
-                         "fields": {"Password": hashed_password}}]}
-    return _request("PATCH", AIRTABLE_USERS_TABLE, json=body)
+    return _update(AIRTABLE_USERS_TABLE, record_id,
+                   {"Password": hashed_password}, typecast=False)
 
 
 def set_subscription_status(record_id, status):
@@ -324,24 +357,22 @@ def set_subscription_status(record_id, status):
     fields = {"SubscriptionStatus": status}
     if status == "Active":
         fields["TrialExpiry"] = None
-    body = {"records": [{"id": record_id, "fields": fields}],
-            "typecast": True}
-    return _request("PATCH", AIRTABLE_USERS_TABLE, json=body)
+    return _update(AIRTABLE_USERS_TABLE, record_id, fields)
 
 
 # --- Projects -------------------------------------------------------------
 def create_project(username, name):
     fields = {"Name": name, "Username": username, "Status": "Active"}
-    return _request("POST", AIRTABLE_PROJECTS_TABLE, json={"fields": fields, "typecast": True})
+    return _create(AIRTABLE_PROJECTS_TABLE, fields)
 
 
 def get_active_projects(username):
-    formula = f"AND({{Username}}='{_sanitize(username)}', {{Status}}='Active')"
+    formula = AND(EQ(Field("Username"), username), EQ(Field("Status"), "Active"))
     return _select(AIRTABLE_PROJECTS_TABLE, formula)
 
 
 def get_completed_projects(username):
-    formula = f"AND({{Username}}='{_sanitize(username)}', {{Status}}='Completed')"
+    formula = AND(EQ(Field("Username"), username), EQ(Field("Status"), "Completed"))
     return _select(AIRTABLE_PROJECTS_TABLE, formula)
 
 
@@ -367,8 +398,7 @@ def close_project(record_id, closed_date=None):
         "Status": "Completed",
         "ClosedDate": to_iso_date(closed_date) or date.today().isoformat(),
     }
-    body = {"records": [{"id": record_id, "fields": fields}], "typecast": True}
-    return _request("PATCH", AIRTABLE_PROJECTS_TABLE, json=body)
+    return _update(AIRTABLE_PROJECTS_TABLE, record_id, fields)
 
 
 def to_iso_date(value):
@@ -423,20 +453,19 @@ def _write_transaction_fields(method, fields, record_id=None):
     one-shot fallback that strips the OPTIONAL VAT columns if the base rejects
     them as unknown — so VAT support degrades gracefully on a base that hasn't
     added VAT_Amount / VAT_Rate yet."""
-    def body(payload):
+    def write(payload):
         if record_id is None:
-            return {"fields": payload, "typecast": True}
-        return {"records": [{"id": record_id, "fields": payload}],
-                "typecast": True}
+            return _create(AIRTABLE_TRANSACTIONS_TABLE, payload)
+        return _update(AIRTABLE_TRANSACTIONS_TABLE, record_id, payload)
 
     try:
-        return _request(method, AIRTABLE_TRANSACTIONS_TABLE, json=body(fields))
+        return write(fields)
     except AirtableError as exc:
         if _VAT_COLUMNS & set(fields) and _looks_like_missing_vat_column(exc):
             trimmed = {k: v for k, v in fields.items() if k not in _VAT_COLUMNS}
-            print("[WARN] Transactions base has no VAT_Amount/VAT_Rate column — "
-                  "saving without VAT (add the columns to persist ΦΠΑ).")
-            return _request(method, AIRTABLE_TRANSACTIONS_TABLE, json=body(trimmed))
+            _log("[WARN] Transactions base has no VAT_Amount/VAT_Rate column — "
+                 "saving without VAT (add the columns to persist ΦΠΑ).")
+            return write(trimmed)
         raise
 
 
@@ -518,8 +547,7 @@ def find_transaction_by_hash(username, file_hash):
     """
     if not file_hash:
         return None
-    formula = (f"AND({{Username}}='{_sanitize(username)}', "
-               f"{{FileHash}}='{_sanitize(file_hash)}')")
+    formula = AND(EQ(Field("Username"), username), EQ(Field("FileHash"), file_hash))
     records = _select(AIRTABLE_TRANSACTIONS_TABLE, formula)
     return records[0] if records else None
 
@@ -531,8 +559,7 @@ def delete_transaction(record_id):
 
 def get_transactions(username, category=None):
     """All transactions for this username, optionally narrowed to one category."""
-    formula = f"{{Username}}='{_sanitize(username)}'"
-    records = _select(AIRTABLE_TRANSACTIONS_TABLE, formula)
+    records = _select(AIRTABLE_TRANSACTIONS_TABLE, EQ(Field("Username"), username))
     if category is not None:
         target = category.strip().lower()
         records = [r for r in records
@@ -562,7 +589,7 @@ def cleanup_old_closed_projects(retention_years=2, today=None):
 
     project_ids = []
     transaction_ids = []
-    for proj in _select(AIRTABLE_PROJECTS_TABLE, "{Status}='Completed'"):
+    for proj in _select(AIRTABLE_PROJECTS_TABLE, EQ(Field("Status"), "Completed")):
         fields = proj["fields"]
         closed = (fields.get("ClosedDate") or "")[:10]
         if not closed:
@@ -580,8 +607,7 @@ def cleanup_old_closed_projects(retention_years=2, today=None):
         username = fields.get("Username")
         name = fields.get("Name")
         if username and name:
-            formula = (f"AND({{Username}}='{_sanitize(username)}', "
-                       f"{{Category}}='{_sanitize(name)}')")
+            formula = AND(EQ(Field("Username"), username), EQ(Field("Category"), name))
             transaction_ids += [t["id"] for t in
                                 _select(AIRTABLE_TRANSACTIONS_TABLE, formula)]
 
