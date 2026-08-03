@@ -112,16 +112,24 @@ def migrate(dry_run=False):
                 print(f"  + user {username!r} <{email}>")
                 summary["users"] += 1
                 if dry_run:
-                    continue
-                user = store.create_user(
-                    session,
-                    username=username,
-                    email=email,
-                    # Verbatim: already-hashed values keep verifying, and
-                    # legacy plaintext still matches via password_matches.
-                    password_hash=str(f.get("Password") or ""),
-                    subscription_status=(f.get("SubscriptionStatus") or "Active"),
-                )
+                    # Deliberately NOT `continue`: skipping to the next user
+                    # here would stop the dry run from ever counting this
+                    # account's clients and transactions, and it would report a
+                    # reassuring "0 rows to migrate" for exactly the accounts
+                    # that have the most to move. Every write below is already
+                    # guarded by `if dry_run`, so falling through is safe with
+                    # user left unset.
+                    user = None
+                else:
+                    user = store.create_user(
+                        session,
+                        username=username,
+                        email=email,
+                        # Verbatim: already-hashed values keep verifying, and
+                        # legacy plaintext still matches via password_matches.
+                        password_hash=str(f.get("Password") or ""),
+                        subscription_status=(f.get("SubscriptionStatus") or "Active"),
+                    )
 
             # --- that user's clients (Airtable "Projects") ---
             projects = (air.get_active_projects(username)
