@@ -67,6 +67,19 @@ export interface Analytics {
   monthly_trend: MonthlyTrendPoint[];
 }
 
+export interface PeriodInfo {
+  year: number | null;
+  quarter: number | null;
+  month: number | null;
+  start: string | null;
+  end: string | null;
+  /** Years present across ALL history, so the selector can offer a year the
+   *  current filter excludes. */
+  available_years: number[];
+  transactions_in_period: number;
+  transactions_total: number;
+}
+
 export interface DashboardData {
   header: HeaderTotals;
   clients: ClientData[];
@@ -80,4 +93,52 @@ export interface DashboardData {
   vat_rates: { value: number; label: string }[];
   username: string;
   demo: boolean;
+  period: PeriodInfo;
+}
+
+/** A client row as returned by /api/v1/clients (not the finance shape). */
+export interface ClientDetail {
+  id: number;
+  name: string;
+  status: string;
+  archived: boolean;
+  afm: string | null;
+  contact: string | null;
+  notes: string | null;
+  closed_date: string | null;
+  created_at: string | null;
+}
+
+export interface TransactionRow {
+  id: string | null;
+  client: string | null;
+  amount: number;
+  type: string | null;
+  is_revenue: boolean;
+  is_debt: boolean;
+  vat_amount: number | null;
+  vat_rate: number | null;
+  date: string | null;
+  description: string | null;
+  source: string | null;
+}
+
+export interface ClientSummary {
+  gross_rev: number;
+  net_rev: number;
+  gross_exp: number;
+  net_exp: number;
+  net_vat: number;
+  vat_status: "payable" | "refund" | "zero";
+  debt: number;
+  net_profit: number;
+  taxable: number;
+  count: number;
+  open_debts: number;
+}
+
+export interface ClientDetailPayload {
+  client: ClientDetail;
+  summary: ClientSummary;
+  transactions: TransactionRow[];
 }

@@ -1,8 +1,19 @@
-import { Users } from "lucide-react";
-import type { ClientData } from "@/lib/types";
-import { ClientCard } from "./ClientCard";
+"use client";
 
-export function ClientGrid({ clients }: { clients: ClientData[] }) {
+import { useState } from "react";
+import { Users } from "lucide-react";
+import type { ClientData, PeriodInfo } from "@/lib/types";
+import { ClientCard } from "./ClientCard";
+import { ClientDrawer } from "./ClientDrawer";
+
+interface Props {
+  clients: ClientData[];
+  period: Pick<PeriodInfo, "year" | "quarter" | "month">;
+}
+
+export function ClientGrid({ clients, period }: Props) {
+  const [openId, setOpenId] = useState<number | null>(null);
+
   return (
     <section>
       <div className="mb-4 flex items-center gap-2">
@@ -22,10 +33,22 @@ export function ClientGrid({ clients }: { clients: ClientData[] }) {
       ) : (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
           {clients.map((client) => (
-            <ClientCard key={client.id ?? client.key} client={client} />
+            <ClientCard
+              key={client.id ?? client.key}
+              client={client}
+              // Client ids are numeric in PostgreSQL but serialised as strings
+              // in the finance record shape; parse before opening the drawer.
+              onOpen={client.id ? () => setOpenId(Number(client.id)) : undefined}
+            />
           ))}
         </div>
       )}
+
+      <ClientDrawer
+        clientId={openId}
+        period={period}
+        onClose={() => setOpenId(null)}
+      />
     </section>
   );
 }

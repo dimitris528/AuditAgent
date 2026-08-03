@@ -34,21 +34,49 @@ function Metric({
   );
 }
 
-export function ClientCard({ client }: { client: ClientData }) {
+export function ClientCard({
+  client,
+  onOpen,
+}: {
+  client: ClientData;
+  onOpen?: () => void;
+}) {
   const m = client.metrics;
   const vatRefund = m.net_vat < 0;
   const profitPositive = m.net_profit >= 0;
 
   return (
-    <div className="flex flex-col rounded-2xl border border-slate-200 bg-white p-5 shadow-card transition hover:border-slate-300 hover:shadow-md dark:border-slate-800 dark:bg-slate-900 dark:shadow-card-dark dark:hover:border-slate-700">
+    <div
+      className={clsx(
+        "flex flex-col rounded-2xl border border-slate-200 bg-white p-5 shadow-card transition dark:border-slate-800 dark:bg-slate-900 dark:shadow-card-dark",
+        onOpen &&
+          "cursor-pointer hover:border-indigo-300 hover:shadow-md dark:hover:border-indigo-500/40",
+      )}
+      // The whole card is the target, but the accessible control is the button
+      // in the header — a div with a click handler is invisible to keyboards.
+      onClick={onOpen}
+    >
       {/* Header */}
       <div className="mb-4 flex items-center gap-2.5">
         <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600 dark:bg-indigo-500/10 dark:text-indigo-400">
           <Building2 className="h-5 w-5" />
         </span>
-        <h3 className="truncate text-base font-semibold text-slate-900 dark:text-white">
-          {client.name.trim() || "—"}
-        </h3>
+        {onOpen ? (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpen();
+            }}
+            className="truncate text-left text-base font-semibold text-slate-900 outline-none hover:text-indigo-600 focus-visible:ring-2 focus-visible:ring-indigo-500 dark:text-white dark:hover:text-indigo-400"
+          >
+            {client.name.trim() || "—"}
+          </button>
+        ) : (
+          <h3 className="truncate text-base font-semibold text-slate-900 dark:text-white">
+            {client.name.trim() || "—"}
+          </h3>
+        )}
       </div>
 
       {/* 5 core metrics */}

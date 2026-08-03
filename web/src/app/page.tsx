@@ -7,10 +7,18 @@ import { ExecutiveHeader } from "@/components/ExecutiveHeader";
 import { ClientGrid } from "@/components/ClientGrid";
 import { AnalyticsSection } from "@/components/AnalyticsSection";
 import { QuickAddTransaction } from "@/components/QuickAddTransaction";
+import { PeriodSelector } from "@/components/PeriodSelector";
 import { Badge } from "@/components/ui/Badge";
 
-// Always render fresh — figures reflect the latest Airtable state.
+// Always render fresh — figures reflect the latest database state.
 export const dynamic = "force-dynamic";
+
+/** Read one positive integer from a search param, or null. */
+function intParam(value: string | string[] | undefined): number | null {
+  const raw = Array.isArray(value) ? value[0] : value;
+  const n = Number(raw);
+  return raw && Number.isFinite(n) && n > 0 ? Math.trunc(n) : null;
+}
 
 function BackendDown({ message }: { message: string }) {
   return (
@@ -27,10 +35,22 @@ function BackendDown({ message }: { message: string }) {
   );
 }
 
-export default async function Page() {
+export default async function Page({
+  searchParams,
+}: {
+  // searchParams is a Promise in Next 15.
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const sp = await searchParams;
+  const period = {
+    year: intParam(sp.year),
+    quarter: intParam(sp.quarter),
+    month: intParam(sp.month),
+  };
+
   let data: DashboardData;
   try {
-    data = await getDashboard();
+    data = await getDashboard(period);
   } catch (err) {
     // Unauthenticated / expired session → back to login.
     if (err instanceof ApiError && err.status === 401) {
@@ -63,15 +83,20 @@ export default async function Page() {
         <div className="flex items-center gap-2">
           {data.demo ? (
             <Badge tone="warning" icon={<FlaskConical className="h-3 w-3" />}>
-              DEMO — χωρίς Airtable
+              DEMO — χωρίς βάση δεδομένων
             </Badge>
           ) : null}
           <QuickAddTransaction vatRates={data.vat_rates} defaultVatRate={0.24} />
         </div>
       </div>
 
+      {/* Period filter — every figure below reflects the selected window. */}
+      <div className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 dark:border-slate-800 dark:bg-slate-900">
+        <PeriodSelector period={data.period} />
+      </div>
+
       <ExecutiveHeader header={data.header} />
-      <ClientGrid clients={data.clients} />
+      <ClientGrid clients={data.clients} period={period} />
       <AnalyticsSection analytics={data.analytics} />
     </div>
   );

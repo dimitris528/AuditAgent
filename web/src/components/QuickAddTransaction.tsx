@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Plus, X, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
 import { createTransaction } from "@/lib/api";
 import { clsx } from "@/lib/clsx";
+import { ClientPicker, type PickedClient } from "./ClientPicker";
 
 interface Props {
   vatRates: { value: number; label: string }[];
@@ -20,7 +21,7 @@ const TYPES = [
 export function QuickAddTransaction({ vatRates, defaultVatRate }: Props) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
-  const [client, setClient] = useState("");
+  const [client, setClient] = useState<PickedClient | null>(null);
   const [amount, setAmount] = useState("");
   const [type, setType] = useState("Έσοδο");
   const [vatRate, setVatRate] = useState(defaultVatRate);
@@ -31,7 +32,7 @@ export function QuickAddTransaction({ vatRates, defaultVatRate }: Props) {
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     const parsed = Number(amount.replace(",", "."));
-    if (!client.trim() || !parsed || parsed <= 0) {
+    if (!client?.name.trim() || !parsed || parsed <= 0) {
       setStatus("error");
       setMessage("Συμπληρώστε πελάτη και ποσό > 0.");
       return;
@@ -40,7 +41,10 @@ export function QuickAddTransaction({ vatRates, defaultVatRate }: Props) {
     setMessage("");
     try {
       await createTransaction({
-        client: client.trim(),
+        client: client.name.trim(),
+        // Present only when an existing client was picked; a new name is
+        // created server-side from `client`.
+        client_id: client.id,
         amount: parsed,
         type,
         vat_rate: vatRate,
@@ -48,7 +52,7 @@ export function QuickAddTransaction({ vatRates, defaultVatRate }: Props) {
       });
       setStatus("ok");
       setMessage("Η κίνηση αποθηκεύτηκε.");
-      setClient("");
+      setClient(null);
       setAmount("");
       setDescription("");
       router.refresh();
@@ -80,7 +84,11 @@ export function QuickAddTransaction({ vatRates, defaultVatRate }: Props) {
               <label className="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">
                 Πελάτης
               </label>
-              <input className={field} value={client} onChange={(e) => setClient(e.target.value)} placeholder="π.χ. Παπαδόπουλος Α.Ε." />
+              <ClientPicker
+                value={client}
+                onChange={setClient}
+                inputClassName={field}
+              />
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
