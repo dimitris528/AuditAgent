@@ -1,0 +1,176 @@
+"""
+SQLModel tables backing the accounting SaaS on PostgreSQL (Supabase).
+
+Replaces the Airtable base described in airtable_client.py. The column names
+are snake_case SQL rather than Airtable's Title Case, and tenancy is now a real
+foreign key (transactions.user_id) instead of a repeated Username string.
+
+to_record() adapters
+--------------------
+finance.py is the single source of truth for the VAT/tax math and consumes
+Airtable-shaped dicts: {"id": ..., "createdTime": ..., "fields": {...}}. Rather
+than rewrite that module — and risk the summation guarantee that total VAT ==
+Σ per-client VATs — each model can emit exactly that shape. finance.py is
+therefore untouched by the database migration, and its behaviour is unchanged
+by construction rather than by re-testing.
+"""
+
+# Imported as a module rather than `from datetime import date`: the
+# transactions table has a column literally named `date`, and a bare `date`
+# annotation on a field of the same name resolves to that field instead of the
+# type, which fails schema generation with a confusing NoneType annotation.
+import datetime as dt
+from typing import Optional
+
+from sqlalchemy import Column, DateTime
+from sqlmodel import Field, SQLModel
+
+
+def _tstz(nullable=True):
+    """A TIMESTAMPTZ column.
+
+    SQLModel maps datetime to TIMESTAMP WITHOUT TIME ZONE by default, which
+    would silently drop the offset from the tz-aware UTC values written here
+    and make every stored instant ambiguous. Since create_all() never ALTERs an
+    existing table, getting this wrong is only fixable by a manual migration —
+    so it is pinned explicitly.
+    """
+    return Column(DateTime(timezone=True), nullable=nullable)
+
+# Mirrors the Airtable single-select options the UI and finance.py expect.
+STATUS_ACTIVE = "Active"
+STATUS_COMPLETED = "Completed"
+
+
+def _utcnow():
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def _iso_z(stamp):
+    """Render a datetime the way Airtable rendered createdTime, because
+    finance.txn_date() falls back to parsing that string."""
+    if stamp is None:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=dt.timezone.utc)
+    return stamp.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+class User(SQLModel, table=True):
+    __tablename__ = "users"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    # Login identity. Unique and stored lower-cased by the callers so lookups
+    # are case-insensitive without needing a functional index.
+    email: str = Field(index=True, unique=True, max_length=320)
+    # Kept alongside email even though it is not in the original spec: the JWT
+    # subject, every pre-existing token, and the Airtable rows being backfilled
+    # all key tenancy on username. Dropping it would orphan existing data and
+    # invalidate every live session.
+    username: str = Field(index=True, unique=True, max_length=120)
+    password_hash: str = Field(max_length=255)
+    subscription_status: str = Field(default="Active", max_length=32)
+    stripe_customer_id: Optional[str] = Field(default=None, index=True, max_length=128)
+    trial_expiry: Optional[dt.datetime] = Field(default=None, sa_column=_tstz())
+    created_at: dt.datetime = Field(default_factory=_utcnow,
+                                    sa_column=_tstz(nullable=False))
+
+
+class Client(SQLModel, table=True):
+    """A billable client — the Airtable "Projects" table, renamed to match what
+    the UI has called it since the VAT refactor (Πελάτης).
+
+    Not in the requested model list, but build_dashboard() takes active and
+    completed clients as its first two arguments: without this table the
+    dashboard has no cards, no per-client VAT and no tax bars.
+    """
+
+    __tablename__ = "clients"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    name: str = Field(max_length=200)
+    status: str = Field(default=STATUS_ACTIVE, index=True, max_length=32)
+    closed_date: Optional[dt.date] = Field(default=None)
+    created_at: dt.datetime = Field(default_factory=_utcnow,
+                                    sa_column=_tstz(nullable=False))
+
+    def to_record(self, username):
+        return {
+            "id": str(self.id),
+            "createdTime": _iso_z(self.created_at),
+            "fields": {
+                "Name": self.name,
+                "Username": username,
+                "Status": self.status,
+                "ClosedDate": self.closed_date.isoformat() if self.closed_date else None,
+            },
+        }
+
+
+class Transaction(SQLModel, table=True):
+    __tablename__ = "transactions"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    # Client name rather than a FK: transactions are matched to clients by name
+    # (case-insensitively) throughout finance.py, and rows may reference a
+    # client that was archived. Keeping the name preserves that behaviour and
+    # means a deleted client never cascades away its financial history.
+    client: str = Field(index=True, max_length=200)
+    # SIGNED, exactly as in Airtable: revenue/debt positive, expense negative.
+    # finance.py reads the sign, so flipping this convention silently inverts
+    # every figure on the dashboard.
+    amount: float
+    # "Έσοδο" | "Έξοδο" | "Χρεωστούμενο"
+    type: Optional[str] = Field(default=None, max_length=32)
+    vat_amount: Optional[float] = Field(default=None)
+    vat_rate: Optional[float] = Field(default=None)
+    date: Optional[dt.date] = Field(default=None, index=True)
+    description: Optional[str] = Field(default=None, max_length=500)
+    source: Optional[str] = Field(default=None, max_length=32)
+    file_hash: Optional[str] = Field(default=None, index=True, max_length=64)
+    created_at: dt.datetime = Field(default_factory=_utcnow,
+                                    sa_column=_tstz(nullable=False))
+
+    def to_record(self, username):
+        return {
+            "id": str(self.id),
+            "createdTime": _iso_z(self.created_at),
+            "fields": {
+                "Username": username,
+                "Category": self.client,
+                "Amount": self.amount,
+                "Type": self.type,
+                "VAT_Amount": self.vat_amount,
+                "VAT_Rate": self.vat_rate,
+                "Date": self.date.isoformat() if self.date else None,
+                "Description": self.description,
+                "Source": self.source,
+                "FileHash": self.file_hash,
+            },
+        }
+
+
+class Invoice(SQLModel, table=True):
+    """Issued invoices. New surface — Airtable had no equivalent table, so
+    nothing is backfilled here and no endpoint writes to it yet; it is created
+    so the schema is in place for the invoicing UI.
+    """
+
+    __tablename__ = "invoices"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    number: str = Field(index=True, max_length=64)
+    client: str = Field(max_length=200)
+    amount: float
+    vat_amount: Optional[float] = Field(default=None)
+    vat_rate: Optional[float] = Field(default=None)
+    issue_date: Optional[dt.date] = Field(default=None)
+    due_date: Optional[dt.date] = Field(default=None)
+    # "draft" | "sent" | "paid" | "void"
+    status: str = Field(default="draft", index=True, max_length=32)
+    description: Optional[str] = Field(default=None, max_length=500)
+    created_at: dt.datetime = Field(default_factory=_utcnow,
+                                    sa_column=_tstz(nullable=False))

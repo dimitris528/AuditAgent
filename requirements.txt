@@ -21,12 +21,24 @@ starlette==0.41.3
 uvicorn[standard]==0.34.0  # ASGI server (dev + prod)
 
 PyJWT==2.10.1              # JWT bearer auth (auth.py — `import jwt`)
-pyairtable==3.4.2          # Airtable data layer (airtable_client.py)
-requests==2.34.2           # pulled in by pyairtable; pinned here because
-                           # airtable_client catches requests' exception types
-                           # directly when translating API errors
 stripe==15.4.0             # billing webhook signature check (server/webhooks.py)
 python-dotenv==1.1.1       # .env loading (config.py)
+email-validator==2.3.0     # pydantic EmailStr on the registration endpoint
+
+# --- PostgreSQL (Supabase) ------------------------------------------------
+# The live data layer. server/database.py builds the engine, server/models.py
+# the tables, server/store.py the queries.
+SQLAlchemy==2.0.51
+sqlmodel==0.0.39
+psycopg2-binary==2.9.12    # binary wheel: no libpq/compiler needed on Render
+
+# --- Airtable (MIGRATION ONLY, not on the serving path) -------------------
+# Nothing the API serves reads Airtable any more. These stay solely for
+# scripts/migrate_airtable_to_postgres.py, the one-time backfill. Drop them —
+# and airtable_client.py — once that has been run against production.
+pyairtable==3.4.2
+requests==2.34.2           # airtable_client catches requests' exception types
+                           # directly when translating API errors
 
 # Pydantic powers FastAPI's request/response models. Pinned for reproducible
 # builds; pydantic-core is the matching (cp311 manylinux) native wheel.

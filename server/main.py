@@ -14,28 +14,50 @@ STRICTLY from the token's `sub`, never from a query param, so one user can only
 ever read/write their own rows.
 
 Data source:
-  - Airtable configured (real PAT/Base) → LIVE data; any Airtable error surfaces
-    (502) rather than being masked.
-  - Airtable NOT configured + DASHBOARD_DEMO != "0" → the in-memory demo dataset
-    (login demo/demo), so the UI is testable before secrets exist.
+  - DATABASE_URL configured → LIVE PostgreSQL data (Supabase); any database
+    error surfaces (502) rather than being masked.
+  - DATABASE_URL NOT configured + DASHBOARD_DEMO != "0" → the in-memory demo
+    dataset (login demo/demo), so the UI is testable before secrets exist.
 """
 
 import datetime as _dt
 import os
+from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
+from sqlalchemy import text as _text
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
-import airtable_client as db
 import auth
 import finance
+import passwords
 from config import STRIPE_WEBHOOK_SECRET
-from server import demo
+from server import database, demo, store
 from server.webhooks import router as webhooks_router
 
-app = FastAPI(title="Accounting SaaS API", version="2.0.0")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Create any missing tables on boot.
+
+    Deliberately non-fatal: a database that is unreachable at boot must not
+    prevent the process from starting, or Render's health check fails and the
+    deploy rolls back with no way to reach /api/status and see why.
+    """
+    if not database.is_configured():
+        print("[WARN] DATABASE_URL is not configured — running in demo mode.")
+    else:
+        try:
+            database.init_db()
+            print("[INFO] Database schema verified.")
+        except Exception as exc:
+            print(f"[ERROR] Could not initialise the database schema: {exc}")
+    yield
+
+
+app = FastAPI(title="Accounting SaaS API", version="3.0.0", lifespan=lifespan)
 
 # Stripe billing webhook (POST /api/v1/webhooks/stripe). Public by design —
 # it authenticates via Stripe's payload signature, not a bearer token.
@@ -55,6 +77,10 @@ app.add_middleware(
 
 DEMO_ENABLED = os.getenv("DASHBOARD_DEMO", "1") != "0"
 TREND_MONTHS = int(os.getenv("DASHBOARD_TREND_MONTHS", "12"))
+# Free-trial length for self-service signups, and the minimum password we will
+# store. Both are enforced server-side; the UI only mirrors them.
+TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "15"))
+MIN_PASSWORD_LENGTH = 8
 _TXN_TYPES = {"Έσοδο", "Έξοδο", finance.DEBT_TYPE}
 
 _bearer = HTTPBearer(auto_error=False)
@@ -82,8 +108,16 @@ def get_current_user(
 # Request models (tenant is NEVER in the body — it comes from the token)
 # --------------------------------------------------------------------------
 class LoginRequest(BaseModel):
+    # Accepts a username OR an email — signup collects an email, so people
+    # reasonably try to log in with it.
     username: str
     password: str
+
+
+class RegisterRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=120)
+    email: EmailStr
+    password: str = Field(..., min_length=8, max_length=200)
 
 
 class TransactionCreate(BaseModel):
@@ -104,40 +138,48 @@ class DebtResolve(BaseModel):
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
+def _require_db():
+    """Fail with 503 when writes are attempted without a database."""
+    if not database.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Η βάση δεδομένων δεν έχει ρυθμιστεί (ορίστε DATABASE_URL).")
+
+
+def _resolve_user(session, username):
+    """Turn the JWT subject into the tenant's row, or 401 if it no longer
+    exists — a token outliving its account must not resolve to anything."""
+    user = store.get_user_by_username(session, username)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Ο λογαριασμός δεν βρέθηκε.")
+    return user
+
+
 def _load(username):
     """Return (active, completed, transactions, is_demo) for one tenant.
 
-    Live Airtable is preferred whenever it is configured, and its errors are
-    surfaced (502) rather than masked. The demo dataset is used ONLY when
-    Airtable is not configured at all (bootstrap), so live data can never be
-    silently replaced by demo figures."""
-    if not db.is_configured():
+    The live database is preferred whenever it is configured, and its errors
+    surface (502) rather than being masked. The demo dataset is used ONLY when
+    DATABASE_URL is absent (bootstrap), so live data can never be silently
+    replaced by demo figures."""
+    if not database.is_configured():
         if DEMO_ENABLED:
             return (demo.demo_active_projects(), demo.demo_completed_projects(),
                     demo.demo_transactions(), True)
         raise HTTPException(
             status_code=503,
-            detail="Το Airtable δεν έχει ρυθμιστεί (ορίστε AIRTABLE_PAT / "
-                   "AIRTABLE_BASE_ID στο .env).")
+            detail="Η βάση δεδομένων δεν έχει ρυθμιστεί (ορίστε DATABASE_URL).")
     try:
-        active = db.get_active_projects(username)
-        completed = db.get_completed_projects(username)
-        transactions = db.get_transactions(username)
-        return active, completed, transactions, False
-    except db.AirtableError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
-
-
-def _assert_owned(user, record_id):
-    """Guard by-id mutations: the record must belong to THIS tenant. Reuses the
-    Username-filtered read so one user can never resolve/delete another's row
-    even with a guessed record id."""
-    try:
-        ids = {t.get("id") for t in db.get_transactions(user)}
-    except db.AirtableError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
-    if record_id not in ids:
-        raise HTTPException(status_code=404, detail="Η κίνηση δεν βρέθηκε.")
+        with database.session_scope() as session:
+            user = _resolve_user(session, username)
+            return (store.get_active_projects(session, user),
+                    store.get_completed_projects(session, user),
+                    store.get_transactions(session, user),
+                    False)
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
 
 
 def _serialize_txn(rec):
@@ -173,24 +215,25 @@ def health():
 
 @app.get("/api/status")
 def status():
-    """Setup diagnostics: is Airtable configured, does the connection work, and
-    which auth mode is active. Handy for Step 1 verification (no secrets echoed)."""
-    configured = db.is_configured()
+    """Setup diagnostics: is the database configured, does the connection work,
+    and which auth mode is active. No secrets are echoed — in particular the
+    error string is truncated, since a libpq failure can quote the DSN."""
+    configured = database.is_configured()
     result = {
-        "airtable_configured": configured,
+        "database_configured": configured,
         "demo_enabled": DEMO_ENABLED,
-        "auth_mode": "airtable" if configured else ("demo" if DEMO_ENABLED else "disabled"),
+        "auth_mode": "postgres" if configured else ("demo" if DEMO_ENABLED else "disabled"),
         "jwt_secret_set": not auth.JWT_SECRET_IS_DEFAULT,
         "stripe_webhook_configured": bool(STRIPE_WEBHOOK_SECRET),
     }
     if configured:
         try:
-            # Harmless connectivity probe: a formula that matches nothing.
-            db.get_active_projects("__connectivity_probe__")
-            result["airtable_connection"] = "ok"
-        except db.AirtableError as exc:
-            result["airtable_connection"] = "error"
-            result["airtable_error"] = str(exc)
+            with database.session_scope() as session:
+                session.exec(_text("select 1"))
+            result["database_connection"] = "ok"
+        except Exception as exc:
+            result["database_connection"] = "error"
+            result["database_error"] = type(exc).__name__
     return result
 
 
@@ -240,6 +283,68 @@ def me(user: str = Depends(get_current_user)):
     return {"username": user}
 
 
+@app.post("/api/v1/auth/register", status_code=201)
+def register(body: RegisterRequest):
+    """Self-service signup, writing straight to PostgreSQL.
+
+    New accounts start Active on a 15-day trial; trial_expiry is what the
+    subscription gate reads to flip them to Inactive, and a paid Stripe
+    checkout clears it (see server/webhooks.py).
+
+    Availability is checked first for a friendly 409, but the UNIQUE
+    constraints on username/email are the real guard — two simultaneous
+    signups for the same name both pass the check, and the loser gets an
+    IntegrityError rather than a duplicate account.
+    """
+    _require_db()
+
+    username = body.username.strip()
+    email = body.email.strip().lower()
+    if len(body.password) < MIN_PASSWORD_LENGTH:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Ο κωδικός πρέπει να έχει τουλάχιστον {MIN_PASSWORD_LENGTH} χαρακτήρες.")
+
+    try:
+        with database.session_scope() as session:
+            if store.get_user_by_username(session, username):
+                raise HTTPException(
+                    status_code=409, detail="Το όνομα χρήστη χρησιμοποιείται ήδη.")
+            if store.get_user_by_email(session, email):
+                raise HTTPException(
+                    status_code=409, detail="Το email χρησιμοποιείται ήδη.")
+            user = store.create_user(
+                session,
+                username=username,
+                email=email,
+                # Hashed here — a plaintext password never reaches the database.
+                password_hash=passwords.hash_password(body.password),
+                subscription_status="Active",
+                trial_expiry=store.utcnow() + _dt.timedelta(days=TRIAL_DAYS),
+            )
+            token = auth.create_access_token(user.username, extra={"demo": False})
+            return {
+                "ok": True,
+                "access_token": token,
+                "token_type": "bearer",
+                "username": user.username,
+                "email": user.email,
+                "subscription": user.subscription_status,
+                "demo": False,
+                "expires_hours": auth.JWT_EXPIRE_HOURS,
+            }
+    except HTTPException:
+        raise
+    except IntegrityError:
+        # Lost the race against a simultaneous signup.
+        raise HTTPException(
+            status_code=409, detail="Το όνομα χρήστη ή το email χρησιμοποιείται ήδη.")
+    except auth.AuthError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+
+
 # --------------------------------------------------------------------------
 # Read endpoints (tenant-scoped by the JWT)
 # --------------------------------------------------------------------------
@@ -283,32 +388,32 @@ def create_transaction(body: TransactionCreate,
     if body.type not in _TXN_TYPES:
         raise HTTPException(status_code=422,
                             detail=f"type must be one of {sorted(_TXN_TYPES)}")
-    if not db.is_configured():
-        raise HTTPException(
-            status_code=503,
-            detail="Οι εγγραφές απαιτούν ρυθμισμένο Airtable (demo = μόνο ανάγνωση).")
+    _require_db()
     is_debt = body.type == finance.DEBT_TYPE
     is_revenue = body.type == "Έσοδο"
     # Sign convention: revenue/debt are positive, expense negative — the
     # analytics read the sign, not the Type column. VAT is derived from the
-    # gross amount; debts
-    # carry only the rate (VAT is stamped on Εξόφληση).
+    # gross amount; debts carry only the rate (VAT is stamped on Εξόφληση).
     signed = body.amount if (is_revenue or is_debt) else -body.amount
     vat_amount = None if is_debt else finance.vat_for_write(
         signed, is_revenue, body.vat_rate)
     try:
-        rec = db.create_transaction(
-            user, body.client.strip(), signed,
-            description=(body.description or None),
-            date=body.date,
-            type_=body.type,
-            source="Web",
-            vat_amount=vat_amount,
-            vat_rate=body.vat_rate,
-        )
-    except db.AirtableError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
-    return {"ok": True, "id": rec.get("id")}
+        with database.session_scope() as session:
+            tenant = _resolve_user(session, user)
+            txn = store.create_transaction(
+                session, tenant, body.client.strip(), signed,
+                description=(body.description or None),
+                txn_date=body.date,
+                type_=body.type,
+                source="Web",
+                vat_amount=vat_amount,
+                vat_rate=body.vat_rate,
+            )
+            return {"ok": True, "id": str(txn.id)}
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
 
 
 @app.post("/api/transactions/{record_id}/resolve")
@@ -316,25 +421,35 @@ def resolve_debt(record_id: str, body: DebtResolve,
                  user: str = Depends(get_current_user)):
     """Εξόφληση: flip a Χρεωστούμενο row to realised revenue and stamp its
     output VAT from the given rate."""
-    if not db.is_configured():
-        raise HTTPException(status_code=503, detail="Απαιτείται ρυθμισμένο Airtable.")
-    _assert_owned(user, record_id)
+    _require_db()
     vat_amount = finance.vat_for_write(body.amount, True, body.vat_rate)
     try:
-        db.resolve_debt_transaction(record_id, paid_date=body.date,
-                                    vat_amount=vat_amount, vat_rate=body.vat_rate)
-    except db.AirtableError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
-    return {"ok": True, "id": record_id}
+        with database.session_scope() as session:
+            tenant = _resolve_user(session, user)
+            # store.resolve_debt is tenant-scoped, so another tenant's id is
+            # indistinguishable from a missing one.
+            txn = store.resolve_debt(session, tenant, record_id,
+                                     paid_date=body.date,
+                                     vat_amount=vat_amount, vat_rate=body.vat_rate)
+            if txn is None:
+                raise HTTPException(status_code=404, detail="Η κίνηση δεν βρέθηκε.")
+            return {"ok": True, "id": str(txn.id)}
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
 
 
 @app.delete("/api/transactions/{record_id}")
 def delete_transaction(record_id: str, user: str = Depends(get_current_user)):
-    if not db.is_configured():
-        raise HTTPException(status_code=503, detail="Απαιτείται ρυθμισμένο Airtable.")
-    _assert_owned(user, record_id)
+    _require_db()
     try:
-        db.delete_transaction(record_id)
-    except db.AirtableError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
-    return {"ok": True, "id": record_id}
+        with database.session_scope() as session:
+            tenant = _resolve_user(session, user)
+            if not store.delete_transaction(session, tenant, record_id):
+                raise HTTPException(status_code=404, detail="Η κίνηση δεν βρέθηκε.")
+            return {"ok": True, "id": record_id}
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")

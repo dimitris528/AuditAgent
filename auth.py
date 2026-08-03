@@ -1,17 +1,21 @@
 """
 Authentication for the web backend (server/main.py).
 
-Credentials are verified against the Airtable Users table (Username + Password,
-pbkdf2_sha256 hash via passwords.py, legacy plaintext still accepted — the
-retired Streamlit app wrote both formats). On success a signed JWT is minted;
-every data endpoint resolves the tenant strictly from that token's `sub`, so
-one user can never read another's rows.
+Credentials are verified against the PostgreSQL `users` table (login by
+username OR email + password_hash, pbkdf2_sha256 via passwords.py, legacy
+plaintext still accepted — rows backfilled from Airtable may carry either).
+On success a signed JWT is minted; every data endpoint resolves the tenant
+strictly from that token's `sub`, so one user can never read another's rows.
 
-Bootstrap/demo: when Airtable isn't configured yet (placeholder PAT) and demo
-mode is on, a single fixed demo credential (demo / demo) logs in and sees the
-in-memory demo dataset — so the whole auth flow + UI is testable before any
-secrets exist. Once real Airtable credentials are set, the demo login is
-rejected and only real Users-table accounts work.
+`sub` remains the USERNAME rather than the numeric id: it is what every
+existing token carries, so keeping it means the database migration does not
+log every active session out.
+
+Bootstrap/demo: when DATABASE_URL isn't configured and demo mode is on, a
+single fixed demo credential (demo / demo) logs in and sees the in-memory demo
+dataset — so the whole auth flow + UI is testable before any secrets exist.
+Once a real database is configured the demo login is rejected and only real
+users table accounts work.
 """
 
 import os
@@ -20,8 +24,8 @@ import time
 
 import jwt
 
-import airtable_client as db
 import passwords
+from server import database, store
 
 # --- JWT config ------------------------------------------------------------
 # In production ALWAYS set JWT_SECRET (render.yaml generates one). The dev
@@ -54,7 +58,7 @@ def _assert_secret_usable():
     rows. Failing closed here (rather than at import) keeps the process up so
     /api/status can still explain exactly what is misconfigured.
     """
-    if JWT_SECRET_IS_DEFAULT and db.is_configured():
+    if JWT_SECRET_IS_DEFAULT and database.is_configured():
         raise AuthError(
             "Ο διακομιστής δεν έχει ρυθμισμένο JWT_SECRET — η σύνδεση είναι "
             "απενεργοποιημένη για λόγους ασφαλείας.",
@@ -92,37 +96,42 @@ def password_matches(stored, typed):
     return secrets.compare_digest(stored.encode("utf-8"), typed.encode("utf-8"))
 
 
-def authenticate(username, password):
+def authenticate(identifier, password):
     """Return a user dict {username, subscription, demo} on success, or None on
     invalid credentials. Raises AuthError when the check can't be performed.
 
-    - Airtable configured → verify against the Users table.
-    - Airtable NOT configured + demo mode → accept the fixed demo credential.
+    `identifier` is a username OR an email address — registration collects an
+    email, so people reasonably try to log in with it.
+
+    - Database configured → verify against the users table.
+    - Database NOT configured + demo mode → accept the fixed demo credential.
     """
-    username = (username or "").strip()
-    if not username:
+    identifier = (identifier or "").strip()
+    if not identifier:
         return None
 
-    if not db.is_configured():
-        if DEMO_ENABLED and username == DEMO_USER and password == DEMO_PASSWORD:
+    if not database.is_configured():
+        if DEMO_ENABLED and identifier == DEMO_USER and password == DEMO_PASSWORD:
             return {"username": DEMO_USER, "subscription": "Demo", "demo": True}
         return None
 
     try:
-        user = db.find_user(username=username)
-    except db.AirtableError as exc:
+        with database.session_scope() as session:
+            user = store.find_user(session, username=identifier, email=identifier)
+            if not user:
+                return None
+            if not password_matches(user.password_hash, password):
+                return None
+            return {
+                "username": user.username,
+                "email": user.email,
+                "subscription": user.subscription_status,
+                "demo": False,
+            }
+    except AuthError:
+        raise
+    except Exception as exc:  # connection refused, timeout, bad credentials…
         raise AuthError(f"Ο έλεγχος ταυτότητας απέτυχε προσωρινά: {exc}", status=503)
-
-    if not user:
-        return None
-    fields = user.get("fields", {})
-    if not password_matches(fields.get("Password"), password):
-        return None
-    return {
-        "username": username,
-        "subscription": fields.get("SubscriptionStatus"),
-        "demo": False,
-    }
 
 
 def create_access_token(username, extra=None):

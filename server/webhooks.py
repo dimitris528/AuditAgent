@@ -11,21 +11,21 @@ and deploy.
 Flow:
     Stripe -> POST /api/v1/webhooks/stripe
         -> signature verified against STRIPE_WEBHOOK_SECRET (reject 400)
-        -> on checkout.session.completed, match the payer to a Users row and
-           flip SubscriptionStatus to "Active" (which also clears TrialExpiry).
+        -> on checkout.session.completed, match the payer to a users row and
+           flip subscription_status to "Active" (which also clears trial_expiry).
 
 Payer matching, in order:
-    1. client_reference_id — the checkout URL stamps the tenant's Username, so
+    1. client_reference_id — the checkout URL stamps the tenant's username, so
        this is an exact match.
-    2. customer email — fallback; needs the OPTIONAL Email column in the Users
-       table (see airtable_client.py schema notes).
+    2. customer email — every account now has one (registration requires it).
+    3. stripe_customer_id — for repeat checkouts that carry neither.
 
 Status codes are chosen for Stripe's retry behaviour, which is the whole point
 of getting them right — Stripe re-delivers on 5xx for ~3 days and gives up on
 2xx/4xx:
     400  bad signature or unparseable body   -> never retry, it can't improve
-    503  endpoint not configured             -> retry once the secret is set
-    502  Airtable lookup/write failed        -> retry, it is transient
+    503  endpoint or database not configured -> retry once configuration lands
+    502  database lookup/write failed        -> retry, it is transient
     200  accepted, including unknown payer   -> retry cannot identify them; the
                                                 event stays in the Stripe
                                                 Dashboard for manual reconcile
@@ -49,9 +49,10 @@ import json
 
 import stripe
 from fastapi import APIRouter, HTTPException, Request
+from sqlalchemy.exc import SQLAlchemyError
 
-import airtable_client as db
 from config import STRIPE_WEBHOOK_SECRET
+from server import database, store
 
 router = APIRouter(prefix="/api/v1/webhooks", tags=["webhooks"])
 
@@ -93,31 +94,38 @@ async def stripe_webhook(request: Request):
     return {"received": True}
 
 
-def _activate_payer(session):
-    """Flip the paying tenant's Users row to Active. Raises HTTPException(502)
-    on transient Airtable failures so Stripe re-delivers."""
-    username = session.get("client_reference_id")
-    email = ((session.get("customer_details") or {}).get("email")
-             or session.get("customer_email"))
+def _activate_payer(checkout):
+    """Flip the paying tenant's users row to Active. Raises HTTPException(502)
+    on transient database failures so Stripe re-delivers."""
+    username = checkout.get("client_reference_id")
+    email = ((checkout.get("customer_details") or {}).get("email")
+             or checkout.get("customer_email"))
+    customer_id = checkout.get("customer")
+
+    if not database.is_configured():
+        print("[ERROR] DATABASE_URL is not configured — cannot activate payer.")
+        raise HTTPException(status_code=503, detail="Database not configured.")
 
     try:
-        user = db.find_user(username=username, email=email)
-    except db.AirtableError as exc:
-        print(f"[ERROR] Users lookup failed (client_reference_id={username!r}): {exc}")
-        raise HTTPException(status_code=502, detail="Airtable lookup failed.")
+        with database.session_scope() as session:
+            user = store.find_user(session, username=username, email=email)
+            if user is None and customer_id:
+                # Repeat checkouts by an existing customer may carry neither a
+                # client_reference_id nor a matching email.
+                user = store.get_user_by_stripe_customer(session, customer_id)
 
-    if user is None:
-        print(f"[WARN] {CHECKOUT_COMPLETED} from unknown payer "
-              f"(client_reference_id={username!r}, email={email!r}) — "
-              f"no Users row updated; reconcile manually in Stripe.")
-        return
+            if user is None:
+                print(f"[WARN] {CHECKOUT_COMPLETED} from unknown payer "
+                      f"(client_reference_id={username!r}, email={email!r}) — "
+                      f"no row updated; reconcile manually in Stripe.")
+                return
 
-    try:
-        db.set_subscription_status(user["id"], "Active")
-    except db.AirtableError as exc:
-        print(f"[ERROR] Activation write failed for "
-              f"Username={user['fields'].get('Username')!r}: {exc}")
-        raise HTTPException(status_code=502, detail="Airtable write failed.")
-
-    print(f"[INFO] Subscription activated for "
-          f"Username={user['fields'].get('Username')!r}.")
+            store.set_subscription_status(session, user, "Active")
+            # Remember the Stripe customer so later billing events can be
+            # matched by id rather than by guessing from an email.
+            if customer_id and user.stripe_customer_id != customer_id:
+                store.set_stripe_customer(session, user, customer_id)
+            print(f"[INFO] Subscription activated for username={user.username!r}.")
+    except SQLAlchemyError as exc:
+        print(f"[ERROR] Activation failed (client_reference_id={username!r}): {exc}")
+        raise HTTPException(status_code=502, detail="Database write failed.")

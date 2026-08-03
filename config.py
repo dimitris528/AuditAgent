@@ -29,7 +29,20 @@ def _env(name, default=""):
     return value or default
 
 
-# --- Airtable -------------------------------------------------------------
+# --- PostgreSQL (Supabase) — the live data layer --------------------------
+# Full connection string, e.g.
+#   postgresql://postgres.<ref>:<password>@<host>:6543/postgres
+# IMPORTANT: percent-encode special characters in the password (/ -> %2F,
+# @ -> %40, : -> %3A, ? -> %3F). An un-escaped "/" silently reparses the URL so
+# the password fragment becomes the port. See server/database.py.
+# Read by server/database.py directly from the environment; listed here so the
+# full configuration surface is documented in one place.
+DATABASE_URL = _env("DATABASE_URL")
+
+
+# --- Airtable (MIGRATION ONLY) --------------------------------------------
+# No serving code reads these any more — they exist for the one-time backfill
+# in scripts/migrate_airtable_to_postgres.py.
 AIRTABLE_PAT = _env("AIRTABLE_PAT", "YOUR_PERSONAL_ACCESS_TOKEN")
 AIRTABLE_BASE_ID = _env("AIRTABLE_BASE_ID", "YOUR_BASE_ID")
 

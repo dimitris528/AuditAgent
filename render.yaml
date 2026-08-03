@@ -28,6 +28,18 @@ services:
         value: "3.11.9"
       # Airtable credentials. sync:false → set in the Render dashboard; never
       # committed.
+      # Supabase PostgreSQL connection string — the live data layer.
+      #   postgresql://postgres.<ref>:<password>@<host>:6543/postgres
+      # Use port 6543 (the transaction pooler) for this service.
+      # PERCENT-ENCODE special characters in the password: / -> %2F, @ -> %40,
+      # : -> %3A, ? -> %3F. An un-escaped "/" makes the URL reparse so the
+      # password fragment is read as the port, and the failure looks like bad
+      # credentials rather than a malformed URL.
+      - key: DATABASE_URL
+        sync: false
+      # Airtable — MIGRATION ONLY. Nothing the API serves reads these any more;
+      # they are needed solely by scripts/migrate_airtable_to_postgres.py. Once
+      # the backfill has run against production, remove them.
       - key: AIRTABLE_PAT
         sync: false
       - key: AIRTABLE_BASE_ID
