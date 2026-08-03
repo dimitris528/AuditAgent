@@ -7,10 +7,14 @@ import { SESSION_COOKIE } from "@/lib/constants";
 // redirected to /login. Presence is checked here for a fast redirect; the JWT
 // is actually VALIDATED server-side by FastAPI on every data call (an expired
 // token yields 401 → the page redirects to /login).
+// Pages reachable without a session. /register must be here or a new visitor
+// is redirected to /login before they can ever sign up.
+const PUBLIC_PATHS = new Set(["/login", "/register"]);
+
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
   const hasSession = Boolean(req.cookies.get(SESSION_COOKIE)?.value);
-  const isLogin = pathname === "/login";
+  const isLogin = PUBLIC_PATHS.has(pathname);
 
   if (!hasSession && !isLogin) {
     const url = req.nextUrl.clone();

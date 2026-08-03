@@ -49,6 +49,29 @@ export async function login(
   return data;
 }
 
+/** Minimum enforced server-side too — this only mirrors it for the form. */
+export const MIN_PASSWORD_LENGTH = 8;
+
+export async function register(
+  username: string,
+  email: string,
+  password: string,
+): Promise<{ ok: boolean; username?: string; email?: string }> {
+  const res = await fetch(`/api/auth/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, email, password }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new ApiError(
+      data?.error || `Registration failed (${res.status})`,
+      res.status,
+    );
+  }
+  return data;
+}
+
 export async function logout(): Promise<void> {
   await fetch(`/api/auth/logout`, { method: "POST" });
 }
