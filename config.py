@@ -40,12 +40,10 @@ SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))  # implicit TLS (SMTP_SSL)
 
 
-# --- Stripe ----------------------------------------------------------------
-# Signing secret for the webhook endpoint (stripe_webhook.py). Take it from
-# Stripe Dashboard -> Developers -> Webhooks -> your endpoint ("whsec_...").
-# Only the webhook service needs it; the Streamlit app never touches Stripe
-# server-side (the Πληρωμές tab just links out to Payment Link / Portal).
-STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+# Note: no Stripe settings live here. The webhook service that verified
+# Stripe signatures was retired with the migration to Next.js + FastAPI;
+# nothing in this repo talks to Stripe server-side any more (the legacy
+# Πληρωμές tab only links out to the Payment Link / Customer Portal).
 
 
 # --- WhatsApp Business Cloud API ------------------------------------------

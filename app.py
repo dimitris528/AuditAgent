@@ -86,10 +86,10 @@ cached Airtable logic and the data-retention hooks are unchanged:
     Navigation is a styled sidebar radio (Πίνακας Ελέγχου / Καταχώρηση /
     Ανασκόπηση / Πληρωμές) next to the theme toggle and account controls —
     the old top st.tabs row is gone; only the active page renders.
-       The subscribe URL stamps the Username as client_reference_id; the
-       companion webhook service (stripe_webhook.py, deployed separately —
-       Streamlit itself cannot receive POSTs) verifies Stripe's signature
-       and flips the Users row to Active on checkout.session.completed.
+       The subscribe URL stamps the Username as client_reference_id. The
+       companion webhook service that used to verify Stripe's signature and
+       flip the Users row to Active on checkout.session.completed has been
+       retired; activation is now set by hand in Airtable.
     6. The 2-year data-retention cleanup runs automatically in the background.
 
 Transactions schema note: the table carries the columns Username, Amount,
@@ -2901,12 +2901,13 @@ STRIPE_PORTAL_URL = "https://billing.stripe.com/p/login/test_4gM8wR6WGbjO8KN1Xla
 
 
 def _subscribe_url(username):
-    """Payment Link with the tenant stamped as client_reference_id, so the
-    Stripe webhook (stripe_webhook.py) flips the EXACT Users row to Active
-    after checkout. Stripe only accepts 1-200 chars of [A-Za-z0-9_-] there;
-    any other username (Greek letters, spaces, ...) gets the bare link and
-    activation falls back to matching the payer's email against the Users
-    table's optional Email column."""
+    """Payment Link with the tenant stamped as client_reference_id, which
+    identifies the EXACT Users row to activate after checkout. Stripe only
+    accepts 1-200 chars of [A-Za-z0-9_-] there; any other username (Greek
+    letters, spaces, ...) gets the bare link and the row is instead matched
+    by the payer's email against the Users table's optional Email column.
+    (The webhook that automated this flip was retired with the migration to
+    Next.js + FastAPI — activation is now a manual Airtable edit.)"""
     if username and re.fullmatch(r"[A-Za-z0-9_-]{1,200}", username):
         return f"{STRIPE_SUBSCRIBE_URL}?client_reference_id={username}"
     return STRIPE_SUBSCRIBE_URL
@@ -2916,10 +2917,11 @@ def payments_tab(username):
     """Billing center: subscribe via Stripe Payment Link, self-service
     management (card change, receipts, cancellation) via the Stripe Customer
     Portal. st.link_button always opens in a NEW browser tab, so the client
-    never loses their session. After checkout, the webhook service
-    (stripe_webhook.py) flips the Users row's SubscriptionStatus to Active
-    automatically — matched via the client_reference_id this tab stamps on
-    the Payment Link; the sidebar «Ανανέωση» re-reads the fresh verdict."""
+    never loses their session. After checkout, the Users row's
+    SubscriptionStatus must be set to Active in Airtable — matched via the
+    client_reference_id this tab stamps on the Payment Link (the webhook that
+    did this automatically was retired); the sidebar «Ανανέωση» then re-reads
+    the fresh verdict."""
     _section("Πληρωμές & Συνδρομή")
     col_sub, col_manage = st.columns(2)
     with col_sub, st.container(key="pay_card_subscribe"):

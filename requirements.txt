@@ -8,9 +8,9 @@
 #
 #   Deploy:  uvicorn server.main:app --host 0.0.0.0 --port $PORT
 #
-# The RETIRED Streamlit app (app.py) and Stripe webhook (stripe_webhook.py)
-# dependencies are ISOLATED in requirements-legacy.txt and are NOT installed
-# here. Nothing else in this repo should read this file.
+# The RETIRED Streamlit app (app.py) dependencies are ISOLATED in
+# requirements-legacy.txt and are NOT installed here. Nothing else in this repo
+# should read this file.
 # --------------------------------------------------------------------------
 
 fastapi==0.115.6           # REST API (server/main.py)

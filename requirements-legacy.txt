@@ -5,7 +5,6 @@
 # Next.js + FastAPI):
 #   * app.py            — Streamlit dashboard  (streamlit, pyarrow)
 #   * extractor.py      — GPT-4o invoice OCR   (openai, pdfplumber)
-#   * stripe_webhook.py — Stripe billing hook  (flask, stripe, gunicorn)
 #
 # Isolated here so nothing is lost. The live deploy installs requirements.txt
 # (FastAPI only). To run one of the old services locally:
@@ -20,10 +19,6 @@ streamlit==1.58.0
 openai==2.2.0
 pdfplumber==0.11.10
 pyarrow==20.0.0
-
-stripe==15.3.0
-flask==3.1.3
-gunicorn==26.0.0
 
 # Shared base the legacy apps also import:
 requests==2.34.2
