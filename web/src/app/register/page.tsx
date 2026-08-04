@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Calculator, Loader2, UserPlus, AlertCircle } from "lucide-react";
 import { register, MIN_PASSWORD_LENGTH, TRIAL_DAYS } from "@/lib/api";
+import { PasswordField } from "@/components/PasswordField";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -96,35 +97,23 @@ export default function RegisterPage() {
                 autoComplete="email"
               />
             </div>
-            <div>
-              <label className={labelCls} htmlFor="reg-password">
-                Κωδικός
-              </label>
-              <input
-                id="reg-password"
-                type="password"
-                className={field}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                autoComplete="new-password"
-              />
-              <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-500">
-                Τουλάχιστον {MIN_PASSWORD_LENGTH} χαρακτήρες.
-              </p>
-            </div>
-            <div>
-              <label className={labelCls} htmlFor="reg-confirm">
-                Επιβεβαίωση κωδικού
-              </label>
-              <input
-                id="reg-confirm"
-                type="password"
-                className={field}
-                value={confirm}
-                onChange={(e) => setConfirm(e.target.value)}
-                autoComplete="new-password"
-              />
-            </div>
+            <PasswordField
+              id="reg-password"
+              label="Κωδικός"
+              className={field}
+              value={password}
+              onChange={setPassword}
+              autoComplete="new-password"
+              hint={`Τουλάχιστον ${MIN_PASSWORD_LENGTH} χαρακτήρες.`}
+            />
+            <PasswordField
+              id="reg-confirm"
+              label="Επιβεβαίωση κωδικού"
+              className={field}
+              value={confirm}
+              onChange={setConfirm}
+              autoComplete="new-password"
+            />
 
             {message ? (
               <div className="flex items-center gap-1.5 text-xs text-rose-600 dark:text-rose-400">

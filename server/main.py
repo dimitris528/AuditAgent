@@ -371,7 +371,11 @@ def status():
     result = {
         "database_configured": configured,
         "demo_enabled": DEMO_ENABLED,
-        "auth_mode": "postgres" if configured else ("demo" if DEMO_ENABLED else "disabled"),
+        # Only ever "postgres" or "disabled" now. It used to report "demo"
+        # without a database, and since the demo/demo credential was removed
+        # that would be a lie — nothing can authenticate without the users
+        # table, whatever DASHBOARD_DEMO says.
+        "auth_mode": "postgres" if configured else "disabled",
         "jwt_secret_set": not auth.JWT_SECRET_IS_DEFAULT,
         "stripe_webhook_configured": bool(STRIPE_WEBHOOK_SECRET),
         # Checkout needs the secret key AND a price; the webhook needs only the

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Calculator, Loader2, LogIn, AlertCircle } from "lucide-react";
 import { login } from "@/lib/api";
+import { PasswordField } from "@/components/PasswordField";
 
 function LoginForm() {
   const router = useRouter();
@@ -62,18 +63,14 @@ function LoginForm() {
                 autoFocus
               />
             </div>
-            <div>
-              <label className="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">
-                Κωδικός
-              </label>
-              <input
-                type="password"
-                className={field}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                autoComplete="current-password"
-              />
-            </div>
+            <PasswordField
+              id="login-password"
+              label="Κωδικός"
+              className={field}
+              value={password}
+              onChange={setPassword}
+              autoComplete="current-password"
+            />
 
             {message ? (
               <div className="flex items-center gap-1.5 text-xs text-rose-600 dark:text-rose-400">
@@ -105,11 +102,6 @@ function LoginForm() {
           >
             Εγγραφή
           </Link>
-        </p>
-
-        <p className="mt-2 text-center text-xs text-slate-400 dark:text-slate-500">
-          Χωρίς βάση δεδομένων; Δοκιμαστική σύνδεση με{" "}
-          <code className="font-mono">demo</code> / <code className="font-mono">demo</code>.
         </p>
       </div>
     </div>

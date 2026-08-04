@@ -11,11 +11,10 @@ strictly from that token's `sub`, so one user can never read another's rows.
 existing token carries, so keeping it means the database migration does not
 log every active session out.
 
-Bootstrap/demo: when DATABASE_URL isn't configured and demo mode is on, a
-single fixed demo credential (demo / demo) logs in and sees the in-memory demo
-dataset — so the whole auth flow + UI is testable before any secrets exist.
-Once a real database is configured the demo login is rejected and only real
-users table accounts work.
+A configured database is REQUIRED. The fixed demo/demo credential that used to
+be accepted when DATABASE_URL was absent is gone, and so is the login page's
+hint advertising it — see the note above AuthError. Without a database every
+login is refused rather than falling back to a shared account.
 """
 
 import os
@@ -65,9 +64,17 @@ def _assert_secret_usable():
             status=503,
         )
 
-DEMO_ENABLED = os.getenv("DASHBOARD_DEMO", "1") != "0"
-DEMO_USER = "demo"
-DEMO_PASSWORD = "demo"
+# The fixed demo/demo credential that used to be accepted whenever
+# DATABASE_URL was absent has been REMOVED, along with the login page's hint
+# advertising it. It was a published password: anyone who read this file could
+# sign in to any deployment that had not yet been given a database, and the
+# login screen told every visitor exactly what to type. Authentication is now
+# only ever against the users table.
+#
+# Deliberately not replaced with an env-gated version. A credential that is
+# disabled by configuration is one misconfiguration away from being live, and
+# "the demo account is on in production" is not a failure anything here would
+# surface.
 
 
 class AuthError(Exception):
@@ -97,23 +104,22 @@ def password_matches(stored, typed):
 
 
 def authenticate(identifier, password):
-    """Return a user dict {username, subscription, demo} on success, or None on
+    """Return a user dict {username, email, subscription, demo} on success
+    (demo is always False and kept only so the response shape is unchanged), or
+    None on
     invalid credentials. Raises AuthError when the check can't be performed.
 
     `identifier` is a username OR an email address — registration collects an
     email, so people reasonably try to log in with it.
 
-    - Database configured → verify against the users table.
-    - Database NOT configured + demo mode → accept the fixed demo credential.
+    Requires a configured database. Without one there is nothing to verify
+    against and every login is refused — there is no demo fallback any more.
     """
     identifier = (identifier or "").strip()
     if not identifier:
         return None
 
     if not database.is_configured():
-        if DEMO_ENABLED and identifier == DEMO_USER and password == DEMO_PASSWORD:
-            return {"username": DEMO_USER, "demo": True,
-                    "subscription": subscription.demo_state().to_dict()}
         return None
 
     try:
