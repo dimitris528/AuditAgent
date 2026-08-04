@@ -1,9 +1,9 @@
-import { cookies } from "next/headers";
 import Link from "next/link";
-import { Calculator, CreditCard } from "lucide-react";
-import { SESSION_COOKIE } from "@/lib/constants";
+import { Calculator } from "lucide-react";
+import { getSessionUsername } from "@/lib/session";
 import { ThemeToggle } from "@/components/theme/ThemeToggle";
-import { LogoutButton } from "@/components/LogoutButton";
+import { MainNav } from "@/components/nav/MainNav";
+import { UserMenu } from "@/components/nav/UserMenu";
 
 /**
  * The signed-in shell: header, centred main, and the ambient backdrop.
@@ -20,7 +20,10 @@ export default async function AppLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const authed = Boolean((await cookies()).get(SESSION_COOKIE)?.value);
+  // Null only for an unauthenticated render, which the middleware already
+  // redirects — so in practice this is the tenant's name.
+  const username = await getSessionUsername();
+  const authed = Boolean(username);
   return (
     <>
       {/* fixed + -z-10: sits behind the content, never scrolls, never
@@ -32,9 +35,14 @@ export default async function AppLayout({
 
       {/* print:hidden — the app chrome has no business on a statement
           that gets saved as PDF and sent to a client. */}
+      {/* Two rows: identity and account controls on top, navigation beneath.
+          The nav row is what makes Συνδρομή visible from every page instead of
+          being one unlabelled icon among three — it is the only route back for
+          an account whose trial has lapsed, so it should never be the hardest
+          link in the header to find. */}
       <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/80 backdrop-blur print:hidden dark:border-slate-800 dark:bg-slate-950/80">
         <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-4 sm:px-6">
-          <div className="flex items-center gap-2.5">
+          <Link href="/" className="flex items-center gap-2.5">
             <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600 text-white">
               <Calculator className="h-5 w-5" />
             </span>
@@ -46,26 +54,24 @@ export default async function AppLayout({
                 Accounting Dashboard
               </div>
             </div>
-          </div>
+          </Link>
           <div className="flex items-center gap-2">
-            {/* Always reachable while signed in — including for a lapsed
-                account, whose only way back is through this link. */}
-            {authed ? (
-              <Link
-                href="/billing"
-                title="Συνδρομή"
-                className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 text-slate-600 transition hover:border-slate-300 hover:text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:border-slate-600 dark:hover:text-white"
-              >
-                <CreditCard className="h-4 w-4" />
-                <span className="hidden sm:inline text-xs font-medium">
-                  Συνδρομή
-                </span>
-              </Link>
-            ) : null}
             <ThemeToggle />
-            {authed ? <LogoutButton /> : null}
+            {authed ? <UserMenu username={username} /> : null}
           </div>
         </div>
+
+        {/* Hidden when signed out: the nav would only offer routes the
+            middleware bounces straight back to /login. */}
+        {authed ? (
+          <div className="mx-auto max-w-7xl px-4 sm:px-6">
+            {/* overflow-x-auto so three items and their icons never wrap or
+                clip on a narrow phone. */}
+            <div className="overflow-x-auto">
+              <MainNav />
+            </div>
+          </div>
+        ) : null}
       </header>
       <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 print:max-w-none print:p-0">
         {children}
