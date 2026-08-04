@@ -50,17 +50,13 @@ TRIALING = "trialing"
 ACTIVE = "active"
 INACTIVE = "inactive"
 
-# Never stored — the status reported for the in-memory demo dataset, which has
-# no users row to carry one.
-DEMO = "demo"
-
 #: Statuses that may write. Reads are deliberately NOT gated: an expired tenant
 #: has to be able to see the billing page, and locking them out of their own
 #: figures would be a hostage-taking, not a paywall.
-_WRITABLE = frozenset({TRIALING, ACTIVE, DEMO})
+_WRITABLE = frozenset({TRIALING, ACTIVE})
 
 #: Length of the free trial granted at registration. Env-overridable (TRIAL_DAYS)
-#: so a demo account can be given longer without a deploy.
+#: so a trial can be extended without a deploy.
 TRIAL_DAYS = _CONFIGURED_TRIAL_DAYS
 
 #: Below this the billing page nags. Purely cosmetic — nothing is enforced by it.
@@ -208,13 +204,3 @@ def resolve(status, trial_ends_at, now=None):
 
     # trialing with no end date should not exist; treat it as a lapsed trial.
     return SubscriptionState(INACTIVE, None, 0, stored)
-
-
-def demo_state():
-    """The state reported when there is no database at all (DASHBOARD_DEMO).
-
-    Writes are nominally allowed because nothing gates them here — every write
-    endpoint already refuses with 503 without a database — and reporting
-    "inactive" would put the demo behind a paywall it cannot pay.
-    """
-    return SubscriptionState(DEMO)

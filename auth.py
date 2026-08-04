@@ -104,9 +104,7 @@ def password_matches(stored, typed):
 
 
 def authenticate(identifier, password):
-    """Return a user dict {username, email, subscription, demo} on success
-    (demo is always False and kept only so the response shape is unchanged), or
-    None on
+    """Return a user dict {username, email, subscription} on success, or None on
     invalid credentials. Raises AuthError when the check can't be performed.
 
     `identifier` is a username OR an email address — registration collects an
@@ -136,7 +134,6 @@ def authenticate(identifier, password):
                 # notice that a trial lapsed while nobody was looking, and
                 # refresh_subscription persists that verdict.
                 "subscription": store.refresh_subscription(session, user).to_dict(),
-                "demo": False,
             }
     except AuthError:
         raise
@@ -147,7 +144,7 @@ def authenticate(identifier, password):
 def create_access_token(username, extra=None):
     """Mint a signed HS256 access token whose `sub` is the tenant key.
 
-    `extra` may carry non-authoritative flags (e.g. demo) but must never be
+    `extra` may carry non-authoritative flags but must never be
     allowed to overwrite the registered claims — a caller passing
     {"sub": "someone-else"} would otherwise mint a token for another tenant.
     """

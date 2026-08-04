@@ -38,11 +38,14 @@ export function ClientCard({
   client,
   onOpen,
   daysOverdue,
+  compact = false,
 }: {
   client: ClientData;
   onOpen?: () => void;
   /** Set when this client has an overdue debt — drives the red marking. */
   daysOverdue?: number;
+  /** Rendered in a narrow column — see the metrics grid below. */
+  compact?: boolean;
 }) {
   const m = client.metrics;
   const vatRefund = m.net_vat < 0;
@@ -97,8 +100,18 @@ export function ClientCard({
         ) : null}
       </div>
 
-      {/* 5 core metrics */}
-      <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
+      {/* 5 core metrics.
+          `compact` forces two-up regardless of viewport. The default classes
+          are VIEWPORT breakpoints, and this card now also lives in a narrow
+          side rail of the dashboard grid — on a wide screen `sm:grid-cols-3`
+          fired inside a ~370px column and squeezed every tile to an unreadable
+          sliver. The rail passes compact; the full-width layouts do not. */}
+      <div
+        className={clsx(
+          "grid gap-2.5",
+          compact ? "grid-cols-2" : "grid-cols-2 sm:grid-cols-3",
+        )}
+      >
         <Metric
           label="Έσοδα"
           value={money(m.gross_rev)}

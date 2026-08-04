@@ -131,8 +131,8 @@ def is_postgres(url=None):
 
 def is_configured():
     """True when DATABASE_URL is present and parseable. Does NOT open a
-    connection — the callers use this to choose between live data and the demo
-    dataset without paying for a round trip."""
+    connection — the callers use it to answer 503 immediately rather than
+    paying for a round trip that cannot succeed."""
     if not DATABASE_URL:
         return False
     try:
@@ -183,6 +183,14 @@ _ADDITIVE_MIGRATIONS = (
     # under the old name.
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS trial_ends_at TIMESTAMPTZ",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_customer_id VARCHAR(128)",
+    # password_reset_tokens needs nothing here — create_all() issues CREATE
+    # TABLE for a table that does not exist yet. The index is listed because a
+    # database that somehow has the table WITHOUT it would do a sequential scan
+    # per reset attempt, and the lookup is by token_hash and nothing else.
+    "CREATE INDEX IF NOT EXISTS ix_password_reset_tokens_token_hash "
+    "ON password_reset_tokens (token_hash)",
+    "CREATE INDEX IF NOT EXISTS ix_password_reset_tokens_user_id "
+    "ON password_reset_tokens (user_id)",
 )
 
 # The ONE non-additive statement in this file, and the reason it is here rather

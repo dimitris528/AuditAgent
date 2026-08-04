@@ -94,18 +94,18 @@ export interface DashboardData {
   doc_types: DocTypeInfo[];
   debt_alerts: DebtAlerts;
   username: string;
-  demo: boolean;
   /** False when the backend has no OPENAI_API_KEY — the scan button is then
    *  hidden rather than offered as a control that can only fail. */
   scan_enabled: boolean;
   period: PeriodInfo;
+  /** The period's rows, newest first — the dashboard's transactions table. */
+  transactions: TransactionRow[];
   /** Rides along on the dashboard payload so the page can redirect a lapsed
    *  tenant to /billing before rendering, without a second round trip. */
   subscription: SubscriptionInfo;
 }
 
-/** "demo" only ever appears when the backend runs without a database. */
-export type SubscriptionStatus = "trialing" | "active" | "inactive" | "demo";
+export type SubscriptionStatus = "trialing" | "active" | "inactive";
 
 /** server/subscription.py → SubscriptionState.to_dict(). */
 export interface SubscriptionInfo {
@@ -126,7 +126,6 @@ export interface SubscriptionInfo {
 export interface BillingStatus extends SubscriptionInfo {
   username: string;
   email?: string;
-  demo: boolean;
   has_stripe_customer?: boolean;
   /** STRIPE_SECRET_KEY + STRIPE_PRICE_ID are both set. */
   stripe_configured: boolean;
@@ -322,8 +321,16 @@ export interface ClientSummary {
   open_debts: number;
 }
 
+/** Who issued the statement — the signed-in tenant, for the letterhead. */
+export interface StatementIssuer {
+  name: string;
+  email: string | null;
+}
+
 export interface ClientDetailPayload {
   client: ClientDetail;
+  /** Optional so an older backend response still typechecks. */
+  issuer?: StatementIssuer;
   summary: ClientSummary;
   transactions: TransactionRow[];
   /** NOT period-scoped: a debt raised last quarter and paid this one still has

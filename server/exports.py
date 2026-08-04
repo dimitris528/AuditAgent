@@ -25,13 +25,16 @@ not a comma — and they are what `dialect="excel"` (the default) produces. The
 comma-delimited, decimal points, i.e. RFC 4180 that pandas and every other tool
 reads without arguments.
 
-Signed amounts
---------------
-Amounts are exported SIGNED, the way they are stored: revenue and debt
-positive, expenses negative. So a plain SUM over the Σύνολο column is the net
-result for the period, which is the first thing anyone does with this file. The
-Είδος column carries the direction in words for anyone reading rather than
-summing.
+Positive amounts
+----------------
+Every figure is exported as a POSITIVE magnitude, including expenses. Storage
+signs them (expenses negative) and the dashboard shows magnitude-plus-colour,
+but a spreadsheet has no colour and a column of "-310,00" reads as a correction
+rather than as a cost. Direction lives in the Είδος column, in words, which is
+also what an accountant filters and pivots on.
+
+The consequence is deliberate and worth knowing: SUM(Σύνολο) is turnover, NOT
+the net result. Subtotal by Είδος to get revenue and expenses separately.
 """
 
 import csv
@@ -58,10 +61,12 @@ COLUMNS = (
     "Α.Φ.Μ.",
     "Τύπος Παραστατικού",
     "Αρ. Παραστατικού",
-    "Είδος",
+    # Έσοδο / Έξοδο / Χρεωστούμενο — the ONLY thing carrying direction now that
+    # the amounts are unsigned, so it sits immediately before them.
+    "Είδος Κίνησης",
     "Καθαρή Αξία",
     "Φ.Π.Α.",
-    "Σύνολο",
+    "Συνολικό Ποσό",
     "Κατάσταση Πληρωμής",
     "Περιγραφή",
 )
@@ -92,13 +97,17 @@ def payment_status(record, paid_so_far=0.0, today=None):
 def _number(value, dialect):
     """A euro amount as the chosen dialect writes it, or "" for a missing one.
 
+    Always a POSITIVE magnitude — see the module docstring. abs() is applied
+    here, once, rather than at each of the three call sites, so a new column
+    cannot accidentally reintroduce a minus sign.
+
     Blank rather than 0 when there is no figure at all: a row with no VAT
     recorded is not a row with zero VAT, and exporting 0,00 would let someone
     reconcile a column that was never filled in.
     """
     if value is None:
         return ""
-    text = f"{round(float(value), 2):.2f}"
+    text = f"{abs(round(float(value), 2)):.2f}"
     return text.replace(".", ",") if dialect == EXCEL else text
 
 
@@ -112,6 +121,20 @@ def client_key(name):
     SQL, for the reason store._key gives: Postgres lower() is collation
     dependent on Greek and SQLite's is ASCII-only."""
     return (name or "").strip().lower()
+
+
+def _text(value):
+    """A trimmed cell value, or "" — never the string "None".
+
+    Every text column goes through this. The fields it guards (DocType,
+    DocNumber, Description) are legitimately absent on cash entries and on rows
+    written before those columns existed, and a stray "None" in a spreadsheet
+    column is worse than an empty one: it sorts, it filters, and it looks like
+    data.
+    """
+    if value is None:
+        return ""
+    return " ".join(str(value).split())
 
 
 def _row(record, afm_by_client, paid_by_debt, dialect, today=None):
@@ -138,15 +161,15 @@ def _row(record, afm_by_client, paid_by_debt, dialect, today=None):
     return [
         _date(record),
         client,
-        afm_by_client.get(client_key(client), ""),
-        fields.get("DocType") or "",
-        fields.get("DocNumber") or "",
-        fields.get("Type") or "",
+        _text(afm_by_client.get(client_key(client))),
+        _text(fields.get("DocType")),
+        _text(fields.get("DocNumber")),
+        _text(fields.get("Type")),
         _number(net, dialect),
         _number(vat, dialect),
         _number(gross, dialect),
         payment_status(record, paid, today=today),
-        (fields.get("Description") or "").strip(),
+        _text(fields.get("Description")),
     ]
 
 

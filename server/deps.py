@@ -29,7 +29,7 @@ from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 import auth
-from server import database, store, subscription
+from server import database, store
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -104,8 +104,3 @@ def subscription_state(session, username):
     billing page reads."""
     return resolve_user_state(session, username)
 
-
-def demo_state():
-    """Re-exported so callers do not have to import subscription just for the
-    no-database branch."""
-    return subscription.demo_state()

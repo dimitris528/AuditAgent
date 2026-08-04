@@ -1,19 +1,20 @@
 import { redirect } from "next/navigation";
-import { AlertTriangle, FlaskConical } from "lucide-react";
+import { AlertTriangle } from "lucide-react";
 import { getDashboard } from "@/lib/server-api";
 import { apiBase } from "@/lib/backend";
 import { ApiError } from "@/lib/errors";
 import type { DashboardData } from "@/lib/types";
-import { ExecutiveHeader } from "@/components/ExecutiveHeader";
 import { ClientGrid } from "@/components/ClientGrid";
 import { ClientDrawerProvider } from "@/components/ClientDrawerProvider";
 import { DebtAlerts } from "@/components/DebtAlerts";
 import { AnalyticsSection } from "@/components/AnalyticsSection";
+import { MetricCards } from "@/components/MetricCards";
+import { TransactionsTable } from "@/components/TransactionsTable";
 import { QuickAddTransaction } from "@/components/QuickAddTransaction";
 import { PeriodSelector } from "@/components/PeriodSelector";
 import { TrialBanner } from "@/components/TrialBanner";
 import { ExportButton } from "@/components/ExportButton";
-import { Badge } from "@/components/ui/Badge";
+import { PdfExportButton } from "@/components/PdfExportButton";
 
 // Always render fresh — figures reflect the latest database state.
 export const dynamic = "force-dynamic";
@@ -48,11 +49,7 @@ function BackendDown({ message }: { message: string }) {
           Ο διακομιστής δείχνει σε localhost ενώ τρέχει σε production — ορίστε
           το <span className="font-mono">API_BASE_URL</span> στην υπηρεσία web.
         </p>
-      ) : (
-        <p className="mt-2 rounded-lg bg-white/70 px-3 py-2 text-left font-mono text-xs text-slate-700 dark:bg-slate-900/60 dark:text-slate-300">
-          uvicorn server.main:app --reload --port 8000
-        </p>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -98,36 +95,40 @@ export default async function Page({
     redirect("/billing");
   }
 
+  // name-key -> id, so a transaction row can open its client's drawer. Built
+  // here because the dashboard payload is the only place both are present.
+  const clientIds: Record<string, number> = {};
+  for (const c of data.clients) {
+    if (c.id) clientIds[c.key] = Number(c.id);
+  }
+
   return (
     // One drawer for the whole page, so an alert row and a client card cannot
-    // each open their own on top of the other. It wraps the spacing container
-    // rather than sitting inside it: the drawer is position:fixed, and a
-    // stray `space-y` margin would push its full-screen backdrop off the top.
+    // each open their own on top of the other. It wraps the grid rather than
+    // sitting inside it: the drawer is position:fixed, and a stray margin would
+    // push its full-screen backdrop off the top.
     <ClientDrawerProvider period={period} vatRates={data.vat_rates}>
-      <div className="space-y-6">
-        {/* Page toolbar */}
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h1 className="text-xl font-bold tracking-tight text-slate-900 dark:text-white">
-              Πίνακας Ελέγχου
-            </h1>
-            <p className="text-sm text-slate-500 dark:text-slate-400">
-              {data.counts.active_clients} ενεργοί πελάτες ·{" "}
-              {data.counts.transactions} κινήσεις
-              {data.counts.open_debts > 0
-                ? ` · ${data.counts.open_debts} χρεωστούμενα`
-                : ""}
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            {data.demo ? (
-              <Badge tone="warning" icon={<FlaskConical className="h-3 w-3" />}>
-                DEMO — χωρίς βάση δεδομένων
-              </Badge>
-            ) : null}
-            {/* Exports the period currently selected below, not the whole
-                book — the file matches what is on screen. */}
-            <ExportButton period={period} />
+      {/* The 12-column grid. Everything below places itself on it, so the
+          breakpoints are declared once here rather than per section:
+            mobile  — one column, everything stacked in reading order
+            lg      — 12 columns, charts 7 / alerts 5
+          Sections that are always full width just span 12. */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
+        {/* --- Toolbar ------------------------------------------------- */}
+        <div className="lg:col-span-12">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h1 className="text-xl font-bold tracking-tight text-slate-900 dark:text-white">
+                Πίνακας Ελέγχου
+              </h1>
+              <p className="text-sm text-slate-500 dark:text-slate-400">
+                {data.counts.active_clients} ενεργοί πελάτες ·{" "}
+                {data.counts.transactions} κινήσεις
+                {data.counts.open_debts > 0
+                  ? ` · ${data.counts.open_debts} χρεωστούμενα`
+                  : ""}
+              </p>
+            </div>
             <QuickAddTransaction
               vatRates={data.vat_rates}
               docTypes={data.doc_types}
@@ -137,17 +138,42 @@ export default async function Page({
           </div>
         </div>
 
-        <TrialBanner subscription={data.subscription} />
-
-        {/* Period filter — every figure below reflects the selected window. */}
-        <div className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 dark:border-slate-800 dark:bg-slate-900">
-          <PeriodSelector period={data.period} />
+        <div className="lg:col-span-12">
+          <TrialBanner subscription={data.subscription} />
         </div>
 
-        <DebtAlerts alerts={data.debt_alerts} />
-        <ExecutiveHeader header={data.header} />
-        <ClientGrid clients={data.clients} alerts={data.debt_alerts} />
-        <AnalyticsSection analytics={data.analytics} period={period} />
+        {/* --- Period filter + exports ---------------------------------- */}
+        {/* The exports sit WITH the filter, not in the page header, because
+            what they export is whatever the filter is showing — putting them
+            side by side is what makes that obvious without a tooltip. */}
+        <div className="lg:col-span-12">
+          <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between dark:border-slate-800 dark:bg-slate-900">
+            <PeriodSelector period={data.period} />
+            <div className="flex shrink-0 items-center gap-2">
+              <ExportButton period={period} />
+              <PdfExportButton period={period} />
+            </div>
+          </div>
+        </div>
+
+        {/* --- Top row: the four metrics -------------------------------- */}
+        <div className="lg:col-span-12">
+          <MetricCards header={data.header} alerts={data.debt_alerts} />
+        </div>
+
+        {/* --- Middle: charts left (7), alerts + clients right (5) ------- */}
+        <div className="lg:col-span-7">
+          <AnalyticsSection analytics={data.analytics} />
+        </div>
+        <div className="space-y-4 lg:col-span-5">
+          <DebtAlerts alerts={data.debt_alerts} />
+          <ClientGrid clients={data.clients} alerts={data.debt_alerts} compact />
+        </div>
+
+        {/* --- Bottom: the full-width transactions table ----------------- */}
+        <div className="lg:col-span-12">
+          <TransactionsTable rows={data.transactions} clientIds={clientIds} />
+        </div>
       </div>
     </ClientDrawerProvider>
   );

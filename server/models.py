@@ -86,6 +86,34 @@ class User(SQLModel, table=True):
                                     sa_column=_tstz(nullable=False))
 
 
+class PasswordResetToken(SQLModel, table=True):
+    """One outstanding "forgot my password" request.
+
+    The token is stored HASHED, exactly like a password, and for the same
+    reason: this table is a list of live account-takeover keys, so anyone who
+    reads the database — a backup, a log, an errant SELECT — must not be able to
+    use what they find. The plaintext exists only in the reset link, and only
+    the holder of that link can present it.
+
+    Single-use and short-lived, both enforced in store.consume_reset_token:
+    `used_at` is stamped the moment a token is spent so a leaked link cannot be
+    replayed, and `expires_at` bounds the window in which a forgotten,
+    unclicked email is dangerous.
+    """
+
+    __tablename__ = "password_reset_tokens"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    # sha256 of the token that went out in the link. Indexed because lookup is
+    # BY this value — there is nothing else to find the row by.
+    token_hash: str = Field(index=True, unique=True, max_length=64)
+    expires_at: dt.datetime = Field(sa_column=_tstz(nullable=False))
+    used_at: Optional[dt.datetime] = Field(default=None, sa_column=_tstz())
+    created_at: dt.datetime = Field(default_factory=_utcnow,
+                                    sa_column=_tstz(nullable=False))
+
+
 class Client(SQLModel, table=True):
     """A billable client — the Airtable "Projects" table, renamed to match what
     the UI has called it since the VAT refactor (Πελάτης).

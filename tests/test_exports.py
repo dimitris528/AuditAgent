@@ -53,7 +53,8 @@ def test_the_header_carries_every_requested_column():
     rows = _rows(exports.transactions_csv([]))
     assert rows[0] == list(exports.COLUMNS)
     for required in ("Ημερομηνία", "Πελάτης", "Α.Φ.Μ.", "Τύπος Παραστατικού",
-                     "Καθαρή Αξία", "Φ.Π.Α.", "Σύνολο", "Κατάσταση Πληρωμής"):
+                     "Καθαρή Αξία", "Φ.Π.Α.", "Συνολικό Ποσό",
+                     "Κατάσταση Πληρωμής"):
         assert required in rows[0]
 
 
@@ -69,23 +70,52 @@ def test_a_row_carries_the_figures_and_the_clients_afm():
     assert row["Α.Φ.Μ."] == "123456789"
     assert row["Τύπος Παραστατικού"] == "Τιμολόγιο Πώλησης"
     assert row["Αρ. Παραστατικού"] == "ΤΠΥ-1042"
-    assert row["Είδος"] == "Έσοδο"
+    assert row["Είδος Κίνησης"] == "Έσοδο"
     assert row["Καθαρή Αξία"] == "100.00"
     assert row["Φ.Π.Α."] == "24.00"
-    assert row["Σύνολο"] == "124.00"
+    assert row["Συνολικό Ποσό"] == "124.00"
     assert row["Περιγραφή"] == "Ιούλιος"
 
 
-def test_an_expense_keeps_its_negative_sign():
-    """Signed, so a plain SUM over the Σύνολο column is the period's net
-    result — the first thing anyone does with this file."""
+def test_an_expense_exports_as_a_positive_magnitude():
+    """A spreadsheet has no colour, and a column of "-310,00" reads as a
+    correction rather than a cost. Direction lives in Είδος Κίνησης."""
     body = exports.transactions_csv(
         [_record(amount=-124.0, type_="Έξοδο", vat=24.0)],
         dialect=exports.ISO)
     row = dict(zip(exports.COLUMNS, _rows(body)[1]))
-    assert row["Σύνολο"] == "-124.00"
-    assert row["Καθαρή Αξία"] == "-100.00"
-    assert row["Είδος"] == "Έξοδο"
+    assert row["Συνολικό Ποσό"] == "124.00"
+    assert row["Καθαρή Αξία"] == "100.00"
+    assert row["Φ.Π.Α."] == "24.00"
+    assert row["Είδος Κίνησης"] == "Έξοδο"
+    # No minus sign survives on any AMOUNT column. (Not the whole row — the ISO
+    # date legitimately contains hyphens.)
+    for column in ("Καθαρή Αξία", "Φ.Π.Α.", "Συνολικό Ποσό"):
+        assert "-" not in row[column], column
+
+
+def test_doc_type_number_and_description_are_populated_when_present():
+    """Reported as "missing". They are carried; what was missing was data —
+    and an absent field must come out EMPTY, never as the string "None"."""
+    body = exports.transactions_csv(
+        [_record(DocType="Τιμολόγιο Πώλησης", DocNumber="ΤΠΥ-1042",
+                 Description="Υπηρεσίες Ιουλίου")],
+        dialect=exports.ISO)
+    row = dict(zip(exports.COLUMNS, _rows(body)[1]))
+    assert row["Τύπος Παραστατικού"] == "Τιμολόγιο Πώλησης"
+    assert row["Αρ. Παραστατικού"] == "ΤΠΥ-1042"
+    assert row["Περιγραφή"] == "Υπηρεσίες Ιουλίου"
+
+
+def test_absent_text_fields_are_blank_not_the_word_none():
+    """A stray "None" sorts, filters and looks like data."""
+    body = exports.transactions_csv([_record()], dialect=exports.ISO)
+    cells = _rows(body)[1]
+    assert "None" not in cells
+    row = dict(zip(exports.COLUMNS, cells))
+    assert row["Τύπος Παραστατικού"] == ""
+    assert row["Αρ. Παραστατικού"] == ""
+    assert row["Περιγραφή"] == ""
 
 
 def test_a_row_with_no_vat_exports_blanks_not_zeros():
@@ -231,7 +261,7 @@ def test_export_endpoint_returns_a_csv_attachment(api):
     assert row["Πελάτης"] == "Νησίδα Café"
     # The ΑΦΜ is joined on from the clients table, not from the transaction.
     assert row["Α.Φ.Μ."] == "123456789"
-    assert row["Σύνολο"] == "124,00"
+    assert row["Συνολικό Ποσό"] == "124,00"
 
 
 def test_export_honours_the_selected_period(api):

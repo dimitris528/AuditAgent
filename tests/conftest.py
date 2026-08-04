@@ -19,8 +19,6 @@ import tempfile
 _DB = pathlib.Path(tempfile.mkdtemp(prefix="auditagent-tests-")) / "test.db"
 os.environ["DATABASE_URL"] = f"sqlite:///{_DB}"
 os.environ["JWT_SECRET"] = "test-only-secret-not-used-anywhere-real"
-# Live data only: the demo dataset would mask a broken query with fixtures.
-os.environ["DASHBOARD_DEMO"] = "0"
 # No OCR key: every test that touches scanning either asserts the disabled path
 # or stubs the SDK, and a key inherited from the developer's shell would bill
 # real OpenAI calls.

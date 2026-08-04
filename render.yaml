@@ -83,9 +83,6 @@ services:
         generateValue: true
       - key: JWT_EXPIRE_HOURS
         value: "12"
-      # Live data only in production (no demo fallback).
-      - key: DASHBOARD_DEMO
-        value: "0"
       - key: DASHBOARD_TREND_MONTHS
         value: "12"
       # CORS. Inert in production — the browser only ever talks to the web

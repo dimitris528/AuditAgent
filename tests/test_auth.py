@@ -54,6 +54,15 @@ def test_status_never_reports_a_demo_auth_mode(api):
     body = api.get("/api/status").json()
     assert body["auth_mode"] in ("postgres", "disabled")
     assert body["auth_mode"] != "demo"
+    assert "demo_enabled" not in body
+
+
+def test_the_demo_dataset_module_is_gone():
+    """server/demo.py served the removed demo login. Once that credential went
+    nothing could reach the dataset, so it was deleted rather than left as
+    unreachable code that still looked like a feature."""
+    with pytest.raises(ImportError):
+        __import__("server.demo")
 
 
 # --- Regression guards: real logins must still work -----------------------
@@ -63,8 +72,9 @@ def test_a_real_account_still_logs_in(api):
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["username"] == "tester"
-    assert body["demo"] is False
     assert body["access_token"]
+    # The `demo` flag went with the demo subsystem — its absence is the point.
+    assert "demo" not in body
 
 
 def test_login_by_email_still_works(api):

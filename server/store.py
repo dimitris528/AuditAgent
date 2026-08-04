@@ -11,7 +11,9 @@ Every read is scoped by user_id, which is now enforced by a foreign key rather
 than by remembering to add a Username filter to each query.
 """
 
-from datetime import date, datetime, timezone
+import hashlib
+import secrets
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import func
 from sqlmodel import select
@@ -28,6 +30,7 @@ from server.models import (
     Client,
     DebtPayment,
     Invoice,
+    PasswordResetToken,
     Transaction,
     User,
 )
@@ -167,6 +170,112 @@ def update_password(session, user, password_hash):
     session.commit()
     session.refresh(user)
     return user
+
+
+# --- Password reset -------------------------------------------------------
+# How long a reset link stays usable. Short on purpose: the link is a bearer
+# credential sitting in an inbox, and the person who asked for it is, by
+# definition, at their keyboard right now.
+RESET_TOKEN_TTL_MINUTES = 30
+
+# The token is 32 random bytes, urlsafe-encoded. Long enough that guessing is
+# not a strategy, short enough to survive an email client wrapping the line.
+_RESET_TOKEN_BYTES = 32
+
+
+def hash_reset_token(token):
+    """sha256 of the raw token — what the table actually stores.
+
+    Plain sha256 rather than a password KDF on purpose: this input is 256 bits
+    of CSPRNG output, not a human-chosen secret, so there is no dictionary to
+    slow an attacker down against and the cost of pbkdf2 would buy nothing.
+    """
+    return hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()
+
+
+def create_reset_token(session, user, now=None):
+    """Issue a reset token for `user` and return the RAW value.
+
+    The raw token is returned once, here, and never stored — the caller puts it
+    in the link and then it is unrecoverable. Any of the user's earlier
+    outstanding tokens are spent first, so asking twice invalidates the first
+    email rather than leaving two working keys in an inbox.
+    """
+    now = now or utcnow()
+    for stale in session.exec(
+        select(PasswordResetToken).where(
+            PasswordResetToken.user_id == user.id,
+            PasswordResetToken.used_at.is_(None),
+        )
+    ).all():
+        stale.used_at = now
+        session.add(stale)
+
+    raw = secrets.token_urlsafe(_RESET_TOKEN_BYTES)
+    session.add(PasswordResetToken(
+        user_id=user.id,
+        token_hash=hash_reset_token(raw),
+        expires_at=now + timedelta(minutes=RESET_TOKEN_TTL_MINUTES),
+    ))
+    session.commit()
+    return raw
+
+
+def consume_reset_token(session, raw_token, now=None):
+    """Return the User this token belongs to and spend it, or None.
+
+    None covers every failure indistinguishably — unknown, expired, already
+    used, or belonging to a deleted account — because the caller must not be
+    able to tell those apart. "Already used" would confirm the token was real.
+
+    The token is marked used BEFORE the caller changes the password. If the
+    password write then fails the user has to request a new link, which is the
+    safe direction to fail: the alternative leaves a spent token usable.
+    """
+    now = now or utcnow()
+    if not raw_token:
+        return None
+    row = session.exec(
+        select(PasswordResetToken).where(
+            PasswordResetToken.token_hash == hash_reset_token(raw_token)
+        )
+    ).first()
+    if row is None or row.used_at is not None:
+        return None
+    if _as_utc(row.expires_at) <= now:
+        return None
+
+    user = session.get(User, row.user_id)
+    if user is None:
+        return None
+
+    row.used_at = now
+    session.add(row)
+    session.commit()
+    return user
+
+
+def purge_expired_reset_tokens(session, now=None):
+    """Delete spent and expired rows. Housekeeping, not security — the checks
+    above already refuse them; this just stops the table growing forever."""
+    now = now or utcnow()
+    rows = session.exec(select(PasswordResetToken)).all()
+    removed = 0
+    for row in rows:
+        if row.used_at is not None or _as_utc(row.expires_at) <= now:
+            session.delete(row)
+            removed += 1
+    if removed:
+        session.commit()
+    return removed
+
+
+def _as_utc(stamp):
+    """SQLite hands back a naive datetime for a TIMESTAMPTZ column; comparing
+    it against an aware `now` raises rather than expiring anything."""
+    if stamp is not None and stamp.tzinfo is None:
+        return stamp.replace(tzinfo=timezone.utc)
+    return stamp
 
 
 # --- Clients (the old Airtable "Projects") --------------------------------

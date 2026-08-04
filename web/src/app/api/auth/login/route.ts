@@ -46,6 +46,5 @@ export async function POST(req: Request) {
   return NextResponse.json({
     ok: true,
     username: data.username,
-    demo: data.demo,
   });
 }

@@ -18,7 +18,9 @@ import { SESSION_COOKIE } from "@/lib/constants";
 //
 // Pages reachable without a session. /register must be here or a new visitor
 // is redirected to /login before they can ever sign up.
-const PUBLIC_PATHS = new Set(["/login", "/register"]);
+// /reset-password is public for the obvious reason: the whole point is that
+// the visitor cannot log in. It carries its own single-use, expiring token.
+const PUBLIC_PATHS = new Set(["/login", "/register", "/reset-password"]);
 
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;

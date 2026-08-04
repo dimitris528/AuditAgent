@@ -13,11 +13,11 @@ to obtain one, verified against the Airtable Users table). The tenant is taken
 STRICTLY from the token's `sub`, never from a query param, so one user can only
 ever read/write their own rows.
 
-Data source:
-  - DATABASE_URL configured → LIVE PostgreSQL data (Supabase); any database
-    error surfaces (502) rather than being masked.
-  - DATABASE_URL NOT configured + DASHBOARD_DEMO != "0" → the in-memory demo
-    dataset (login demo/demo), so the UI is testable before secrets exist.
+Data source: PostgreSQL (Supabase), always. DATABASE_URL is required — every
+endpoint reports 503 without it and its errors surface (502) rather than being
+masked. The in-memory demo dataset and the demo/demo login that reached it were
+removed: once the shared credential went, nothing could authenticate without a
+database, so the fallback was unreachable code pretending to be a feature.
 """
 
 import datetime as _dt
@@ -35,7 +35,8 @@ import auth
 import finance
 import passwords
 from config import STRIPE_WEBHOOK_SECRET
-from server import billing, database, demo, deps, exports, ocr, store, subscription
+from server import (billing, database, deps, exports, mailer, ocr, store,
+                    subscription)
 from server.billing import router as billing_router
 from server.webhooks import router as webhooks_router
 
@@ -48,7 +49,8 @@ async def lifespan(_app: FastAPI):
     deploy rolls back with no way to reach /api/status and see why.
     """
     if not database.is_configured():
-        print("[WARN] DATABASE_URL is not configured — running in demo mode.")
+        print("[WARN] DATABASE_URL is not configured — every request will "
+              "report 503 until it is set.")
     else:
         try:
             database.init_db()
@@ -114,7 +116,6 @@ app.add_middleware(
     max_age=3600,
 )
 
-DEMO_ENABLED = os.getenv("DASHBOARD_DEMO", "1") != "0"
 TREND_MONTHS = int(os.getenv("DASHBOARD_TREND_MONTHS", "12"))
 # Shortest password we will store, enforced server-side; the UI only mirrors
 # it. (The free-trial length lives in server/subscription.py, which owns both
@@ -148,6 +149,15 @@ class LoginRequest(BaseModel):
 class RegisterRequest(BaseModel):
     username: str = Field(..., min_length=3, max_length=120)
     email: EmailStr
+    password: str = Field(..., min_length=8, max_length=200)
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(..., min_length=16, max_length=512)
     password: str = Field(..., min_length=8, max_length=200)
 
 
@@ -239,31 +249,21 @@ class ClientUpdate(BaseModel):
 # Helpers
 # --------------------------------------------------------------------------
 def _load(username):
-    """Return (active, completed, transactions, is_demo, subscription) for one
-    tenant.
+    """Return (active, completed, transactions, subscription) for one tenant.
 
-    The live database is preferred whenever it is configured, and its errors
-    surface (502) rather than being masked. The demo dataset is used ONLY when
-    DATABASE_URL is absent (bootstrap), so live data can never be silently
-    replaced by demo figures.
+    A database is required; its errors surface (502) rather than being masked.
 
     The subscription rides along because _resolve_user has already resolved it:
     returning it here is what lets the dashboard tell the UI to redirect an
     expired tenant to /billing without a second round trip."""
-    if not database.is_configured():
-        if DEMO_ENABLED:
-            return (demo.demo_active_projects(), demo.demo_completed_projects(),
-                    demo.demo_transactions(), True, subscription.demo_state())
-        raise HTTPException(
-            status_code=503,
-            detail="Η βάση δεδομένων δεν έχει ρυθμιστεί (ορίστε DATABASE_URL).")
+    _require_db()
     try:
         with database.session_scope() as session:
             user, state = deps.resolve_user_state(session, username)
             return (store.get_active_projects(session, user),
                     store.get_completed_projects(session, user),
                     store.get_transactions(session, user),
-                    False, state)
+                    state)
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
@@ -370,11 +370,8 @@ def status():
     configured = database.is_configured()
     result = {
         "database_configured": configured,
-        "demo_enabled": DEMO_ENABLED,
-        # Only ever "postgres" or "disabled" now. It used to report "demo"
-        # without a database, and since the demo/demo credential was removed
-        # that would be a lie — nothing can authenticate without the users
-        # table, whatever DASHBOARD_DEMO says.
+        # "postgres" or "disabled" — there is no third mode. The demo path
+        # that used to be reported here is gone.
         "auth_mode": "postgres" if configured else "disabled",
         "jwt_secret_set": not auth.JWT_SECRET_IS_DEFAULT,
         "stripe_webhook_configured": bool(STRIPE_WEBHOOK_SECRET),
@@ -435,14 +432,12 @@ def login(body: LoginRequest):
         raise HTTPException(status_code=exc.status, detail=str(exc))
     if not user:
         raise HTTPException(status_code=401, detail="Λάθος όνομα χρήστη ή κωδικός.")
-    token = auth.create_access_token(
-        user["username"], extra={"demo": bool(user.get("demo"))})
+    token = auth.create_access_token(user["username"])
     return {
         "access_token": token,
         "token_type": "bearer",
         "username": user["username"],
         "subscription": user.get("subscription"),
-        "demo": bool(user.get("demo")),
         "expires_hours": auth.JWT_EXPIRE_HOURS,
     }
 
@@ -495,7 +490,7 @@ def register(body: RegisterRequest):
                 subscription_status=subscription.TRIALING,
                 trial_ends_at=subscription.trial_end(),
             )
-            token = auth.create_access_token(user.username, extra={"demo": False})
+            token = auth.create_access_token(user.username)
             state = subscription.resolve(user.subscription_status,
                                          user.trial_ends_at)
             return {
@@ -505,7 +500,6 @@ def register(body: RegisterRequest):
                 "username": user.username,
                 "email": user.email,
                 "subscription": state.to_dict(),
-                "demo": False,
                 "expires_hours": auth.JWT_EXPIRE_HOURS,
             }
     except HTTPException:
@@ -516,6 +510,82 @@ def register(body: RegisterRequest):
             status_code=409, detail="Το όνομα χρήστη ή το email χρησιμοποιείται ήδη.")
     except auth.AuthError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc))
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+
+
+@app.post("/api/v1/auth/forgot-password")
+def forgot_password(body: ForgotPasswordRequest):
+    """Start a password reset. ALWAYS answers the same way.
+
+    The identical 200 for a known and an unknown address is the whole security
+    property of this endpoint: anything that differed — a 404, a slower reply, a
+    friendlier message — would turn it into a free tool for discovering which
+    email addresses hold accounts here. So the response never says whether a
+    mail was sent, and the caller cannot tell.
+
+    Delivery: the link is handed to server/mailer.py, which LOGS it when no
+    mail transport is configured. That is a deliberate, visible stub rather than
+    a silent no-op — see that module. The token itself is only ever returned in
+    the response when RESET_TOKEN_IN_RESPONSE is on, which is a local
+    development switch and refuses to work in production.
+    """
+    _require_db()
+    neutral = {
+        "ok": True,
+        "message": "Αν υπάρχει λογαριασμός με αυτό το email, στάλθηκε σύνδεσμος "
+                   "επαναφοράς.",
+    }
+    try:
+        with database.session_scope() as session:
+            user = store.get_user_by_email(session, body.email)
+            if user is None:
+                # Same shape, same work, same answer.
+                return neutral
+            raw = store.create_reset_token(session, user)
+            store.purge_expired_reset_tokens(session)
+            link = mailer.reset_link(raw)
+            mailer.send_password_reset(user.email, link)
+            if mailer.EXPOSE_RESET_TOKEN:
+                # Development only — mailer refuses to set this in production.
+                return {**neutral, "reset_token": raw, "reset_url": link}
+            return neutral
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+
+
+@app.post("/api/v1/auth/reset-password")
+def reset_password(body: ResetPasswordRequest):
+    """Spend a reset token and set a new password.
+
+    400 covers unknown, expired and already-used tokens without distinguishing
+    them: telling someone their token "has already been used" confirms it was
+    real, which is exactly the hint not to give.
+
+    The token is consumed before the password is written (see
+    store.consume_reset_token) so a failure cannot leave a spent link working.
+    No session is issued — the user logs in with the password they just chose,
+    which proves it is the one they think they set.
+    """
+    _require_db()
+    if len(body.password) < MIN_PASSWORD_LENGTH:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Ο κωδικός πρέπει να έχει τουλάχιστον {MIN_PASSWORD_LENGTH} χαρακτήρες.")
+    try:
+        with database.session_scope() as session:
+            user = store.consume_reset_token(session, body.token)
+            if user is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Ο σύνδεσμος επαναφοράς δεν είναι έγκυρος ή έχει λήξει. "
+                           "Ζητήστε νέο.")
+            store.update_password(session, user,
+                                  passwords.hash_password(body.password))
+            print(f"[INFO] Password reset completed for username={user.username!r}.")
+            return {"ok": True, "username": user.username}
+    except HTTPException:
+        raise
     except SQLAlchemyError as exc:
         raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
 
@@ -543,9 +613,21 @@ def dashboard(user: str = Depends(get_current_user),
     and the UI labels it as all-time so the two are not read as contradicting
     each other.
     """
-    active, completed, transactions, is_demo, state = _load(user)
+    active, completed, transactions, state = _load(user)
     start, end = finance.period_bounds(year, quarter, month)
     scoped = finance.filter_period(transactions, start, end)
+    # Settlement progress for the debt rows in the table below. One extra query
+    # for the whole page; _serialize_txn needs it to show "paid X of Y".
+    paid_by_debt = {}
+    try:
+        with database.session_scope() as session:
+            tenant = _resolve_user(session, user)
+            paid_by_debt = store.paid_by_debt(
+                store.get_debt_payments(session, tenant))
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
     payload = finance.build_dashboard(active, completed, scoped,
                                       trend_months=TREND_MONTHS,
                                       # Alerts run over the UNFILTERED book:
@@ -553,8 +635,16 @@ def dashboard(user: str = Depends(get_current_user),
                                       # because a past period is selected.
                                       all_transactions=transactions)
     payload["username"] = user
-    payload["demo"] = is_demo
     payload["scan_enabled"] = ocr.is_configured()
+    # The period's rows, newest first, for the dashboard's transactions table.
+    # Carried on this payload rather than fetched separately: the table is on
+    # screen from the first paint, and a second round trip would make the
+    # busiest part of the page the last to arrive.
+    payload["transactions"] = [
+        _serialize_txn(t, paid_by_debt)
+        for t in sorted(scoped, key=lambda r: finance.txn_date(r) or _dt.date.min,
+                        reverse=True)
+    ]
     # Carried on the dashboard payload rather than fetched separately: the page
     # has to know whether to redirect a lapsed tenant to /billing BEFORE it
     # renders, and a second request to find that out would show the dashboard
@@ -706,6 +796,14 @@ def get_client(client_id: int, user: str = Depends(get_current_user),
             paid = store.paid_by_debt(payments)
             return {
                 "client": client.to_detail(),
+                # The tenant's OWN identity, for the statement letterhead. A
+                # printed Καρτέλα Πελάτη that does not say who issued it is not
+                # a document anyone can act on — it went out with a hard-coded
+                # product name and nothing else.
+                "issuer": {
+                    "name": tenant.username,
+                    "email": tenant.email,
+                },
                 "summary": _client_summary(client.name, scoped),
                 "transactions": [_serialize_txn(t, paid) for t in scoped],
                 "payments": [p.to_detail() for p in payments],
@@ -773,7 +871,7 @@ def export_transactions(user: str = Depends(get_current_user),
     See server/exports.py for why the default dialect is semicolon-delimited
     UTF-8-with-BOM rather than RFC 4180 — in one word, Excel.
     """
-    active, _completed, transactions, _is_demo, _state = _load(user)
+    active, _completed, transactions, _state = _load(user)
     start, end = finance.period_bounds(year, quarter, month)
     scoped = finance.filter_period(transactions, start, end)
 
@@ -826,15 +924,15 @@ def transactions(user: str = Depends(get_current_user),
     """Recent transactions (newest first) for the tenant, optionally filtered
     to one client."""
     limit = max(1, min(limit, 1000))
-    _active, _completed, txns, is_demo, _state = _load(user)
+    _active, _completed, txns, _state = _load(user)
     if client:
         target = client.strip().lower()
         txns = [t for t in txns
                 if (t["fields"].get("Category") or "").strip().lower() == target]
     txns = sorted(txns, key=lambda t: finance.txn_date(t) or _dt.date.min,
                   reverse=True)[:limit]
-    return {"username": user, "transactions": [_serialize_txn(t) for t in txns],
-            "demo": is_demo}
+    return {"username": user,
+            "transactions": [_serialize_txn(t) for t in txns]}
 
 
 # --------------------------------------------------------------------------

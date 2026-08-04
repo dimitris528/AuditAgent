@@ -1,31 +1,20 @@
 import { BarChart3, LineChart, Landmark } from "lucide-react";
-import type { Analytics, PeriodInfo } from "@/lib/types";
+import type { Analytics } from "@/lib/types";
 import { Card, CardHeader } from "./ui/Card";
-import { ExportButton } from "./ExportButton";
 import { RevenueExpenseChart } from "./charts/RevenueExpenseChart";
 import { VatBreakdownChart } from "./charts/VatBreakdownChart";
 import { MonthlyTrendChart } from "./charts/MonthlyTrendChart";
 
-export function AnalyticsSection({
-  analytics,
-  period,
-}: {
-  analytics: Analytics;
-  /** Passed through to the export so the download matches the charts. */
-  period?: Pick<PeriodInfo, "year" | "quarter" | "month"> | null;
-}) {
+export function AnalyticsSection({ analytics }: { analytics: Analytics }) {
   return (
     <section className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-sm font-semibold text-slate-500 dark:text-slate-400">
-          ΑΝΑΦΟΡΕΣ
-        </h2>
-        <ExportButton
-          period={period}
-          label="Εξαγωγή αναφοράς (CSV)"
-          title="Λήψη των αναλυτικών κινήσεων της περιόδου σε CSV για Excel"
-        />
-      </div>
+      {/* No export button here any more: the dashboard toolbar now carries CSV
+          and PDF right next to the period filter, and in the new grid this
+          section sits directly beneath it — two identical buttons 30px apart
+          is clutter, not convenience. */}
+      <h2 className="text-sm font-semibold text-slate-500 dark:text-slate-400">
+        ΑΝΑΦΟΡΕΣ
+      </h2>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <Card>

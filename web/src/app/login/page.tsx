@@ -63,14 +63,24 @@ function LoginForm() {
                 autoFocus
               />
             </div>
-            <PasswordField
-              id="login-password"
-              label="Κωδικός"
-              className={field}
-              value={password}
-              onChange={setPassword}
-              autoComplete="current-password"
-            />
+            <div>
+              <PasswordField
+                id="login-password"
+                label="Κωδικός"
+                className={field}
+                value={password}
+                onChange={setPassword}
+                autoComplete="current-password"
+              />
+              <div className="mt-1 text-right">
+                <Link
+                  href="/reset-password"
+                  className="text-[11px] font-medium text-indigo-600 hover:underline dark:text-indigo-400"
+                >
+                  Ξεχάσατε τον κωδικό;
+                </Link>
+              </div>
+            </div>
 
             {message ? (
               <div className="flex items-center gap-1.5 text-xs text-rose-600 dark:text-rose-400">

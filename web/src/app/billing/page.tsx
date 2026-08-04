@@ -6,7 +6,6 @@ import {
   CalendarClock,
   CheckCircle2,
   CreditCard,
-  FlaskConical,
   Lock,
   ShieldCheck,
 } from "lucide-react";
@@ -54,11 +53,6 @@ const PRESENTATION = {
     label: "Ανενεργή",
     icon: <Lock className="h-3 w-3" />,
   },
-  demo: {
-    tone: "neutral" as const,
-    label: "Demo",
-    icon: <FlaskConical className="h-3 w-3" />,
-  },
 };
 
 /** The headline + explanation for each state. */
@@ -76,13 +70,6 @@ function summary(s: BillingStatus): { title: string; body: string } {
         title: "Η συνδρομή σας είναι ενεργή",
         body: "Έχετε πλήρη πρόσβαση σε όλες τις λειτουργίες. "
           + "Ευχαριστούμε που μας εμπιστεύεστε.",
-      };
-    case "demo":
-      return {
-        title: "Λειτουργία επίδειξης",
-        body: "Ο διακομιστής τρέχει χωρίς βάση δεδομένων, οπότε δεν υπάρχει "
-          + "συνδρομή να διαχειριστείτε. Τα δεδομένα που βλέπετε είναι "
-          + "ενδεικτικά.",
       };
     default:
       return {
@@ -162,7 +149,7 @@ export default async function BillingPage({
 
   const look = PRESENTATION[status.status] ?? PRESENTATION.inactive;
   const { title, body } = summary(status);
-  const canSubscribe = status.status !== "active" && status.status !== "demo";
+  const canSubscribe = status.status !== "active";
 
   return (
     <div className="mx-auto max-w-2xl space-y-5">

@@ -82,7 +82,7 @@ function Figure({
 /** Κατάσταση πληρωμής for one row — the same rule the CSV export applies. */
 function paymentStatus(t: TransactionRow): string {
   if (!t.is_debt) return "Εξοφλημένο";
-  if (t.status === "overdue") return `Ληξιπρόθεσμο (${t.days_overdue} ημ.)`;
+  if (t.status === "overdue") return `Ληξιπρόθεσμο ${t.days_overdue} ημ.`;
   return (t.paid ?? 0) > 0 ? "Μερικώς εξοφλημένο" : "Ανεξόφλητο";
 }
 
@@ -123,7 +123,7 @@ export default async function StatementPage({
     );
   }
 
-  const { client, summary, payments } = data;
+  const { client, summary, payments, issuer } = data;
   const vatRefund = summary.net_vat < 0;
   // OLDEST first. The API sorts newest-first for the dashboard's activity
   // list, but a statement is a ledger: it is read forwards, and it has to
@@ -166,7 +166,10 @@ export default async function StatementPage({
             </p>
           </div>
           <div className="text-right text-xs text-slate-600">
-            <div className="text-sm font-bold text-slate-900">ΛογιστήριοPro</div>
+            <div className="text-sm font-bold text-slate-900">
+              {issuer?.name || "ΛογιστήριοPro"}
+            </div>
+            {issuer?.email ? <div>{issuer.email}</div> : null}
             <div>Ημερομηνία έκδοσης: {formatDate(new Date().toISOString())}</div>
           </div>
         </header>
@@ -265,19 +268,36 @@ export default async function StatementPage({
             </p>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full border-collapse text-xs">
+              {/* table-fixed + an explicit colgroup. Without them the browser
+                  auto-sizes from content, and on a narrow A4 print the last two
+                  columns collided — "Κατάσταση" ran straight into "Σύνολο".
+                  Fixed widths also stop a long description starving the
+                  document-number and amount columns. */}
+              <table className="w-full table-fixed border-collapse text-[11px]">
+                <colgroup>
+                  <col className="w-[9%]" />
+                  <col className="w-[16%]" />
+                  <col className="w-[17%]" />
+                  {/* Wide enough for "Χρεωστούμενο" on one line — at 10% it
+                      broke mid-word, which reads as a rendering fault. */}
+                  <col className="w-[13%]" />
+                  <col className="w-[10%]" />
+                  <col className="w-[9%]" />
+                  <col className="w-[11%]" />
+                  <col className="w-[15%]" />
+                </colgroup>
                 <thead>
                   {/* Repeated on every printed page — a three-page statement
                       whose columns are only labelled on page one is unreadable. */}
-                  <tr className="border-y border-slate-300 text-left">
+                  <tr className="border-y border-slate-300 text-left align-bottom">
                     <th className="py-1.5 pr-2 font-semibold">Ημ/νία</th>
                     <th className="py-1.5 pr-2 font-semibold">Παραστατικό</th>
                     <th className="py-1.5 pr-2 font-semibold">Περιγραφή</th>
                     <th className="py-1.5 pr-2 font-semibold">Είδος</th>
                     <th className="py-1.5 pr-2 text-right font-semibold">Καθαρή</th>
                     <th className="py-1.5 pr-2 text-right font-semibold">Φ.Π.Α.</th>
-                    <th className="py-1.5 pr-2 text-right font-semibold">Σύνολο</th>
-                    <th className="py-1.5 font-semibold">Κατάσταση</th>
+                    <th className="py-1.5 pr-3 text-right font-semibold">Σύνολο</th>
+                    <th className="py-1.5 pl-1 font-semibold">Κατάσταση</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -287,24 +307,33 @@ export default async function StatementPage({
                       key={t.id}
                       className="border-b border-slate-200 break-inside-avoid"
                     >
-                      <td className="py-1.5 pr-2 whitespace-nowrap tabular-nums">
+                      <td className="py-1.5 pr-2 align-top tabular-nums">
                         {formatDate(t.date)}
                       </td>
-                      <td className="py-1.5 pr-2">
-                        {[t.doc_type, t.doc_number].filter(Boolean).join(" ") || "—"}
+                      {/* Type above number: joined onto one line in a
+                          fixed-width column, the document number was what got
+                          truncated — the field an audit needs most. */}
+                      <td className="py-1.5 pr-2 align-top break-words">
+                        {t.doc_type ? <div>{t.doc_type}</div> : null}
+                        {t.doc_number ? (
+                          <div className="text-slate-500">{t.doc_number}</div>
+                        ) : null}
+                        {!t.doc_type && !t.doc_number ? "—" : null}
                       </td>
-                      <td className="py-1.5 pr-2">{t.description?.trim() || "—"}</td>
-                      <td className="py-1.5 pr-2 whitespace-nowrap">
+                      <td className="py-1.5 pr-2 align-top break-words">
+                        {t.description?.trim() || "—"}
+                      </td>
+                      <td className="py-1.5 pr-2 align-top break-words">
                         {t.type || "—"}
                       </td>
-                      <td className="py-1.5 pr-2 text-right tabular-nums">
+                      <td className="py-1.5 pr-2 text-right align-top tabular-nums">
                         {t.net_amount != null ? moneyAbs(t.net_amount) : "—"}
                       </td>
-                      <td className="py-1.5 pr-2 text-right tabular-nums">
+                      <td className="py-1.5 pr-2 text-right align-top tabular-nums">
                         {t.vat_amount != null ? moneyAbs(t.vat_amount) : "—"}
                       </td>
                       <td
-                        className={`py-1.5 pr-2 text-right font-semibold tabular-nums ${
+                        className={`py-1.5 pr-3 text-right align-top font-semibold tabular-nums ${
                           t.is_debt
                             ? "text-amber-700"
                             : t.is_revenue
@@ -314,7 +343,7 @@ export default async function StatementPage({
                       >
                         {moneyAbs(t.amount)}
                       </td>
-                      <td className="py-1.5 whitespace-nowrap">
+                      <td className="py-1.5 pl-1 align-top break-words">
                         {paymentStatus(t)}
                       </td>
                     </tr>

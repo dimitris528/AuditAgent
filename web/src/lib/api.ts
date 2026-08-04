@@ -208,7 +208,7 @@ export async function scanDocument(file: File): Promise<ScanResult> {
 export async function login(
   username: string,
   password: string,
-): Promise<{ ok: boolean; username?: string; demo?: boolean }> {
+): Promise<{ ok: boolean; username?: string }> {
   const res = await fetch(`/api/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -269,4 +269,33 @@ export async function logout(): Promise<void> {
 export async function startCheckout(): Promise<{ url: string }> {
   const res = await fetch(`/api/billing/checkout`, { method: "POST" });
   return unwrap(res, "Αποτυχία έναρξης πληρωμής");
+}
+
+/**
+ * Start a password reset.
+ *
+ * Always resolves for a well-formed address, whether or not an account exists —
+ * the backend answers identically on purpose, so the UI must not imply
+ * otherwise in its success message either.
+ */
+export async function forgotPassword(email: string): Promise<{ ok: boolean }> {
+  const res = await fetch(`/api/auth/forgot-password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  return unwrap(res, "Αποτυχία αποστολής συνδέσμου");
+}
+
+/** Spend a reset token and set the new password. */
+export async function resetPassword(
+  token: string,
+  password: string,
+): Promise<{ ok: boolean; username?: string }> {
+  const res = await fetch(`/api/auth/reset-password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token, password }),
+  });
+  return unwrap(res, "Αποτυχία επαναφοράς κωδικού");
 }

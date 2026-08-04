@@ -66,16 +66,13 @@ def billing_status(user: str = Depends(deps.get_current_user)):
     store.refresh_subscription), so merely opening the billing page brings the
     stored status up to date.
     """
-    if not database.is_configured():
-        return {"username": user, "demo": True,
-                **subscription.demo_state().to_dict(), **_stripe_status()}
+    deps.require_db()
     try:
         with database.session_scope() as session:
             tenant, state = deps.subscription_state(session, user)
             return {
                 "username": tenant.username,
                 "email": tenant.email,
-                "demo": False,
                 "has_stripe_customer": bool(tenant.stripe_customer_id),
                 **state.to_dict(),
                 **_stripe_status(),

@@ -10,9 +10,14 @@ interface Props {
   clients: ClientData[];
   /** Used only to mark cards whose client is overdue. */
   alerts: DebtAlerts;
+  /** True when the grid sits in the dashboard's narrow right-hand rail: one
+   *  card per row, and the cards themselves render compactly. Without it the
+   *  viewport-based column classes below fire on a wide screen even though the
+   *  container is ~370px, and the cards collapse. */
+  compact?: boolean;
 }
 
-export function ClientGrid({ clients, alerts }: Props) {
+export function ClientGrid({ clients, alerts, compact = false }: Props) {
   const { openClient } = useClientDrawer();
 
   // Both sides key on finance._client_key, so the card and the alert row
@@ -42,7 +47,13 @@ export function ClientGrid({ clients, alerts }: Props) {
           Δεν υπάρχουν ενεργοί πελάτες ακόμη.
         </div>
       ) : (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+        <div
+          className={
+            compact
+              ? "grid grid-cols-1 gap-3"
+              : "grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3"
+          }
+        >
           {clients.map((client) => (
             <ClientCard
               key={client.id ?? client.key}
@@ -50,6 +61,7 @@ export function ClientGrid({ clients, alerts }: Props) {
               daysOverdue={overdue.get(client.key)}
               // Client ids are numeric in PostgreSQL but serialised as strings
               // in the finance record shape; parse before opening the drawer.
+              compact={compact}
               onOpen={
                 client.id ? () => openClient(Number(client.id)) : undefined
               }
