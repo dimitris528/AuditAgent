@@ -1,20 +1,29 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo } from "react";
 import { Users } from "lucide-react";
-import type { ClientData, PeriodInfo } from "@/lib/types";
+import type { ClientData, DebtAlerts } from "@/lib/types";
 import { ClientCard } from "./ClientCard";
-import { ClientDrawer } from "./ClientDrawer";
+import { useClientDrawer } from "./ClientDrawerProvider";
 
 interface Props {
   clients: ClientData[];
-  period: Pick<PeriodInfo, "year" | "quarter" | "month">;
-  /** Threaded through to the settlement modal in the drawer. */
-  vatRates: { value: number; label: string }[];
+  /** Used only to mark cards whose client is overdue. */
+  alerts: DebtAlerts;
 }
 
-export function ClientGrid({ clients, period, vatRates }: Props) {
-  const [openId, setOpenId] = useState<number | null>(null);
+export function ClientGrid({ clients, alerts }: Props) {
+  const { openClient } = useClientDrawer();
+
+  // Both sides key on finance._client_key, so the card and the alert row
+  // always agree about which client is which.
+  const overdue = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const c of alerts.clients) {
+      if (c.status === "overdue") map.set(c.key, c.max_days_overdue);
+    }
+    return map;
+  }, [alerts]);
 
   return (
     <section>
@@ -38,20 +47,16 @@ export function ClientGrid({ clients, period, vatRates }: Props) {
             <ClientCard
               key={client.id ?? client.key}
               client={client}
+              daysOverdue={overdue.get(client.key)}
               // Client ids are numeric in PostgreSQL but serialised as strings
               // in the finance record shape; parse before opening the drawer.
-              onOpen={client.id ? () => setOpenId(Number(client.id)) : undefined}
+              onOpen={
+                client.id ? () => openClient(Number(client.id)) : undefined
+              }
             />
           ))}
         </div>
       )}
-
-      <ClientDrawer
-        clientId={openId}
-        period={period}
-        vatRates={vatRates}
-        onClose={() => setOpenId(null)}
-      />
     </section>
   );
 }

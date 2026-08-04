@@ -160,6 +160,13 @@ class Transaction(SQLModel, table=True):
     # one invoice can only be entered once.
     doc_number: Optional[str] = Field(default=None, index=True, max_length=64)
     counterparty_afm: Optional[str] = Field(default=None, index=True, max_length=32)
+    # Τύπος παραστατικού — "Τιμολόγιο Πώλησης" | "ΑΠΥ" | "Πιστωτικό" |
+    # "Δαπάνη/Έξοδο" | "Λειτουργικό Έξοδο" (finance.DOC_TYPES).
+    doc_type: Optional[str] = Field(default=None, index=True, max_length=64)
+    # Χρεωστούμενα only: when payment falls due. Nullable, and NOT backfilled —
+    # finance.debt_due_date infers a due date from the issue date plus the
+    # standard terms, so rows written before this column existed still age.
+    due_date: Optional[dt.date] = Field(default=None, index=True)
     # Set on the revenue rows a PARTIAL settlement creates, pointing back at the
     # Χρεωστούμενο row they paid down, so a debt's history can be reconstructed
     # from the transactions alone.
@@ -185,6 +192,8 @@ class Transaction(SQLModel, table=True):
                 "FileHash": self.file_hash,
                 "DocNumber": self.doc_number,
                 "CounterpartyAFM": self.counterparty_afm,
+                "DocType": self.doc_type,
+                "DueDate": self.due_date.isoformat() if self.due_date else None,
                 "DebtId": self.debt_id,
             },
         }

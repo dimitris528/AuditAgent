@@ -12,7 +12,7 @@ import {
   X,
 } from "lucide-react";
 import { checkTransactionDuplicate, createTransaction, DuplicateError } from "@/lib/api";
-import type { DuplicateTransaction, ScanResult } from "@/lib/types";
+import type { DocTypeInfo, DuplicateTransaction, ScanResult } from "@/lib/types";
 import { money } from "@/lib/format";
 import { clsx } from "@/lib/clsx";
 import { ClientPicker, type PickedClient } from "./ClientPicker";
@@ -20,6 +20,7 @@ import { InvoiceScanner } from "./InvoiceScanner";
 
 interface Props {
   vatRates: { value: number; label: string }[];
+  docTypes: DocTypeInfo[];
   defaultVatRate: number;
   /** False when the backend has no OCR key — the scanner is then hidden. */
   scanEnabled?: boolean;
@@ -31,16 +32,36 @@ const TYPES = [
   { value: "Χρεωστούμενο", label: "Χρεωστούμενο" },
 ];
 
+type Basis = "gross" | "net";
+
 const field =
   "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 dark:border-slate-700 dark:bg-slate-800 dark:text-white";
 const labelCls = "mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400";
 
-/** The VAT the row will carry: the figure read off the document when there is
- *  one, else the standard derivation from the gross amount. */
-function vatPreview(gross: number, rate: number, scanned: number | null): number {
-  if (scanned !== null) return scanned;
-  if (!rate || !gross) return 0;
-  return Math.round(((gross * rate) / (1 + rate)) * 100) / 100;
+/**
+ * Live preview of the three figures, mirroring the server's arithmetic
+ * (finance.gross_from_net / vat_of / net_from_gross).
+ *
+ * The server is what actually computes and stores them — this only shows the
+ * user what they are about to save. Net is derived by SUBTRACTING the VAT
+ * rather than dividing the gross, exactly as the backend does, so the preview
+ * cannot show one cent and the saved row another.
+ */
+function figures(
+  typed: number,
+  basis: Basis,
+  rate: number,
+  scannedVat: number | null,
+): { gross: number; vat: number; net: number } {
+  const round2 = (n: number) => Math.round(n * 100) / 100;
+  const gross = basis === "net" ? round2(typed * (1 + rate)) : round2(typed);
+  const vat =
+    scannedVat !== null
+      ? scannedVat
+      : rate
+        ? round2((gross * rate) / (1 + rate))
+        : 0;
+  return { gross, vat, net: round2(gross - vat) };
 }
 
 function DuplicateWarning({ duplicate }: { duplicate: DuplicateTransaction }) {
@@ -64,6 +85,7 @@ function DuplicateWarning({ duplicate }: { duplicate: DuplicateTransaction }) {
 
 export function QuickAddTransaction({
   vatRates,
+  docTypes,
   defaultVatRate,
   scanEnabled = false,
 }: Props) {
@@ -71,7 +93,12 @@ export function QuickAddTransaction({
   const [open, setOpen] = useState(false);
   const [client, setClient] = useState<PickedClient | null>(null);
   const [amount, setAmount] = useState("");
+  // Which side of the VAT line the typed amount is on. An invoice states its
+  // net value, a till receipt only its total.
+  const [basis, setBasis] = useState<Basis>("gross");
   const [type, setType] = useState("Έξοδο");
+  const [docType, setDocType] = useState("");
+  const [dueDate, setDueDate] = useState("");
   const [vatRate, setVatRate] = useState(defaultVatRate);
   // The ΦΠΑ printed on a scanned document. Kept separately from the derived
   // figure and dropped the moment the user edits the amount or the rate, so a
@@ -89,6 +116,9 @@ export function QuickAddTransaction({
   const reset = useCallback(() => {
     setClient(null);
     setAmount("");
+    setBasis("gross");
+    setDocType("");
+    setDueDate("");
     setDescription("");
     setDate("");
     setDocNumber("");
@@ -99,6 +129,16 @@ export function QuickAddTransaction({
     setStatus("idle");
     setMessage("");
   }, []);
+
+  /** Picking a document type pre-selects the transaction type it implies —
+   *  a hint, not a lock: the user can still change it afterwards. */
+  function pickDocType(value: string) {
+    setDocType(value);
+    const meta = docTypes.find((d) => d.value === value);
+    // A credit note can be issued against a purchase as well as a sale, so it
+    // must not overwrite a type the user already chose.
+    if (meta && !meta.credit) setType(meta.suggests);
+  }
 
   // Escape closes, and body scroll is locked while the modal is open.
   useEffect(() => {
@@ -145,7 +185,11 @@ export function QuickAddTransaction({
 
   function applyScan(result: ScanResult) {
     const e = result.extracted;
-    if (e.total_amount !== null) setAmount(String(e.total_amount).replace(".", ","));
+    if (e.total_amount !== null) {
+      // total_amount is the VAT-inclusive figure printed on the document.
+      setBasis("gross");
+      setAmount(String(e.total_amount).replace(".", ","));
+    }
     if (e.vat_rate !== null) setVatRate(e.vat_rate);
     setScannedVat(e.vat_amount);
     if (e.doc_date) setDate(e.doc_date);
@@ -192,11 +236,16 @@ export function QuickAddTransaction({
         // Present only when an existing client was picked; a new name is
         // created server-side from `client`.
         client_id: client.id,
+        // The typed figure and which side of the VAT line it is on — the
+        // server converts, so both entry modes round identically.
         amount: parsed,
+        amount_basis: basis,
         type,
+        doc_type: docType || undefined,
         vat_rate: vatRate,
         vat_amount: scannedVat ?? undefined,
         date: date || undefined,
+        due_date: isDebt ? dueDate || undefined : undefined,
         description: description.trim() || undefined,
         doc_number: docNumber.trim() || undefined,
         counterparty_afm: counterpartyAfm.trim() || undefined,
@@ -221,8 +270,11 @@ export function QuickAddTransaction({
   }
 
   const saving = status === "saving";
-  const gross = Number(amount.replace(",", ".")) || 0;
+  const typed = Number(amount.replace(",", ".")) || 0;
   const isDebt = type === "Χρεωστούμενο";
+  const isCreditNote =
+    docTypes.find((d) => d.value === docType)?.credit ?? false;
+  const calc = figures(typed, basis, vatRate, scannedVat);
   // A duplicate is a warning, not a wall: the second save carries force.
   const confirming = duplicate !== null;
 
@@ -295,9 +347,40 @@ export function QuickAddTransaction({
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className={labelCls} htmlFor="qa-amount">
-                    Ποσό (με Φ.Π.Α.)
-                  </label>
+                  <div className="mb-1 flex items-center justify-between gap-2">
+                    <label className="text-xs font-medium text-slate-500 dark:text-slate-400" htmlFor="qa-amount">
+                      Ποσό
+                    </label>
+                    {/* Either side of the VAT line can be typed; the other two
+                        figures follow. */}
+                    <div className="flex overflow-hidden rounded-md border border-slate-300 dark:border-slate-700">
+                      {(
+                        [
+                          ["net", "Καθαρό"],
+                          ["gross", "Με Φ.Π.Α."],
+                        ] as [Basis, string][]
+                      ).map(([key, label]) => (
+                        <button
+                          key={key}
+                          type="button"
+                          onClick={() => {
+                            setBasis(key);
+                            // The scanned VAT belongs to the gross figure it
+                            // was read with; it cannot survive a basis change.
+                            setScannedVat(null);
+                          }}
+                          className={clsx(
+                            "px-2 py-0.5 text-[10px] font-semibold transition",
+                            basis === key
+                              ? "bg-indigo-600 text-white"
+                              : "bg-white text-slate-500 hover:bg-slate-50 dark:bg-slate-800 dark:text-slate-400",
+                          )}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                   <input
                     id="qa-amount"
                     className={field}
@@ -332,29 +415,82 @@ export function QuickAddTransaction({
                 </div>
               </div>
 
-              {!isDebt && gross > 0 ? (
-                <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                  Φ.Π.Α.{" "}
-                  <span className="font-semibold tabular-nums text-violet-600 dark:text-violet-400">
-                    {money(vatPreview(gross, vatRate, scannedVat))}
-                  </span>
-                  {scannedVat !== null ? " (από το παραστατικό)" : ""} · Καθαρή αξία{" "}
-                  <span className="font-semibold tabular-nums">
-                    {money(gross - vatPreview(gross, vatRate, scannedVat))}
-                  </span>
-                </p>
+              {/* Debts carry no VAT until they are settled, so there is
+                  nothing to break down for one. */}
+              {!isDebt && typed > 0 ? (
+                <div className="grid grid-cols-3 gap-2 rounded-lg bg-slate-50 p-2 text-center dark:bg-slate-800/50">
+                  {(
+                    [
+                      ["Καθαρή αξία", calc.net, ""],
+                      [
+                        "Φ.Π.Α.",
+                        calc.vat,
+                        "text-violet-600 dark:text-violet-400",
+                      ],
+                      ["Σύνολο", calc.gross, "text-slate-900 dark:text-white"],
+                    ] as [string, number, string][]
+                  ).map(([label, value, tone]) => (
+                    <div key={label}>
+                      <div className="text-[10px] text-slate-500 dark:text-slate-400">
+                        {label}
+                      </div>
+                      <div
+                        className={clsx(
+                          "text-xs font-bold tabular-nums text-slate-700 dark:text-slate-200",
+                          tone,
+                        )}
+                      >
+                        {money(value)}
+                      </div>
+                    </div>
+                  ))}
+                  {scannedVat !== null ? (
+                    <p className="col-span-3 text-[10px] text-slate-500 dark:text-slate-400">
+                      Το Φ.Π.Α. προέρχεται από το σαρωμένο παραστατικό.
+                    </p>
+                  ) : null}
+                </div>
               ) : null}
 
               <div>
-                <label className={labelCls}>Τύπος</label>
+                <label className={labelCls} htmlFor="qa-doctype">
+                  Τύπος Παραστατικού
+                </label>
+                <select
+                  id="qa-doctype"
+                  className={field}
+                  value={docType}
+                  onChange={(e) => pickDocType(e.target.value)}
+                >
+                  <option value="">— Χωρίς παραστατικό —</option>
+                  {docTypes.map((d) => (
+                    <option key={d.value} value={d.value}>
+                      {d.label}
+                    </option>
+                  ))}
+                </select>
+                {isCreditNote ? (
+                  <p className="mt-1 text-[11px] text-amber-700 dark:text-amber-400">
+                    Το πιστωτικό μειώνει το αντίστοιχο μέγεθος: επιλέξτε
+                    «Έσοδο» για πιστωτικό σε πώληση, «Έξοδο» για πιστωτικό σε
+                    αγορά.
+                  </p>
+                ) : null}
+              </div>
+
+              <div>
+                <label className={labelCls}>Τύπος Κίνησης</label>
                 <div className="grid grid-cols-3 gap-2">
                   {TYPES.map((t) => (
                     <button
                       key={t.value}
                       type="button"
+                      // A credit note reverses a document, so it can never be
+                      // an outstanding debt — the server refuses it too.
+                      disabled={isCreditNote && t.value === "Χρεωστούμενο"}
                       onClick={() => setType(t.value)}
                       className={clsx(
-                        "rounded-lg border px-2 py-1.5 text-xs font-medium transition",
+                        "rounded-lg border px-2 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-40",
                         type === t.value
                           ? "border-indigo-500 bg-indigo-50 text-indigo-700 dark:bg-indigo-500/10 dark:text-indigo-300"
                           : "border-slate-300 text-slate-600 hover:border-slate-400 dark:border-slate-700 dark:text-slate-300",
@@ -419,6 +555,25 @@ export function QuickAddTransaction({
                   />
                 </div>
               </div>
+
+              {isDebt ? (
+                <div>
+                  <label className={labelCls} htmlFor="qa-due">
+                    Ημερομηνία Λήξης
+                  </label>
+                  <input
+                    id="qa-due"
+                    type="date"
+                    className={field}
+                    value={dueDate}
+                    onChange={(e) => setDueDate(e.target.value)}
+                  />
+                  <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+                    Προαιρετικό — χωρίς αυτή, το χρέος θεωρείται ληξιπρόθεσμο 30
+                    ημέρες μετά την ημερομηνία κίνησης.
+                  </p>
+                </div>
+              ) : null}
 
               {duplicate ? <DuplicateWarning duplicate={duplicate} /> : null}
 

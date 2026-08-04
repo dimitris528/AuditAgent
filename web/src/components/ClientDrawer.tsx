@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   AlertCircle,
+  AlertTriangle,
   Archive,
   ArchiveRestore,
   Building2,
@@ -392,12 +393,25 @@ export function ClientDrawer({ clientId, period, vatRates, onClose }: Props) {
                               </div>
                               <div className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
                                 {t.date ?? "—"}
-                                {t.type ? ` · ${t.type}` : ""}
+                                {t.doc_type ? ` · ${t.doc_type}` : ""}
                                 {t.doc_number ? ` · ${t.doc_number}` : ""}
                                 {t.vat_amount != null
                                   ? ` · Φ.Π.Α. ${money(t.vat_amount)}`
                                   : ""}
                               </div>
+                              {/* Red marking follows the debt down to the row
+                                  it belongs to, not just the dashboard. */}
+                              {t.is_debt && t.status === "overdue" ? (
+                                <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-rose-100 px-2 py-0.5 text-[10px] font-semibold text-rose-700 dark:bg-rose-500/15 dark:text-rose-300">
+                                  <AlertTriangle className="h-3 w-3" />
+                                  Ληξιπρόθεσμο {t.days_overdue} ημ.
+                                  {t.due_date ? ` (λήξη ${t.due_date})` : ""}
+                                </div>
+                              ) : t.is_debt && t.due_date ? (
+                                <div className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                                  Λήξη {t.due_date}
+                                </div>
+                              ) : null}
                               {/* Only shown once something has been paid: on an
                                   untouched debt the remaining amount IS the
                                   original, and repeating it reads as noise. */}

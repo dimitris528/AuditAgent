@@ -21,7 +21,14 @@ export interface NewTransaction {
    *  mis-file the row. Omitted when creating a client inline by name. */
   client_id?: number;
   amount: number;
+  /** Which side of the VAT line `amount` is on. The server converts, so both
+   *  entry modes round identically. */
+  amount_basis?: "gross" | "net";
   type: string; // "Έσοδο" | "Έξοδο" | "Χρεωστούμενο"
+  /** Τύπος παραστατικού (see DocTypeInfo). */
+  doc_type?: string;
+  /** Χρεωστούμενα only — when payment falls due. */
+  due_date?: string;
   vat_rate: number;
   /** The ΦΠΑ printed on the document, when a scan read one. Stored verbatim in
    *  preference to the figure derived from `amount` and `vat_rate`. */

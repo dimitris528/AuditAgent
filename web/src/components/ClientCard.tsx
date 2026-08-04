@@ -1,4 +1,4 @@
-import { Building2 } from "lucide-react";
+import { AlertTriangle, Building2 } from "lucide-react";
 import type { ClientData } from "@/lib/types";
 import { money, moneyAbs } from "@/lib/format";
 import { clsx } from "@/lib/clsx";
@@ -37,18 +37,27 @@ function Metric({
 export function ClientCard({
   client,
   onOpen,
+  daysOverdue,
 }: {
   client: ClientData;
   onOpen?: () => void;
+  /** Set when this client has an overdue debt — drives the red marking. */
+  daysOverdue?: number;
 }) {
   const m = client.metrics;
   const vatRefund = m.net_vat < 0;
   const profitPositive = m.net_profit >= 0;
+  const overdue = daysOverdue !== undefined;
 
   return (
     <div
       className={clsx(
-        "flex flex-col rounded-2xl border border-slate-200 bg-white p-5 shadow-card transition dark:border-slate-800 dark:bg-slate-900 dark:shadow-card-dark",
+        "flex flex-col rounded-2xl border bg-white p-5 shadow-card transition dark:bg-slate-900 dark:shadow-card-dark",
+        // Red border rather than a red card: the figures inside still have to
+        // be readable, and a tinted card fights the metric colours.
+        overdue
+          ? "border-rose-300 dark:border-rose-500/40"
+          : "border-slate-200 dark:border-slate-800",
         onOpen &&
           "cursor-pointer hover:border-indigo-300 hover:shadow-md dark:hover:border-indigo-500/40",
       )}
@@ -77,6 +86,15 @@ export function ClientCard({
             {client.name.trim() || "—"}
           </h3>
         )}
+        {overdue ? (
+          <span
+            className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-full bg-rose-100 px-2 py-0.5 text-[10px] font-semibold text-rose-700 dark:bg-rose-500/15 dark:text-rose-300"
+            title={`Ληξιπρόθεσμο εδώ και ${daysOverdue} ημέρες`}
+          >
+            <AlertTriangle className="h-3 w-3" />
+            {daysOverdue} ημ.
+          </span>
+        ) : null}
       </div>
 
       {/* 5 core metrics */}
@@ -106,7 +124,12 @@ export function ClientCard({
         <Metric
           label="Χρεωστούμενα"
           value={money(m.debt)}
-          valueClass="text-amber-600 dark:text-amber-400"
+          valueClass={
+            overdue
+              ? "text-rose-600 dark:text-rose-400"
+              : "text-amber-600 dark:text-amber-400"
+          }
+          sub={overdue ? "Ληξιπρόθεσμο" : undefined}
         />
         <Metric
           label="Καθαρό Αποτέλεσμα"

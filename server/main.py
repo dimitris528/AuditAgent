@@ -23,6 +23,7 @@ Data source:
 import datetime as _dt
 import os
 from contextlib import asynccontextmanager
+from typing import Literal
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -126,8 +127,16 @@ class TransactionCreate(BaseModel):
     # selected client so a rename or a near-duplicate name cannot mis-file the
     # row. `client` stays required as the fallback for name-only callers.
     client_id: int | None = None
-    amount: float = Field(..., gt=0, description="GROSS amount incl. VAT, > 0")
+    amount: float = Field(..., gt=0, description="Amount > 0, read per amount_basis")
+    # Which side of the VAT line `amount` is on. An invoice states its net
+    # value and a till receipt only its total, so the form lets either be
+    # typed; converting HERE keeps both entry modes rounding identically
+    # instead of putting a second rounding rule in the browser.
+    amount_basis: Literal["gross", "net"] = "gross"
     type: str = Field(..., description="Έσοδο | Έξοδο | Χρεωστούμενο")
+    # Τύπος παραστατικού (finance.DOC_TYPES). Optional: rows predating it, and
+    # quick cash entries, legitimately have none.
+    doc_type: str | None = Field(default=None, max_length=64)
     vat_rate: float = Field(default=finance.DEFAULT_VAT_RATE, ge=0, le=1)
     # The ΦΠΑ actually printed on the document, when there is one. Stored
     # verbatim in preference to the derived figure: an invoice with several
@@ -135,6 +144,9 @@ class TransactionCreate(BaseModel):
     # cents on the paper. Omitted → derived from `amount` and `vat_rate`.
     vat_amount: float | None = Field(default=None, ge=0)
     date: str | None = Field(default=None, description="ISO date; defaults today")
+    # Χρεωστούμενα: when payment falls due. Omitted → the alerts infer it from
+    # the issue date plus the standard terms.
+    due_date: str | None = None
     description: str | None = None
     # Invoice identity — what the duplicate guard keys on.
     doc_number: str | None = Field(default=None, max_length=64)
@@ -258,9 +270,18 @@ def _serialize_txn(rec, paid_by_debt=None):
         "source": f.get("Source"),
         "doc_number": f.get("DocNumber"),
         "counterparty_afm": f.get("CounterpartyAFM"),
+        "doc_type": f.get("DocType"),
         "debt_id": f.get("DebtId"),
+        # Net of VAT, so the drawer shows both sides of the line without each
+        # caller re-deriving it (and rounding it differently). None when the
+        # row carries no VAT.
+        "net_amount": finance.txn_net(rec),
     }
     if row["is_debt"]:
+        due = finance.debt_due_date(rec)
+        row["due_date"] = due.isoformat() if due else None
+        row["status"] = finance.debt_status(rec)
+        row["days_overdue"] = finance.days_overdue(rec)
         # A partly-settled debt row holds what is STILL owed — settlement
         # shrinks it — so the original is reconstructed from the payment log
         # rather than stored a second time and left to drift.
@@ -343,6 +364,11 @@ def meta():
             "high_rate": finance.TAX_RATE_HIGH,
         },
         "txn_types": sorted(_TXN_TYPES),
+        "doc_types": [
+            {"value": d, "label": d, **finance.DOC_TYPE_META[d]}
+            for d in finance.DOC_TYPES
+        ],
+        "payment_terms": finance.DEFAULT_PAYMENT_TERMS,
         # Lets the UI hide the scan button on a deployment with no key rather
         # than offer a control that can only fail.
         "scan_enabled": ocr.is_configured(),
@@ -457,12 +483,22 @@ def dashboard(user: str = Depends(get_current_user),
     transactions are filtered: the client list is not period-scoped, so a client
     with no activity in the window still gets a card (showing zeros) rather than
     vanishing from the grid.
+
+    The one deliberate exception is `debt_alerts`, which is computed over the
+    whole book — see finance.build_debt_alerts. Its totals will therefore
+    exceed the header's period-scoped debt KPI whenever a period is selected,
+    and the UI labels it as all-time so the two are not read as contradicting
+    each other.
     """
     active, completed, transactions, is_demo = _load(user)
     start, end = finance.period_bounds(year, quarter, month)
     scoped = finance.filter_period(transactions, start, end)
     payload = finance.build_dashboard(active, completed, scoped,
-                                      trend_months=TREND_MONTHS)
+                                      trend_months=TREND_MONTHS,
+                                      # Alerts run over the UNFILTERED book:
+                                      # an overdue debt must not disappear
+                                      # because a past period is selected.
+                                      all_transactions=transactions)
     payload["username"] = user
     payload["demo"] = is_demo
     payload["scan_enabled"] = ocr.is_configured()
@@ -685,20 +721,44 @@ def create_transaction(body: TransactionCreate,
     if body.type not in _TXN_TYPES:
         raise HTTPException(status_code=422,
                             detail=f"type must be one of {sorted(_TXN_TYPES)}")
+    if body.doc_type and body.doc_type not in finance.DOC_TYPES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"doc_type must be one of {list(finance.DOC_TYPES)}")
     _require_db()
     is_debt = body.type == finance.DEBT_TYPE
     is_revenue = body.type == "Έσοδο"
+    credit = finance.is_credit_note(body.doc_type)
+    if credit and is_debt:
+        raise HTTPException(
+            status_code=422,
+            detail="Το πιστωτικό δεν μπορεί να καταχωρηθεί ως χρεωστούμενο.")
+
+    # Whichever side was typed, the row stores the GROSS figure.
+    gross = (finance.gross_from_net(body.amount, body.vat_rate)
+             if body.amount_basis == "net" else round(body.amount, 2))
+
     # Sign convention: revenue/debt are positive, expense negative — the
-    # analytics read the sign, not the Type column. VAT is derived from the
-    # gross amount; debts carry only the rate (VAT is stamped on Εξόφληση).
-    signed = body.amount if (is_revenue or is_debt) else -body.amount
+    # analytics read the sign, not the Type column.
+    signed = gross if (is_revenue or is_debt) else -gross
+    if credit:
+        # A Πιστωτικό reverses an earlier document, so it is booked negative
+        # WITHIN its own bucket: a credit note against a sale is less revenue,
+        # not an expense. sum_by_type sums each bucket signed, so this lands
+        # correctly without any special case downstream.
+        signed = -signed
+
+    # VAT is derived from the gross amount; debts carry only the rate (VAT is
+    # stamped on Εξόφληση).
     if is_debt:
         vat_amount = None
     elif body.vat_amount is not None:
-        # The figure printed on the document wins over the derived one. Stored
-        # as a magnitude: both VAT buckets hold positive cents (see
-        # finance.vat_for_write), and the bucket comes from the row's type.
-        vat_amount = round(abs(body.vat_amount), 2)
+        # The figure printed on the document wins over the derived one, but is
+        # re-oriented here: vat_for_write puts positive cents in both buckets
+        # and negative ones on a credit note, and a stored VAT that disagreed
+        # with its own row's sign would break the summation guarantee.
+        magnitude = round(abs(body.vat_amount), 2)
+        vat_amount = -magnitude if credit else magnitude
     else:
         vat_amount = finance.vat_for_write(signed, is_revenue, body.vat_rate)
     try:
@@ -732,8 +792,11 @@ def create_transaction(body: TransactionCreate,
                 client_id=body.client_id,
                 doc_number=body.doc_number,
                 counterparty_afm=body.counterparty_afm,
+                doc_type=body.doc_type,
+                due_date=body.due_date,
             )
-            return {"ok": True, "id": str(txn.id)}
+            return {"ok": True, "id": str(txn.id),
+                    "amount": signed, "vat_amount": vat_amount}
     except HTTPException:
         raise
     except SQLAlchemyError as exc:

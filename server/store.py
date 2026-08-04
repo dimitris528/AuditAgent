@@ -359,7 +359,7 @@ def create_transaction(session, user, client, amount, description=None,
                        txn_date=None, type_=None, source=None,
                        vat_amount=None, vat_rate=None, file_hash=None,
                        client_id=None, doc_number=None, counterparty_afm=None,
-                       debt_id=None):
+                       debt_id=None, doc_type=None, due_date=None):
     """Save a transaction.
 
     `client_id` selects an existing client explicitly (what the UI picker
@@ -385,6 +385,8 @@ def create_transaction(session, user, client, amount, description=None,
         file_hash=file_hash,
         doc_number=(doc_number or "").strip() or None,
         counterparty_afm=(counterparty_afm or "").strip() or None,
+        doc_type=(doc_type or "").strip() or None,
+        due_date=_coerce_date(due_date),
         debt_id=debt_id,
     )
     session.add(txn)

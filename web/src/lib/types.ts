@@ -91,6 +91,8 @@ export interface DashboardData {
     open_debts: number;
   };
   vat_rates: { value: number; label: string }[];
+  doc_types: DocTypeInfo[];
+  debt_alerts: DebtAlerts;
   username: string;
   demo: boolean;
   /** False when the backend has no ANTHROPIC_API_KEY — the scan button is then
@@ -127,6 +129,10 @@ export interface TransactionRow {
   source: string | null;
   doc_number: string | null;
   counterparty_afm: string | null;
+  /** Τύπος παραστατικού — one of DocTypeInfo["value"]. */
+  doc_type: string | null;
+  /** Value net of VAT, keeping the row's sign. Null when no VAT is stored. */
+  net_amount: number | null;
   /** Set on the revenue row a partial settlement created, pointing at the debt
    *  it paid down. */
   debt_id: number | null;
@@ -134,6 +140,72 @@ export interface TransactionRow {
   paid?: number;
   remaining?: number;
   original?: number;
+  /** Debt rows only — when it falls due and how late it is. */
+  due_date?: string | null;
+  status?: DebtStatus;
+  days_overdue?: number;
+}
+
+export type DebtStatus = "overdue" | "due_soon" | "current" | "unknown";
+
+export interface DocTypeInfo {
+  value: string;
+  label: string;
+  /** The transaction type this document normally implies — a form default,
+   *  never a constraint. */
+  suggests: string;
+  /** A Πιστωτικό reverses an earlier document: booked negative in its own
+   *  bucket rather than as the opposite bucket. */
+  credit: boolean;
+}
+
+/** One outstanding debt inside an alert row. */
+export interface AlertDebt {
+  id: string | null;
+  amount: number;
+  date: string | null;
+  due_date: string | null;
+  status: DebtStatus;
+  days_overdue: number;
+  doc_number: string | null;
+  doc_type: string | null;
+  description: string | null;
+}
+
+export interface DebtAlertClient {
+  /** Null when the debt names a client with no row — no drawer to open. */
+  id: string | null;
+  name: string;
+  key: string;
+  total: number;
+  overdue: number;
+  count: number;
+  /** The worst status among this client's debts. */
+  status: DebtStatus;
+  max_days_overdue: number;
+  debts: AlertDebt[];
+}
+
+export interface AgingBucket {
+  label: string;
+  amount: number;
+}
+
+/**
+ * Outstanding debt across the WHOLE book — deliberately not period-scoped,
+ * unlike every other figure on the dashboard. An overdue debt is a fact about
+ * today and must not vanish because a past period is selected.
+ */
+export interface DebtAlerts {
+  total: number;
+  overdue_total: number;
+  count: number;
+  overdue_count: number;
+  clients_affected: number;
+  clients_overdue: number;
+  aging: AgingBucket[];
+  clients: DebtAlertClient[];
+  payment_terms: number;
 }
 
 /** One entry in a debt's settlement history. */

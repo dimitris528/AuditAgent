@@ -5,6 +5,8 @@ import { ApiError } from "@/lib/errors";
 import type { DashboardData } from "@/lib/types";
 import { ExecutiveHeader } from "@/components/ExecutiveHeader";
 import { ClientGrid } from "@/components/ClientGrid";
+import { ClientDrawerProvider } from "@/components/ClientDrawerProvider";
+import { DebtAlerts } from "@/components/DebtAlerts";
 import { AnalyticsSection } from "@/components/AnalyticsSection";
 import { QuickAddTransaction } from "@/components/QuickAddTransaction";
 import { PeriodSelector } from "@/components/PeriodSelector";
@@ -68,44 +70,51 @@ export default async function Page({
   }
 
   return (
-    <div className="space-y-6">
-      {/* Page toolbar */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-bold tracking-tight text-slate-900 dark:text-white">
-            Πίνακας Ελέγχου
-          </h1>
-          <p className="text-sm text-slate-500 dark:text-slate-400">
-            {data.counts.active_clients} ενεργοί πελάτες · {data.counts.transactions} κινήσεις
-            {data.counts.open_debts > 0 ? ` · ${data.counts.open_debts} χρεωστούμενα` : ""}
-          </p>
+    // One drawer for the whole page, so an alert row and a client card cannot
+    // each open their own on top of the other. It wraps the spacing container
+    // rather than sitting inside it: the drawer is position:fixed, and a
+    // stray `space-y` margin would push its full-screen backdrop off the top.
+    <ClientDrawerProvider period={period} vatRates={data.vat_rates}>
+      <div className="space-y-6">
+        {/* Page toolbar */}
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h1 className="text-xl font-bold tracking-tight text-slate-900 dark:text-white">
+              Πίνακας Ελέγχου
+            </h1>
+            <p className="text-sm text-slate-500 dark:text-slate-400">
+              {data.counts.active_clients} ενεργοί πελάτες ·{" "}
+              {data.counts.transactions} κινήσεις
+              {data.counts.open_debts > 0
+                ? ` · ${data.counts.open_debts} χρεωστούμενα`
+                : ""}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            {data.demo ? (
+              <Badge tone="warning" icon={<FlaskConical className="h-3 w-3" />}>
+                DEMO — χωρίς βάση δεδομένων
+              </Badge>
+            ) : null}
+            <QuickAddTransaction
+              vatRates={data.vat_rates}
+              docTypes={data.doc_types}
+              defaultVatRate={0.24}
+              scanEnabled={data.scan_enabled}
+            />
+          </div>
         </div>
-        <div className="flex items-center gap-2">
-          {data.demo ? (
-            <Badge tone="warning" icon={<FlaskConical className="h-3 w-3" />}>
-              DEMO — χωρίς βάση δεδομένων
-            </Badge>
-          ) : null}
-          <QuickAddTransaction
-            vatRates={data.vat_rates}
-            defaultVatRate={0.24}
-            scanEnabled={data.scan_enabled}
-          />
+
+        {/* Period filter — every figure below reflects the selected window. */}
+        <div className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 dark:border-slate-800 dark:bg-slate-900">
+          <PeriodSelector period={data.period} />
         </div>
-      </div>
 
-      {/* Period filter — every figure below reflects the selected window. */}
-      <div className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 dark:border-slate-800 dark:bg-slate-900">
-        <PeriodSelector period={data.period} />
+        <DebtAlerts alerts={data.debt_alerts} />
+        <ExecutiveHeader header={data.header} />
+        <ClientGrid clients={data.clients} alerts={data.debt_alerts} />
+        <AnalyticsSection analytics={data.analytics} />
       </div>
-
-      <ExecutiveHeader header={data.header} />
-      <ClientGrid
-        clients={data.clients}
-        period={period}
-        vatRates={data.vat_rates}
-      />
-      <AnalyticsSection analytics={data.analytics} />
-    </div>
+    </ClientDrawerProvider>
   );
 }

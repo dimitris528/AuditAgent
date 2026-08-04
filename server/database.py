@@ -171,6 +171,13 @@ _ADDITIVE_MIGRATIONS = (
     "ON transactions (counterparty_afm)",
     "CREATE INDEX IF NOT EXISTS ix_transactions_debt_id "
     "ON transactions (debt_id)",
+    # Document type + the debt due date behind the overdue alerts.
+    "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS doc_type VARCHAR(64)",
+    "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS due_date DATE",
+    "CREATE INDEX IF NOT EXISTS ix_transactions_doc_type "
+    "ON transactions (doc_type)",
+    "CREATE INDEX IF NOT EXISTS ix_transactions_due_date "
+    "ON transactions (due_date)",
 )
 
 # Link transactions written before client_id existed to their client, matching
