@@ -1,0 +1,14 @@
+# Test-only dependencies. Deliberately NOT in requirements.txt: that file is
+# scoped to exactly what the FastAPI backend imports, so the Render image stays
+# small, and nothing here is needed to serve a request.
+#
+#   pip install -r requirements.txt -r requirements-dev.txt
+#   pytest
+#
+# The suite runs against a throwaway SQLite file (see tests/conftest.py) and
+# needs no Postgres and no ANTHROPIC_API_KEY.
+
+-r requirements.txt
+
+pytest==8.4.2
+httpx==0.28.1              # required by fastapi.testclient (Starlette TestClient)

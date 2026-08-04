@@ -63,6 +63,15 @@ AIRTABLE_USERS_TABLE = _env("AIRTABLE_USERS_TABLE", "Users")
 STRIPE_WEBHOOK_SECRET = _env("STRIPE_WEBHOOK_SECRET")
 
 
+# --- Anthropic (invoice OCR) ----------------------------------------------
+# Powers POST /api/v1/documents/scan — reading a PDF/photo of an invoice into
+# the transaction form (server/ocr.py). Leave empty to disable the endpoint:
+# it then returns 503 rather than silently handing back a blank extraction,
+# which would be filed as a blank invoice.
+ANTHROPIC_API_KEY = _env("ANTHROPIC_API_KEY")
+ANTHROPIC_MODEL = _env("ANTHROPIC_MODEL", "claude-opus-5")
+
+
 # Removed with the Streamlit retirement, because nothing read them any more:
 # OPENAI_API_KEY and AIRTABLE_TABLE_NAME (invoice OCR / publisher), SMTP_* (the
 # Streamlit password-reset mail), and the WHATSAPP_* block (which already had

@@ -9,9 +9,11 @@ import { ClientDrawer } from "./ClientDrawer";
 interface Props {
   clients: ClientData[];
   period: Pick<PeriodInfo, "year" | "quarter" | "month">;
+  /** Threaded through to the settlement modal in the drawer. */
+  vatRates: { value: number; label: string }[];
 }
 
-export function ClientGrid({ clients, period }: Props) {
+export function ClientGrid({ clients, period, vatRates }: Props) {
   const [openId, setOpenId] = useState<number | null>(null);
 
   return (
@@ -47,6 +49,7 @@ export function ClientGrid({ clients, period }: Props) {
       <ClientDrawer
         clientId={openId}
         period={period}
+        vatRates={vatRates}
         onClose={() => setOpenId(null)}
       />
     </section>

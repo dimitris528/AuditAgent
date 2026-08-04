@@ -2,10 +2,18 @@
 // read the httpOnly session cookie and forward to FastAPI with the Bearer
 // token — the browser never sees the token. (No server-only imports here, so
 // this module is safe to import from Client Components.)
-import { ApiError } from "./errors";
-import type { ClientDetail, ClientDetailPayload } from "./types";
+import { ApiError, DuplicateError } from "./errors";
+import type {
+  ClientDetail,
+  ClientDetailPayload,
+  DebtPaymentRow,
+  DuplicateClient,
+  DuplicateTransaction,
+  ScanResult,
+  SettlementResult,
+} from "./types";
 
-export { ApiError };
+export { ApiError, DuplicateError };
 
 export interface NewTransaction {
   client: string;
@@ -15,8 +23,15 @@ export interface NewTransaction {
   amount: number;
   type: string; // "Έσοδο" | "Έξοδο" | "Χρεωστούμενο"
   vat_rate: number;
+  /** The ΦΠΑ printed on the document, when a scan read one. Stored verbatim in
+   *  preference to the figure derived from `amount` and `vat_rate`. */
+  vat_amount?: number;
   date?: string;
   description?: string;
+  doc_number?: string;
+  counterparty_afm?: string;
+  /** Save despite a duplicate — set only after the user has seen it. */
+  force?: boolean;
 }
 
 async function unwrap<T>(res: Response, fallback: string): Promise<T> {
@@ -97,12 +112,90 @@ export async function createTransaction(
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
+    // A duplicate arrives as a 409 whose detail carries the row it collided
+    // with, so the form can show it and offer to save anyway.
+    const detail = data?.detail;
+    if (res.status === 409 && detail?.duplicate) {
+      throw new DuplicateError(
+        detail.message || "Το παραστατικό υπάρχει ήδη.",
+        detail.duplicate as DuplicateTransaction,
+      );
+    }
     throw new ApiError(
-      data?.detail || data?.error || `Create failed (${res.status})`,
+      (typeof detail === "string" ? detail : detail?.message) ||
+        data?.error ||
+        `Create failed (${res.status})`,
       res.status,
     );
   }
   return data;
+}
+
+/** Look for the same invoice without writing anything. */
+export async function checkTransactionDuplicate(body: {
+  doc_number?: string;
+  counterparty_afm?: string;
+  client?: string;
+  date?: string;
+}): Promise<{ duplicate: DuplicateTransaction | null }> {
+  const res = await fetch(`/api/transactions/check-duplicate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return unwrap(res, "Αποτυχία ελέγχου διπλοεγγραφής");
+}
+
+export async function checkClientDuplicate(body: {
+  name?: string;
+  afm?: string;
+  exclude_id?: number;
+}): Promise<{ duplicate: DuplicateClient | null }> {
+  const res = await fetch(`/api/clients/check-duplicate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return unwrap(res, "Αποτυχία ελέγχου διπλοεγγραφής");
+}
+
+/**
+ * Εξόφληση χρέους. Omit `amount` to pay off the whole remaining balance —
+ * the server knows it better than the browser does.
+ */
+export async function settleDebt(
+  id: string,
+  body: { amount?: number; vat_rate?: number; date?: string; note?: string },
+): Promise<SettlementResult> {
+  const res = await fetch(`/api/transactions/${id}/settle`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return unwrap(res, "Αποτυχία εξόφλησης");
+}
+
+export async function getDebtPayments(
+  id: string,
+): Promise<{ id: string; paid: number; remaining: number; payments: DebtPaymentRow[] }> {
+  const res = await fetch(`/api/transactions/${id}/payments`, {
+    cache: "no-store",
+  });
+  return unwrap(res, "Αποτυχία φόρτωσης ιστορικού");
+}
+
+/**
+ * Send a PDF / photo of an invoice for OCR. Writes nothing — the extraction
+ * comes back for the user to review in the form.
+ */
+export async function scanDocument(file: File): Promise<ScanResult> {
+  const form = new FormData();
+  form.append("file", file, file.name || "document");
+  const res = await fetch(`/api/documents/scan`, {
+    method: "POST",
+    body: form,
+  });
+  return unwrap(res, "Αποτυχία σάρωσης παραστατικού");
 }
 
 export async function login(

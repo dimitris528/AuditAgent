@@ -154,6 +154,17 @@ class Transaction(SQLModel, table=True):
     description: Optional[str] = Field(default=None, max_length=500)
     source: Optional[str] = Field(default=None, max_length=32)
     file_hash: Optional[str] = Field(default=None, index=True, max_length=64)
+    # --- Invoice identity -------------------------------------------------
+    # The document number and the issuer's ΑΦΜ, filled in by hand or by the OCR
+    # scanner. Together with `date` these are what the duplicate guard keys on:
+    # one invoice can only be entered once.
+    doc_number: Optional[str] = Field(default=None, index=True, max_length=64)
+    counterparty_afm: Optional[str] = Field(default=None, index=True, max_length=32)
+    # Set on the revenue rows a PARTIAL settlement creates, pointing back at the
+    # Χρεωστούμενο row they paid down, so a debt's history can be reconstructed
+    # from the transactions alone.
+    debt_id: Optional[int] = Field(default=None, foreign_key="transactions.id",
+                                   index=True)
     created_at: dt.datetime = Field(default_factory=_utcnow,
                                     sa_column=_tstz(nullable=False))
 
@@ -172,7 +183,65 @@ class Transaction(SQLModel, table=True):
                 "Description": self.description,
                 "Source": self.source,
                 "FileHash": self.file_hash,
+                "DocNumber": self.doc_number,
+                "CounterpartyAFM": self.counterparty_afm,
+                "DebtId": self.debt_id,
             },
+        }
+
+
+class DebtPayment(SQLModel, table=True):
+    """One payment made against a Χρεωστούμενο row — the settlement log.
+
+    Its own table rather than something inferred from the transactions,
+    because a FULL settlement flips the debt row itself into "Έσοδο" (exactly
+    what Εξόφληση has always done). Once that happens the row no longer says it
+    was ever a debt, so without this log the history of a settled debt would be
+    gone. Every payment — partial or final — writes one row here.
+
+    `remaining` is stored rather than derived: it is what was still owed at the
+    moment of that payment, and recomputing it later from a running total would
+    silently change historical rows if an earlier payment were ever corrected.
+    """
+
+    __tablename__ = "debt_payments"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    # The Χρεωστούμενο row being paid down.
+    debt_id: int = Field(foreign_key="transactions.id", index=True)
+    # The revenue row this payment produced: a newly created one for a partial
+    # payment, or the flipped debt row itself for the final one.
+    payment_txn_id: Optional[int] = Field(default=None,
+                                          foreign_key="transactions.id", index=True)
+    client_id: Optional[int] = Field(default=None, foreign_key="clients.id", index=True)
+    client: str = Field(max_length=200)
+    # Positive magnitude paid, and what was left owing AFTER it.
+    amount: float
+    remaining: float
+    vat_amount: Optional[float] = Field(default=None)
+    vat_rate: Optional[float] = Field(default=None)
+    paid_date: Optional[dt.date] = Field(default=None, index=True)
+    # "full" | "partial"
+    kind: str = Field(default="partial", max_length=16)
+    note: Optional[str] = Field(default=None, max_length=500)
+    created_at: dt.datetime = Field(default_factory=_utcnow,
+                                    sa_column=_tstz(nullable=False))
+
+    def to_detail(self):
+        return {
+            "id": self.id,
+            "debt_id": self.debt_id,
+            "payment_txn_id": self.payment_txn_id,
+            "client": self.client,
+            "amount": round(self.amount, 2),
+            "remaining": round(self.remaining, 2),
+            "vat_amount": self.vat_amount,
+            "vat_rate": self.vat_rate,
+            "paid_date": self.paid_date.isoformat() if self.paid_date else None,
+            "kind": self.kind,
+            "note": self.note,
+            "created_at": _iso_z(self.created_at),
         }
 
 

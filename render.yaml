@@ -50,6 +50,11 @@ services:
       # rather than trusting unverified payloads.
       - key: STRIPE_WEBHOOK_SECRET
         sync: false
+      # Anthropic key for the invoice-scan endpoint (POST
+      # /api/v1/documents/scan). Unset => the endpoint returns 503 and the UI
+      # hides the scan button; everything else works unchanged.
+      - key: ANTHROPIC_API_KEY
+        sync: false
       # JWT signing key — Render generates a strong random value and keeps it
       # stable across deploys.
       - key: JWT_SECRET

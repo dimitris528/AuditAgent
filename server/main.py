@@ -24,7 +24,7 @@ import datetime as _dt
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, EmailStr, Field
@@ -35,7 +35,7 @@ import auth
 import finance
 import passwords
 from config import STRIPE_WEBHOOK_SECRET
-from server import database, demo, store
+from server import database, demo, ocr, store
 from server.webhooks import router as webhooks_router
 
 @asynccontextmanager
@@ -129,8 +129,29 @@ class TransactionCreate(BaseModel):
     amount: float = Field(..., gt=0, description="GROSS amount incl. VAT, > 0")
     type: str = Field(..., description="Έσοδο | Έξοδο | Χρεωστούμενο")
     vat_rate: float = Field(default=finance.DEFAULT_VAT_RATE, ge=0, le=1)
+    # The ΦΠΑ actually printed on the document, when there is one. Stored
+    # verbatim in preference to the derived figure: an invoice with several
+    # lines at different rates, or with its own rounding, must reconcile to the
+    # cents on the paper. Omitted → derived from `amount` and `vat_rate`.
+    vat_amount: float | None = Field(default=None, ge=0)
     date: str | None = Field(default=None, description="ISO date; defaults today")
     description: str | None = None
+    # Invoice identity — what the duplicate guard keys on.
+    doc_number: str | None = Field(default=None, max_length=64)
+    counterparty_afm: str | None = Field(default=None, max_length=32)
+    # Set by the UI after the user has been shown the duplicate and chosen to
+    # save anyway. Never defaulted true: the whole point is that the second
+    # entry of an invoice is a decision, not an accident.
+    force: bool = False
+
+
+class DuplicateCheck(BaseModel):
+    """Ask about an invoice before saving it, so the form can warn while it is
+    still being filled in rather than on submit."""
+    doc_number: str | None = Field(default=None, max_length=64)
+    counterparty_afm: str | None = Field(default=None, max_length=32)
+    client: str | None = Field(default=None, max_length=200)
+    date: str | None = None
 
 
 class DebtResolve(BaseModel):
@@ -139,11 +160,26 @@ class DebtResolve(BaseModel):
     date: str | None = None
 
 
+class DebtSettle(BaseModel):
+    """Εξόφληση χρέους. `amount` omitted = pay the whole remaining balance,
+    which is what the one-click "full settlement" button sends."""
+    amount: float | None = Field(default=None, gt=0)
+    vat_rate: float | None = Field(default=None, ge=0, le=1)
+    date: str | None = None
+    note: str | None = Field(default=None, max_length=500)
+
+
 class ClientCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     afm: str | None = Field(default=None, max_length=32)
     contact: str | None = Field(default=None, max_length=200)
     notes: str | None = Field(default=None, max_length=2000)
+
+
+class ClientDuplicateCheck(BaseModel):
+    name: str | None = Field(default=None, max_length=200)
+    afm: str | None = Field(default=None, max_length=32)
+    exclude_id: int | None = None
 
 
 class ClientUpdate(BaseModel):
@@ -204,13 +240,14 @@ def _load(username):
         raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
 
 
-def _serialize_txn(rec):
+def _serialize_txn(rec, paid_by_debt=None):
     f = rec.get("fields", {})
     d = finance.txn_date(rec)
-    return {
+    amount = finance.amount(rec)
+    row = {
         "id": rec.get("id"),
         "client": f.get("Category"),
-        "amount": finance.amount(rec),
+        "amount": amount,
         "type": f.get("Type"),
         "is_revenue": finance.is_revenue(rec),
         "is_debt": finance.is_debt(rec),
@@ -219,6 +256,38 @@ def _serialize_txn(rec):
         "date": d.isoformat() if d else None,
         "description": f.get("Description"),
         "source": f.get("Source"),
+        "doc_number": f.get("DocNumber"),
+        "counterparty_afm": f.get("CounterpartyAFM"),
+        "debt_id": f.get("DebtId"),
+    }
+    if row["is_debt"]:
+        # A partly-settled debt row holds what is STILL owed — settlement
+        # shrinks it — so the original is reconstructed from the payment log
+        # rather than stored a second time and left to drift.
+        try:
+            paid = (paid_by_debt or {}).get(int(rec.get("id")), 0.0)
+        except (TypeError, ValueError):
+            paid = 0.0
+        row["paid"] = round(paid, 2)
+        row["remaining"] = round(amount, 2)
+        row["original"] = round(amount + paid, 2)
+    return row
+
+
+def _duplicate_payload(txn):
+    """The existing row a duplicate check matched, in the shape the warning
+    banner renders."""
+    if txn is None:
+        return None
+    return {
+        "id": str(txn.id),
+        "client": txn.client,
+        "amount": round(abs(float(txn.amount or 0)), 2),
+        "type": txn.type,
+        "date": txn.date.isoformat() if txn.date else None,
+        "doc_number": txn.doc_number,
+        "counterparty_afm": txn.counterparty_afm,
+        "description": txn.description,
     }
 
 
@@ -274,6 +343,11 @@ def meta():
             "high_rate": finance.TAX_RATE_HIGH,
         },
         "txn_types": sorted(_TXN_TYPES),
+        # Lets the UI hide the scan button on a deployment with no key rather
+        # than offer a control that can only fail.
+        "scan_enabled": ocr.is_configured(),
+        "scan_accepts": list(ocr.SUPPORTED_TYPES),
+        "scan_max_bytes": ocr.MAX_BYTES,
     }
 
 
@@ -391,6 +465,7 @@ def dashboard(user: str = Depends(get_current_user),
                                       trend_months=TREND_MONTHS)
     payload["username"] = user
     payload["demo"] = is_demo
+    payload["scan_enabled"] = ocr.is_configured()
     payload["period"] = {
         "year": year,
         "quarter": quarter,
@@ -449,20 +524,58 @@ def list_clients(user: str = Depends(get_current_user),
         raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
 
 
+_DUPLICATE_MESSAGES = {
+    "afm": "Υπάρχει ήδη πελάτης με αυτό το Α.Φ.Μ.: «{name}».",
+    "name": "Υπάρχει ήδη πελάτης με αυτό το όνομα: «{name}».",
+}
+
+
 @app.post("/api/v1/clients", status_code=201)
 def create_client(body: ClientCreate, user: str = Depends(get_current_user)):
-    """Create a client, e.g. inline from the transaction form."""
+    """Create a client, e.g. inline from the transaction form.
+
+    Refuses — it does not merely warn — when the client already exists. A
+    duplicate client card silently splits one company's revenue, VAT and tax
+    bar across two cards, and nothing on the dashboard makes that visible
+    afterwards. The ΑΦΜ is the strict check; the name check is Greek
+    case- and accent-insensitive, so "ΝΗΣΙΔΑ CAFE" collides with the existing
+    "Νησίδα Café" rather than opening a second card for it.
+    """
     _require_db()
     try:
         with database.session_scope() as session:
             tenant = _resolve_user(session, user)
-            if store.find_client(session, tenant, body.name):
-                raise HTTPException(status_code=409,
-                                    detail="Υπάρχει ήδη πελάτης με αυτό το όνομα.")
+            clash, reason = store.detect_client_duplicate(
+                session, tenant, name=body.name, afm=body.afm)
+            if clash is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=_DUPLICATE_MESSAGES[reason].format(name=clash.name))
             client = store.create_client(
                 session, tenant, body.name,
                 afm=body.afm, contact=body.contact, notes=body.notes)
             return client.to_detail()
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+
+
+@app.post("/api/v1/clients/check-duplicate")
+def check_client_duplicate(body: ClientDuplicateCheck,
+                           user: str = Depends(get_current_user)):
+    """Non-destructive lookup so the picker can warn WHILE a name is being
+    typed, instead of only rejecting the save."""
+    _require_db()
+    try:
+        with database.session_scope() as session:
+            tenant = _resolve_user(session, user)
+            clash, reason = store.detect_client_duplicate(
+                session, tenant, name=body.name, afm=body.afm,
+                exclude_id=body.exclude_id)
+            if clash is None:
+                return {"duplicate": None}
+            return {"duplicate": {**clash.to_detail(), "matched_by": reason}}
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
@@ -491,10 +604,17 @@ def get_client(client_id: int, user: str = Depends(get_current_user),
             scoped = sorted(scoped,
                             key=lambda t: finance.txn_date(t) or _dt.date.min,
                             reverse=True)
+            # The settlement log is NOT period-scoped: a debt raised last
+            # quarter and paid this one must still show what has been paid
+            # against it, and hiding earlier payments would make the remaining
+            # balance look unexplained.
+            payments = store.get_debt_payments(session, tenant, client=client)
+            paid = store.paid_by_debt(payments)
             return {
                 "client": client.to_detail(),
                 "summary": _client_summary(client.name, scoped),
-                "transactions": [_serialize_txn(t) for t in scoped],
+                "transactions": [_serialize_txn(t, paid) for t in scoped],
+                "payments": [p.to_detail() for p in payments],
             }
     except HTTPException:
         raise
@@ -517,12 +637,17 @@ def update_client(client_id: int, body: ClientUpdate,
     try:
         with database.session_scope() as session:
             tenant = _resolve_user(session, user)
-            if "name" in fields and fields["name"]:
-                clash = store.find_client(session, tenant, fields["name"])
-                if clash is not None and clash.id != client_id:
-                    raise HTTPException(
-                        status_code=409,
-                        detail="Υπάρχει ήδη άλλος πελάτης με αυτό το όνομα.")
+            # Both the rename and the ΑΦΜ are checked, and against every OTHER
+            # client only — editing a client without changing either must not
+            # collide with itself.
+            clash, reason = store.detect_client_duplicate(
+                session, tenant,
+                name=fields.get("name"), afm=fields.get("afm"),
+                exclude_id=client_id)
+            if clash is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=_DUPLICATE_MESSAGES[reason].format(name=clash.name))
             client = store.update_client(session, tenant, client_id, **fields)
             if client is None:
                 raise HTTPException(status_code=404, detail="Ο πελάτης δεν βρέθηκε.")
@@ -567,11 +692,35 @@ def create_transaction(body: TransactionCreate,
     # analytics read the sign, not the Type column. VAT is derived from the
     # gross amount; debts carry only the rate (VAT is stamped on Εξόφληση).
     signed = body.amount if (is_revenue or is_debt) else -body.amount
-    vat_amount = None if is_debt else finance.vat_for_write(
-        signed, is_revenue, body.vat_rate)
+    if is_debt:
+        vat_amount = None
+    elif body.vat_amount is not None:
+        # The figure printed on the document wins over the derived one. Stored
+        # as a magnitude: both VAT buckets hold positive cents (see
+        # finance.vat_for_write), and the bucket comes from the row's type.
+        vat_amount = round(abs(body.vat_amount), 2)
+    else:
+        vat_amount = finance.vat_for_write(signed, is_revenue, body.vat_rate)
     try:
         with database.session_scope() as session:
             tenant = _resolve_user(session, user)
+            # Same invoice, same issuer, same date = the same document being
+            # entered twice. WARN rather than refuse: a genuine reissue under
+            # the same number exists, so the caller can repeat the request with
+            # force=true once the user has seen what it collided with.
+            if not body.force:
+                clash = store.find_duplicate_transaction(
+                    session, tenant, body.doc_number,
+                    counterparty_afm=body.counterparty_afm,
+                    client_name=body.client,
+                    txn_date=body.date)
+                if clash is not None:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "message": "Το παραστατικό υπάρχει ήδη καταχωρημένο.",
+                            "duplicate": _duplicate_payload(clash),
+                        })
             txn = store.create_transaction(
                 session, tenant, body.client.strip(), signed,
                 description=(body.description or None),
@@ -581,6 +730,8 @@ def create_transaction(body: TransactionCreate,
                 vat_amount=vat_amount,
                 vat_rate=body.vat_rate,
                 client_id=body.client_id,
+                doc_number=body.doc_number,
+                counterparty_afm=body.counterparty_afm,
             )
             return {"ok": True, "id": str(txn.id)}
     except HTTPException:
@@ -589,28 +740,159 @@ def create_transaction(body: TransactionCreate,
         raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
 
 
-@app.post("/api/transactions/{record_id}/resolve")
-def resolve_debt(record_id: str, body: DebtResolve,
-                 user: str = Depends(get_current_user)):
-    """Εξόφληση: flip a Χρεωστούμενο row to realised revenue and stamp its
-    output VAT from the given rate."""
+@app.post("/api/v1/transactions/check-duplicate")
+def check_transaction_duplicate(body: DuplicateCheck,
+                                user: str = Depends(get_current_user)):
+    """Look for the same invoice without writing anything — the form calls this
+    as soon as a scan fills the document number in, so the warning appears
+    before the user has retyped the whole thing."""
     _require_db()
-    vat_amount = finance.vat_for_write(body.amount, True, body.vat_rate)
     try:
         with database.session_scope() as session:
             tenant = _resolve_user(session, user)
-            # store.resolve_debt is tenant-scoped, so another tenant's id is
-            # indistinguishable from a missing one.
-            txn = store.resolve_debt(session, tenant, record_id,
-                                     paid_date=body.date,
-                                     vat_amount=vat_amount, vat_rate=body.vat_rate)
-            if txn is None:
-                raise HTTPException(status_code=404, detail="Η κίνηση δεν βρέθηκε.")
-            return {"ok": True, "id": str(txn.id)}
+            clash = store.find_duplicate_transaction(
+                session, tenant, body.doc_number,
+                counterparty_afm=body.counterparty_afm,
+                client_name=body.client,
+                txn_date=body.date)
+            return {"duplicate": _duplicate_payload(clash)}
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
         raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+
+
+def _settle(record_id, amount, vat_rate, when, note, user):
+    """Shared body of the two settlement endpoints."""
+    _require_db()
+    try:
+        with database.session_scope() as session:
+            tenant = _resolve_user(session, user)
+            # store.settle_debt is tenant-scoped, so another tenant's id is
+            # indistinguishable from a missing one.
+            result = store.settle_debt(session, tenant, record_id,
+                                       amount=amount, vat_rate=vat_rate,
+                                       paid_date=when, note=note)
+            if result is None:
+                raise HTTPException(status_code=404, detail="Η κίνηση δεν βρέθηκε.")
+            txn, payment = result
+            return {
+                "ok": True,
+                "id": str(txn.id),
+                "settled": payment.kind == store.SETTLEMENT_FULL,
+                "paid": round(payment.amount, 2),
+                "remaining": round(payment.remaining, 2),
+                "payment": payment.to_detail(),
+            }
+    except store.SettlementError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+
+
+@app.post("/api/v1/transactions/{record_id}/settle")
+def settle_debt(record_id: str, body: DebtSettle,
+                user: str = Depends(get_current_user)):
+    """Εξόφληση Χρέους — full or partial.
+
+    Omitting `amount` pays off the whole remaining balance and flips the row to
+    realised revenue. Sending less books that much as revenue now and leaves
+    the rest outstanding, so a €500 debt paid €200 leaves €300. Either way the
+    payment is written to the settlement log and every client balance
+    recalculates from it.
+    """
+    return _settle(record_id, body.amount, body.vat_rate, body.date, body.note,
+                   user)
+
+
+@app.post("/api/transactions/{record_id}/resolve")
+def resolve_debt(record_id: str, body: DebtResolve,
+                 user: str = Depends(get_current_user)):
+    """Εξόφληση (legacy path, kept for existing callers).
+
+    Now backed by the same settlement logic, which also fixes the case it got
+    wrong: sending less than the balance used to flip the WHOLE debt to revenue
+    while stamping VAT computed on the smaller figure. It now settles exactly
+    the amount sent.
+    """
+    return _settle(record_id, body.amount, body.vat_rate, body.date, None, user)
+
+
+@app.get("/api/v1/transactions/{record_id}/payments")
+def debt_payments(record_id: str, user: str = Depends(get_current_user)):
+    """The settlement history of one debt, newest first."""
+    _require_db()
+    try:
+        with database.session_scope() as session:
+            tenant = _resolve_user(session, user)
+            txn = store.get_transaction(session, tenant, record_id)
+            if txn is None:
+                raise HTTPException(status_code=404, detail="Η κίνηση δεν βρέθηκε.")
+            rows = store.get_debt_payments(session, tenant, debt_id=txn.id)
+            return {
+                "id": str(txn.id),
+                "remaining": round(abs(float(txn.amount or 0)), 2)
+                if finance.DEBT_TYPE == (txn.type or "").strip() else 0.0,
+                "paid": round(sum(r.amount for r in rows), 2),
+                "payments": [r.to_detail() for r in rows],
+            }
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+
+
+# --------------------------------------------------------------------------
+# Document scanning (OCR)
+# --------------------------------------------------------------------------
+@app.post("/api/v1/documents/scan")
+async def scan_document(file: UploadFile = File(...),
+                        user: str = Depends(get_current_user)):
+    """Read a PDF / photo of an invoice into the transaction form.
+
+    Writes NOTHING. The extraction comes back for the user to review and save
+    through the ordinary create endpoint, so a misread never lands in the books
+    unseen. The client match and duplicate check ride along so the form can
+    pre-select the client it recognised and warn on an invoice already filed.
+    """
+    if not ocr.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Η σάρωση παραστατικών δεν έχει ρυθμιστεί (ορίστε ANTHROPIC_API_KEY).")
+    data = await file.read()
+    try:
+        extracted = ocr.extract(data, file.content_type, filename=file.filename)
+    except ocr.OcrError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+
+    payload = {"extracted": extracted, "client_match": None, "duplicate": None}
+    # The lookups need a database; without one the extraction is still useful
+    # on its own, so this is not fatal.
+    if not database.is_configured():
+        return payload
+    try:
+        with database.session_scope() as session:
+            tenant = _resolve_user(session, user)
+            match, reason = store.detect_client_duplicate(
+                session, tenant,
+                name=extracted.get("counterparty_name"),
+                afm=extracted.get("counterparty_afm"))
+            if match is not None:
+                payload["client_match"] = {**match.to_detail(),
+                                           "matched_by": reason}
+            payload["duplicate"] = _duplicate_payload(
+                store.find_duplicate_transaction(
+                    session, tenant, extracted.get("doc_number"),
+                    counterparty_afm=extracted.get("counterparty_afm"),
+                    client_name=extracted.get("counterparty_name"),
+                    txn_date=extracted.get("doc_date")))
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+    return payload
 
 
 @app.delete("/api/transactions/{record_id}")

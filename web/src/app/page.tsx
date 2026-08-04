@@ -86,7 +86,11 @@ export default async function Page({
               DEMO — χωρίς βάση δεδομένων
             </Badge>
           ) : null}
-          <QuickAddTransaction vatRates={data.vat_rates} defaultVatRate={0.24} />
+          <QuickAddTransaction
+            vatRates={data.vat_rates}
+            defaultVatRate={0.24}
+            scanEnabled={data.scan_enabled}
+          />
         </div>
       </div>
 
@@ -96,7 +100,11 @@ export default async function Page({
       </div>
 
       <ExecutiveHeader header={data.header} />
-      <ClientGrid clients={data.clients} period={period} />
+      <ClientGrid
+        clients={data.clients}
+        period={period}
+        vatRates={data.vat_rates}
+      />
       <AnalyticsSection analytics={data.analytics} />
     </div>
   );

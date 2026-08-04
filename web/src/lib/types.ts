@@ -93,6 +93,9 @@ export interface DashboardData {
   vat_rates: { value: number; label: string }[];
   username: string;
   demo: boolean;
+  /** False when the backend has no ANTHROPIC_API_KEY — the scan button is then
+   *  hidden rather than offered as a control that can only fail. */
+  scan_enabled: boolean;
   period: PeriodInfo;
 }
 
@@ -112,6 +115,7 @@ export interface ClientDetail {
 export interface TransactionRow {
   id: string | null;
   client: string | null;
+  /** On a debt row this is what is STILL owed — a settlement shrinks it. */
   amount: number;
   type: string | null;
   is_revenue: boolean;
@@ -121,6 +125,82 @@ export interface TransactionRow {
   date: string | null;
   description: string | null;
   source: string | null;
+  doc_number: string | null;
+  counterparty_afm: string | null;
+  /** Set on the revenue row a partial settlement created, pointing at the debt
+   *  it paid down. */
+  debt_id: number | null;
+  /** Debt rows only — the settlement progress behind `amount`. */
+  paid?: number;
+  remaining?: number;
+  original?: number;
+}
+
+/** One entry in a debt's settlement history. */
+export interface DebtPaymentRow {
+  id: number;
+  debt_id: number;
+  payment_txn_id: number | null;
+  client: string;
+  amount: number;
+  /** What was still owed immediately AFTER this payment. */
+  remaining: number;
+  vat_amount: number | null;
+  vat_rate: number | null;
+  paid_date: string | null;
+  kind: "full" | "partial";
+  note: string | null;
+  created_at: string | null;
+}
+
+export interface SettlementResult {
+  ok: boolean;
+  id: string;
+  settled: boolean;
+  paid: number;
+  remaining: number;
+  payment: DebtPaymentRow;
+}
+
+/** An existing row a duplicate check matched. */
+export interface DuplicateTransaction {
+  id: string;
+  client: string | null;
+  amount: number;
+  type: string | null;
+  date: string | null;
+  doc_number: string | null;
+  counterparty_afm: string | null;
+  description: string | null;
+}
+
+export type DuplicateClient = ClientDetail & { matched_by: "afm" | "name" };
+
+/** What the OCR scanner read off a document, for the user to review. */
+export interface ScannedDocument {
+  total_amount: number | null;
+  vat_amount: number | null;
+  net_amount: number | null;
+  vat_rate: number | null;
+  doc_date: string | null;
+  doc_number: string | null;
+  counterparty_name: string | null;
+  counterparty_afm: string | null;
+  recipient_name: string | null;
+  recipient_afm: string | null;
+  currency: string | null;
+  document_type: string | null;
+  confidence: "high" | "medium" | "low";
+  notes: string | null;
+  filename: string | null;
+}
+
+export interface ScanResult {
+  extracted: ScannedDocument;
+  /** The existing client the issuer was recognised as, if any. */
+  client_match: DuplicateClient | null;
+  /** Set when this document has already been filed. */
+  duplicate: DuplicateTransaction | null;
 }
 
 export interface ClientSummary {
@@ -141,4 +221,7 @@ export interface ClientDetailPayload {
   client: ClientDetail;
   summary: ClientSummary;
   transactions: TransactionRow[];
+  /** NOT period-scoped: a debt raised last quarter and paid this one still has
+   *  to show what has been paid against it. */
+  payments: DebtPaymentRow[];
 }

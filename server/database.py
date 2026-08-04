@@ -158,6 +158,19 @@ _ADDITIVE_MIGRATIONS = (
     "REFERENCES clients(id)",
     "CREATE INDEX IF NOT EXISTS ix_transactions_client_id "
     "ON transactions (client_id)",
+    # Invoice identity + the partial-settlement back-link. The debt_payments
+    # table itself needs nothing here: create_all() issues CREATE TABLE for
+    # tables that do not exist yet, and only skips ones that do.
+    "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS doc_number VARCHAR(64)",
+    "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS counterparty_afm VARCHAR(32)",
+    "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS debt_id INTEGER "
+    "REFERENCES transactions(id)",
+    "CREATE INDEX IF NOT EXISTS ix_transactions_doc_number "
+    "ON transactions (doc_number)",
+    "CREATE INDEX IF NOT EXISTS ix_transactions_counterparty_afm "
+    "ON transactions (counterparty_afm)",
+    "CREATE INDEX IF NOT EXISTS ix_transactions_debt_id "
+    "ON transactions (debt_id)",
 )
 
 # Link transactions written before client_id existed to their client, matching

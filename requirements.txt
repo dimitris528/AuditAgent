@@ -24,6 +24,15 @@ PyJWT==2.10.1              # JWT bearer auth (auth.py — `import jwt`)
 stripe==15.4.0             # billing webhook signature check (server/webhooks.py)
 python-dotenv==1.1.1       # .env loading (config.py)
 email-validator==2.3.0     # pydantic EmailStr on the registration endpoint
+python-multipart==0.0.32   # REQUIRED by FastAPI for UploadFile — without it the
+                           # invoice-scan endpoint raises at import time, not on
+                           # first request
+
+# --- Invoice OCR ----------------------------------------------------------
+# server/ocr.py reads a scanned PDF/photo into the transaction form via the
+# Claude Messages API. Inactive without ANTHROPIC_API_KEY (the endpoint then
+# reports 503), but the import must still resolve.
+anthropic==0.120.2
 
 # --- PostgreSQL (Supabase) ------------------------------------------------
 # The live data layer. server/database.py builds the engine, server/models.py
