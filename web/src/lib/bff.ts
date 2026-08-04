@@ -5,7 +5,8 @@
 // FastAPI returned into the { error } shape the client fetchers expect. The
 // browser never sees the token.
 import { NextResponse } from "next/server";
-import { API_BASE_URL, getToken } from "./session";
+import { getToken } from "./session";
+import { BackendUnavailableError, backendFetch } from "./backend";
 
 /**
  * Flatten a FastAPI error body into one message.
@@ -29,6 +30,26 @@ export function errorMessage(data: unknown, fallback: string): string {
 }
 
 /**
+ * The 502 returned when the backend could not be reached.
+ *
+ * Shared so every route answers identically. The message carries the RESOLVED
+ * base URL, which is the one fact that makes this failure diagnosable — the
+ * outage this was written for showed a generic "backend unavailable" while the
+ * backend was healthy and the frontend was calling localhost.
+ */
+export function backendUnavailable(err: unknown): NextResponse {
+  return NextResponse.json(
+    {
+      error:
+        err instanceof BackendUnavailableError
+          ? err.message
+          : "Το backend δεν είναι διαθέσιμο.",
+    },
+    { status: 502 },
+  );
+}
+
+/**
  * Proxy a JSON request to the backend.
  *
  * On failure the ORIGINAL body is passed through alongside the flattened
@@ -47,18 +68,23 @@ export async function proxyJson(
   const hasBody = options.body !== undefined;
   let res: Response;
   try {
-    res = await fetch(`${API_BASE_URL}${path}`, {
+    res = await backendFetch(path, {
       method: options.method ?? "GET",
-      cache: "no-store",
       headers: {
         Authorization: `Bearer ${token}`,
         ...(hasBody ? { "Content-Type": "application/json" } : {}),
       },
+      // Serialised to a string, so a retry can replay it safely.
       body: hasBody ? JSON.stringify(options.body) : undefined,
     });
-  } catch {
+  } catch (err) {
     return NextResponse.json(
-      { error: "Το backend δεν είναι διαθέσιμο." },
+      {
+        error:
+          err instanceof BackendUnavailableError
+            ? err.message
+            : "Το backend δεν είναι διαθέσιμο.",
+      },
       { status: 502 },
     );
   }
@@ -96,13 +122,17 @@ export async function proxyDownload(
 
   let res: Response;
   try {
-    res = await fetch(`${API_BASE_URL}${path}`, {
-      cache: "no-store",
+    res = await backendFetch(path, {
       headers: { Authorization: `Bearer ${token}` },
     });
-  } catch {
+  } catch (err) {
     return NextResponse.json(
-      { error: "Το backend δεν είναι διαθέσιμο." },
+      {
+        error:
+          err instanceof BackendUnavailableError
+            ? err.message
+            : "Το backend δεν είναι διαθέσιμο.",
+      },
       { status: 502 },
     );
   }

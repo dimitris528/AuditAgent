@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
-import { getToken, API_BASE_URL } from "@/lib/session";
+import { getToken } from "@/lib/session";
+import { backendFetch } from "@/lib/backend";
+import { backendUnavailable } from "@/lib/bff";
 
 // BFF for one client: the drawer payload (GET) and edits/archive (PUT).
 // `params` is a Promise in Next 15.
@@ -22,15 +24,12 @@ export async function GET(req: Request, { params }: Ctx) {
 
   let res: Response;
   try {
-    res = await fetch(`${API_BASE_URL}/api/v1/clients/${id}${suffix}`, {
+    res = await backendFetch(`/api/v1/clients/${id}${suffix}`, {
       cache: "no-store",
       headers: { Authorization: `Bearer ${token}` },
     });
-  } catch {
-    return NextResponse.json(
-      { error: "Το backend δεν είναι διαθέσιμο." },
-      { status: 502 },
-    );
+  } catch (err) {
+    return backendUnavailable(err);
   }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -52,7 +51,7 @@ export async function PUT(req: Request, { params }: Ctx) {
 
   let res: Response;
   try {
-    res = await fetch(`${API_BASE_URL}/api/v1/clients/${id}`, {
+    res = await backendFetch(`/api/v1/clients/${id}`, {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
@@ -61,11 +60,8 @@ export async function PUT(req: Request, { params }: Ctx) {
       body: JSON.stringify(body),
       cache: "no-store",
     });
-  } catch {
-    return NextResponse.json(
-      { error: "Το backend δεν είναι διαθέσιμο." },
-      { status: 502 },
-    );
+  } catch (err) {
+    return backendUnavailable(err);
   }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {

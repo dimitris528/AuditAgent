@@ -67,16 +67,51 @@ app.include_router(webhooks_router)
 # auth, like every other data route.
 app.include_router(billing_router)
 
+# --------------------------------------------------------------------------
+# CORS
+# --------------------------------------------------------------------------
+# Worth being precise about, because CORS is the first thing blamed for a
+# "backend unavailable" and in this architecture it is almost never the cause.
+#
+# The browser NEVER calls this API. It calls same-origin Next.js route handlers
+# (/api/...), which read the httpOnly session cookie and proxy here
+# server-to-server with a Bearer token. Server-to-server requests send no Origin
+# header and CORS does not apply to them at all — so in production these
+# settings are inert. They matter for exactly two things:
+#
+#   * `next dev` on :3000 talking to uvicorn on :8000 during local development;
+#   * anyone pointing a browser tool, or a future direct-from-browser client,
+#     at the API.
+#
+# FRONTEND_ORIGINS is the explicit allowlist. FRONTEND_ORIGIN_REGEX covers
+# generated hostnames — Render mints one per service and adds a suffix, so
+# hard-coding the deployed URL means the allowlist silently goes stale on the
+# next rename. Defaulted to the *.onrender.com pattern.
+#
+# allow_origins is NOT "*": with allow_credentials=True the CORS spec forbids
+# the wildcard, and Starlette would send a header every browser then rejects —
+# which looks exactly like a CORS misconfiguration while being caused by one.
 _origins = os.getenv(
     "FRONTEND_ORIGINS",
     "http://localhost:3000,http://127.0.0.1:3000",
 ).split(",")
+_origin_regex = os.getenv(
+    "FRONTEND_ORIGIN_REGEX",
+    r"https://.*\.onrender\.com",
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in _origins if o.strip()],
+    allow_origin_regex=_origin_regex or None,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Response headers a cross-origin caller may READ. Without this the CSV
+    # export downloads with a browser-invented name, because the filename lives
+    # in Content-Disposition and cross-origin JS cannot see an unexposed header.
+    expose_headers=["Content-Disposition"],
+    # Cache the preflight so a browser client is not re-asking on every call.
+    max_age=3600,
 )
 
 DEMO_ENABLED = os.getenv("DASHBOARD_DEMO", "1") != "0"

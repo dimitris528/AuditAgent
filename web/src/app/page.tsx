@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { AlertTriangle, FlaskConical } from "lucide-react";
 import { getDashboard } from "@/lib/server-api";
+import { apiBase } from "@/lib/backend";
 import { ApiError } from "@/lib/errors";
 import type { DashboardData } from "@/lib/types";
 import { ExecutiveHeader } from "@/components/ExecutiveHeader";
@@ -25,6 +26,12 @@ function intParam(value: string | string[] | undefined): number | null {
 }
 
 function BackendDown({ message }: { message: string }) {
+  // The URL actually used is the single most useful fact here and used to be
+  // invisible: this page once said "backend unavailable" while the backend was
+  // healthy, because the deployed bundle had http://localhost:8000 baked into
+  // it. Showing the resolved base makes that class of failure self-evident.
+  const base = apiBase();
+  const local = base.includes("localhost") || base.includes("127.0.0.1");
   return (
     <div className="mx-auto mt-10 max-w-xl rounded-2xl border border-rose-200 bg-rose-50 p-6 text-center dark:border-rose-500/30 dark:bg-rose-500/10">
       <AlertTriangle className="mx-auto h-8 w-8 text-rose-500" />
@@ -32,9 +39,20 @@ function BackendDown({ message }: { message: string }) {
         Δεν είναι διαθέσιμο το backend
       </h2>
       <p className="mt-1 text-sm text-rose-700 dark:text-rose-300/80">{message}</p>
-      <p className="mt-4 rounded-lg bg-white/70 px-3 py-2 text-left font-mono text-xs text-slate-700 dark:bg-slate-900/60 dark:text-slate-300">
-        uvicorn server.main:app --reload --port 8000
+      <p className="mt-4 rounded-lg bg-white/70 px-3 py-2 text-left text-xs text-slate-700 dark:bg-slate-900/60 dark:text-slate-300">
+        <span className="text-slate-500 dark:text-slate-400">API_BASE_URL: </span>
+        <span className="font-mono">{base}</span>
       </p>
+      {local && process.env.NODE_ENV === "production" ? (
+        <p className="mt-2 rounded-lg bg-amber-100 px-3 py-2 text-left text-xs text-amber-900 dark:bg-amber-500/15 dark:text-amber-200">
+          Ο διακομιστής δείχνει σε localhost ενώ τρέχει σε production — ορίστε
+          το <span className="font-mono">API_BASE_URL</span> στην υπηρεσία web.
+        </p>
+      ) : (
+        <p className="mt-2 rounded-lg bg-white/70 px-3 py-2 text-left font-mono text-xs text-slate-700 dark:bg-slate-900/60 dark:text-slate-300">
+          uvicorn server.main:app --reload --port 8000
+        </p>
+      )}
     </div>
   );
 }

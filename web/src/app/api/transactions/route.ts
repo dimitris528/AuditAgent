@@ -1,8 +1,8 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
-import { SESSION_COOKIE, apiBase } from "@/lib/constants";
-
-const API_BASE_URL = apiBase();
+import { SESSION_COOKIE } from "@/lib/constants";
+import { backendFetch } from "@/lib/backend";
+import { backendUnavailable } from "@/lib/bff";
 
 // BFF proxy for writes: read the httpOnly session cookie and forward to FastAPI
 // with the Bearer token. The tenant is derived server-side from the token, so
@@ -16,7 +16,7 @@ export async function POST(req: Request) {
   const body = await req.json().catch(() => ({}));
   let res: Response;
   try {
-    res = await fetch(`${API_BASE_URL}/api/transactions`, {
+    res = await backendFetch(`/api/transactions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -25,11 +25,8 @@ export async function POST(req: Request) {
       body: JSON.stringify(body),
       cache: "no-store",
     });
-  } catch {
-    return NextResponse.json(
-      { error: "Το backend δεν είναι διαθέσιμο." },
-      { status: 502 },
-    );
+  } catch (err) {
+    return backendUnavailable(err);
   }
 
   const data = await res.json().catch(() => ({}));

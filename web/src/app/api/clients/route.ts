@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
-import { getToken, API_BASE_URL } from "@/lib/session";
+import { getToken } from "@/lib/session";
+import { backendFetch } from "@/lib/backend";
+import { backendUnavailable } from "@/lib/bff";
 
 // BFF for the client list + inline creation. Reads the httpOnly session cookie
 // and forwards to FastAPI with the Bearer token, so the browser never sees it.
@@ -13,15 +15,12 @@ export async function GET(req: Request) {
 
   let res: Response;
   try {
-    res = await fetch(`${API_BASE_URL}/api/v1/clients${qs}`, {
+    res = await backendFetch(`/api/v1/clients${qs}`, {
       cache: "no-store",
       headers: { Authorization: `Bearer ${token}` },
     });
-  } catch {
-    return NextResponse.json(
-      { error: "Το backend δεν είναι διαθέσιμο." },
-      { status: 502 },
-    );
+  } catch (err) {
+    return backendUnavailable(err);
   }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -42,7 +41,7 @@ export async function POST(req: Request) {
 
   let res: Response;
   try {
-    res = await fetch(`${API_BASE_URL}/api/v1/clients`, {
+    res = await backendFetch(`/api/v1/clients`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -51,11 +50,8 @@ export async function POST(req: Request) {
       body: JSON.stringify(body),
       cache: "no-store",
     });
-  } catch {
-    return NextResponse.json(
-      { error: "Το backend δεν είναι διαθέσιμο." },
-      { status: 502 },
-    );
+  } catch (err) {
+    return backendUnavailable(err);
   }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {

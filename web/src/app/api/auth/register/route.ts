@@ -1,8 +1,8 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
-import { SESSION_COOKIE, apiBase } from "@/lib/constants";
-
-const API_BASE_URL = apiBase();
+import { SESSION_COOKIE } from "@/lib/constants";
+import { backendFetch } from "@/lib/backend";
+import { backendUnavailable } from "@/lib/bff";
 
 // BFF: forward the signup to FastAPI, then stash the returned JWT in an
 // httpOnly cookie exactly as the login route does — registering signs you in,
@@ -17,7 +17,7 @@ export async function POST(req: Request) {
 
   let res: Response;
   try {
-    res = await fetch(`${API_BASE_URL}/api/v1/auth/register`, {
+    res = await backendFetch(`/api/v1/auth/register`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -27,11 +27,8 @@ export async function POST(req: Request) {
       }),
       cache: "no-store",
     });
-  } catch {
-    return NextResponse.json(
-      { error: "Το backend δεν είναι διαθέσιμο." },
-      { status: 502 },
-    );
+  } catch (err) {
+    return backendUnavailable(err);
   }
 
   const data = await res.json().catch(() => ({}));

@@ -1,6 +1,7 @@
 // Server-side fetchers (used by Server Components). Attaches the tenant's
 // Bearer token from the httpOnly cookie so the FastAPI backend scopes data.
-import { getToken, API_BASE_URL } from "./session";
+import { getToken } from "./session";
+import { BackendUnavailableError, backendFetch } from "./backend";
 import { ApiError } from "./errors";
 import type {
   BillingStatus,
@@ -21,18 +22,36 @@ export async function getDashboard(period?: PeriodQuery): Promise<DashboardData>
   if (period?.year) qs.set("year", String(period.year));
   if (period?.quarter) qs.set("quarter", String(period.quarter));
   if (period?.month) qs.set("month", String(period.month));
-  const res = await fetch(
-    `${API_BASE_URL}/api/dashboard${qs.toString() ? `?${qs}` : ""}`,
-    {
-      cache: "no-store",
-      headers: { Authorization: `Bearer ${token}` },
-    },
+  const res = await authed(
+    `/api/dashboard${qs.toString() ? `?${qs}` : ""}`,
+    token,
   );
   if (!res.ok) {
     throw new ApiError(await detailOf(res, `Dashboard request failed (${res.status})`),
       res.status);
   }
   return (await res.json()) as DashboardData;
+}
+
+/**
+ * One authenticated GET, with the cold-start retry.
+ *
+ * Translates an unreachable backend into ApiError(503) so every caller can
+ * treat it like any other failure — and so the page can tell "asleep or
+ * misconfigured" (503) apart from "your session expired" (401), which is the
+ * distinction that decides whether to redirect to /login or show the outage.
+ */
+async function authed(path: string, token: string): Promise<Response> {
+  try {
+    return await backendFetch(path, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  } catch (err) {
+    if (err instanceof BackendUnavailableError) {
+      throw new ApiError(err.message, 503);
+    }
+    throw err;
+  }
 }
 
 /**
@@ -45,10 +64,7 @@ export async function getDashboard(period?: PeriodQuery): Promise<DashboardData>
 export async function getBillingStatus(): Promise<BillingStatus> {
   const token = await getToken();
   if (!token) throw new ApiError("unauthenticated", 401);
-  const res = await fetch(`${API_BASE_URL}/api/v1/billing/status`, {
-    cache: "no-store",
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await authed("/api/v1/billing/status", token);
   if (!res.ok) {
     throw new ApiError(await detailOf(res, `Billing request failed (${res.status})`),
       res.status);
@@ -73,9 +89,9 @@ export async function getClientStatement(
   if (period?.year) qs.set("year", String(period.year));
   if (period?.quarter) qs.set("quarter", String(period.quarter));
   if (period?.month) qs.set("month", String(period.month));
-  const res = await fetch(
-    `${API_BASE_URL}/api/v1/clients/${id}${qs.toString() ? `?${qs}` : ""}`,
-    { cache: "no-store", headers: { Authorization: `Bearer ${token}` } },
+  const res = await authed(
+    `/api/v1/clients/${id}${qs.toString() ? `?${qs}` : ""}`,
+    token,
   );
   if (!res.ok) {
     throw new ApiError(

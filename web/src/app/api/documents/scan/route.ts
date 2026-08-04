@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
-import { errorMessage } from "@/lib/bff";
-import { API_BASE_URL, getToken } from "@/lib/session";
+import { errorMessage, backendUnavailable } from "@/lib/bff";
+import { getToken } from "@/lib/session";
+import { backendFetch } from "@/lib/backend";
 
 // BFF for invoice OCR. Multipart rather than JSON, so it does not go through
 // proxyJson: the upload is re-assembled with req.formData() and posted on with
@@ -8,9 +9,12 @@ import { API_BASE_URL, getToken } from "@/lib/session";
 // FormData itself, so it must NOT be set by hand here — a copied header would
 // name the boundary of the request we already consumed.
 //
-// A scan is one Claude call over a whole document and routinely takes 20-40s,
-// well past the default serverless timeout on some hosts.
+// A scan is one OpenAI Vision call over a whole document and routinely takes
+// 20-40s, well past the default serverless timeout on some hosts.
 export const maxDuration = 120;
+
+// Long enough for the model, and NOT retried — see the call below.
+const SCAN_TIMEOUT_MS = 90_000;
 
 export async function POST(req: Request) {
   const token = await getToken();
@@ -36,17 +40,18 @@ export async function POST(req: Request) {
 
   let res: Response;
   try {
-    res = await fetch(`${API_BASE_URL}/api/v1/documents/scan`, {
+    res = await backendFetch(`/api/v1/documents/scan`, {
       method: "POST",
-      cache: "no-store",
       headers: { Authorization: `Bearer ${token}` },
       body: form,
+      // NO retry: a FormData body is consumed by the first attempt and cannot
+      // be replayed, so a second try would post an empty upload. Retrying
+      // would also risk billing two OpenAI calls for one scan.
+      retries: 0,
+      timeoutMs: SCAN_TIMEOUT_MS,
     });
-  } catch {
-    return NextResponse.json(
-      { error: "Το backend δεν είναι διαθέσιμο." },
-      { status: 502 },
-    );
+  } catch (err) {
+    return backendUnavailable(err);
   }
 
   const data = await res.json().catch(() => ({}));

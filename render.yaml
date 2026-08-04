@@ -88,6 +88,14 @@ services:
         value: "0"
       - key: DASHBOARD_TREND_MONTHS
         value: "12"
+      # CORS. Inert in production — the browser only ever talks to the web
+      # service, which proxies here server-to-server (no Origin header, so CORS
+      # does not apply). Set these only if something calls the API directly
+      # FROM a browser. The regex default already covers *.onrender.com.
+      - key: FRONTEND_ORIGINS
+        sync: false
+      - key: FRONTEND_ORIGIN_REGEX
+        sync: false
 
   # --- Next.js frontend (native Node runtime) -----------------------------
   - type: web
@@ -101,7 +109,13 @@ services:
     startCommand: npm run start
     envVars:
       # Base URL of the API service. fromService injects the hostname; the app
-      # upgrades a bare host to https (see web/src/lib/constants.ts → apiBase).
+      # upgrades a bare host to https (see web/src/lib/backend.ts → apiBase).
+      #
+      # This is a RUNTIME variable and is read as one. It must never be
+      # re-introduced into next.config.mjs's `env` block: that inlines values
+      # at BUILD time, and since Render builds before this is resolvable, the
+      # localhost fallback got baked into the bundle and the deployed site
+      # showed "backend unavailable" while the API logged healthy 200s.
       - key: API_BASE_URL
         fromService:
           type: web

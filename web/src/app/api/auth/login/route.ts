@@ -1,8 +1,8 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
-import { SESSION_COOKIE, apiBase } from "@/lib/constants";
-
-const API_BASE_URL = apiBase();
+import { SESSION_COOKIE } from "@/lib/constants";
+import { backendFetch } from "@/lib/backend";
+import { backendUnavailable } from "@/lib/bff";
 
 // BFF: forward credentials to FastAPI, then stash the returned JWT in an
 // httpOnly cookie so browser JS can never read the token.
@@ -16,17 +16,14 @@ export async function POST(req: Request) {
 
   let res: Response;
   try {
-    res = await fetch(`${API_BASE_URL}/api/auth/login`, {
+    res = await backendFetch(`/api/auth/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ username: body.username, password: body.password }),
       cache: "no-store",
     });
-  } catch {
-    return NextResponse.json(
-      { error: "Το backend δεν είναι διαθέσιμο." },
-      { status: 502 },
-    );
+  } catch (err) {
+    return backendUnavailable(err);
   }
 
   const data = await res.json().catch(() => ({}));
