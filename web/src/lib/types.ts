@@ -29,6 +29,9 @@ export interface ClientData {
   key: string;
   /** Α.Φ.Μ. — null on clients that have none, absent on the Airtable path. */
   afm?: string | null;
+  /** True on a closed client. Set per LIST by the backend, not per record —
+   *  `clients` is always active, `archived_clients` always archived. */
+  archived?: boolean;
   metrics: ClientMetrics;
   tax: TaxInfo;
 }
@@ -84,7 +87,11 @@ export interface PeriodInfo {
 
 export interface DashboardData {
   header: HeaderTotals;
+  /** ACTIVE clients only — the header and analytics are their exact sum. */
   clients: ClientData[];
+  /** Closed clients, costed over the same period. Deliberately a separate list
+   *  so nothing that sums `clients` can pick them up by accident. */
+  archived_clients: ClientData[];
   analytics: Analytics;
   counts: {
     active_clients: number;

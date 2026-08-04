@@ -97,8 +97,10 @@ export default async function Page({
 
   // name-key -> id, so a transaction row can open its client's drawer. Built
   // here because the dashboard payload is the only place both are present.
+  // Archived clients included: their transactions are still in the table, and
+  // a row that silently refuses to open reads as a bug rather than a policy.
   const clientIds: Record<string, number> = {};
-  for (const c of data.clients) {
+  for (const c of [...data.clients, ...data.archived_clients]) {
     if (c.id) clientIds[c.key] = Number(c.id);
   }
 
@@ -190,7 +192,12 @@ export default async function Page({
         <div className="lg:relative lg:col-span-5 lg:min-h-[500px]">
           <div className="rail-scroll flex flex-col gap-4 lg:absolute lg:inset-0 lg:overflow-y-auto lg:pr-1">
             <DebtAlerts alerts={data.debt_alerts} />
-            <ClientGrid clients={data.clients} alerts={data.debt_alerts} compact />
+            <ClientGrid
+              clients={data.clients}
+              archivedClients={data.archived_clients}
+              alerts={data.debt_alerts}
+              compact
+            />
           </div>
         </div>
 

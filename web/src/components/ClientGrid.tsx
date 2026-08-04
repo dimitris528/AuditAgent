@@ -8,8 +8,22 @@ import { clsx } from "@/lib/clsx";
 import { ClientCard } from "./ClientCard";
 import { useClientDrawer } from "./ClientDrawerProvider";
 
+/** Which clients the panel is showing. Active is the default: the dashboard is
+ *  a working view of the book, and a closed client is history. */
+type Scope = "active" | "archived" | "all";
+
+const SCOPES: { key: Scope; label: string }[] = [
+  { key: "active", label: "Ενεργοί" },
+  { key: "archived", label: "Αρχειοθετημένοι" },
+  { key: "all", label: "Όλοι" },
+];
+
 interface Props {
+  /** ACTIVE clients — the list every total on the page is the sum of. */
   clients: ClientData[];
+  /** Closed clients. Optional: a caller that has none simply gets no filter,
+   *  rather than a set of tabs where two of the three are always empty. */
+  archivedClients?: ClientData[];
   /** Used only to mark cards whose client is overdue. */
   alerts: DebtAlerts;
   /** True when the grid sits in the dashboard's narrow right-hand rail: one
@@ -19,9 +33,15 @@ interface Props {
   compact?: boolean;
 }
 
-export function ClientGrid({ clients, alerts, compact = false }: Props) {
+export function ClientGrid({
+  clients,
+  archivedClients,
+  alerts,
+  compact = false,
+}: Props) {
   const { openClient } = useClientDrawer();
   const [query, setQuery] = useState("");
+  const [scope, setScope] = useState<Scope>("active");
 
   // Both sides key on finance._client_key, so the card and the alert row
   // always agree about which client is which.
@@ -33,15 +53,26 @@ export function ClientGrid({ clients, alerts, compact = false }: Props) {
     return map;
   }, [alerts]);
 
+  const archived = useMemo(() => archivedClients ?? [], [archivedClients]);
+  // Nothing archived means nothing to filter BETWEEN — the tabs would be three
+  // buttons, two of which lead to an empty panel.
+  const showScopes = archived.length > 0;
+
+  // The pool the search runs over. Archived clients sort after the active ones
+  // under "Όλοι": the panel is still primarily about who is live.
+  const pool = useMemo(() => {
+    if (!showScopes || scope === "active") return clients;
+    if (scope === "archived") return archived;
+    return [...clients, ...archived];
+  }, [clients, archived, scope, showScopes]);
+
   // Client-side, like the transactions table: the cards are already in the
   // dashboard payload, so this responds on the keystroke and costs no request.
   const needle = useMemo(() => searchKey(query), [query]);
   const visible = useMemo(() => {
-    if (!needle) return clients;
-    return clients.filter((c) =>
-      searchHaystack([c.name, c.afm]).includes(needle),
-    );
-  }, [clients, needle]);
+    if (!needle) return pool;
+    return pool.filter((c) => searchHaystack([c.name, c.afm]).includes(needle));
+  }, [pool, needle]);
 
   return (
     <section>
@@ -59,18 +90,46 @@ export function ClientGrid({ clients, alerts, compact = false }: Props) {
         <div className="mb-3 flex items-center gap-2">
           <Users className="h-4 w-4 text-slate-400 dark:text-slate-500" />
           <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-            Ενεργοί Πελάτες
+            {/* The tabs qualify the heading once they exist — a panel titled
+                "Ενεργοί Πελάτες" listing archived ones contradicts itself. */}
+            {showScopes ? "Πελάτες" : "Ενεργοί Πελάτες"}
           </h2>
           <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-600 dark:bg-slate-800 dark:text-slate-300">
             {/* While filtering, the badge reads "3 / 27" — otherwise the count
                 silently changing under a search looks like missing data. */}
             {visible.length}
-            {visible.length !== clients.length ? ` / ${clients.length}` : ""}
+            {visible.length !== pool.length ? ` / ${pool.length}` : ""}
           </span>
         </div>
 
-        {/* Hidden when there is nothing to search through. */}
-        {clients.length > 0 ? (
+        {showScopes ? (
+          <div
+            role="tablist"
+            aria-label="Κατάσταση πελατών"
+            className="mb-2 flex rounded-lg border border-slate-200 p-0.5 dark:border-slate-700"
+          >
+            {SCOPES.map((s) => (
+              <button
+                key={s.key}
+                type="button"
+                role="tab"
+                aria-selected={scope === s.key}
+                onClick={() => setScope(s.key)}
+                className={clsx(
+                  "flex-1 truncate rounded-md px-2 py-1 text-[11px] font-medium transition",
+                  scope === s.key
+                    ? "bg-indigo-600 text-white"
+                    : "text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200",
+                )}
+              >
+                {s.label}
+              </button>
+            ))}
+          </div>
+        ) : null}
+
+        {/* Hidden when the selected scope has nothing to search through. */}
+        {pool.length > 0 ? (
           <div className="relative">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
             <input
@@ -96,9 +155,11 @@ export function ClientGrid({ clients, alerts, compact = false }: Props) {
       </div>
       {visible.length === 0 ? (
         <div className="mt-3 rounded-2xl border border-dashed border-slate-300 bg-white/50 p-10 text-center text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-900/50 dark:text-slate-400">
-          {clients.length === 0
-            ? "Δεν υπάρχουν ενεργοί πελάτες ακόμη."
-            : "Κανένας πελάτης δεν ταιριάζει με την αναζήτηση."}
+          {pool.length > 0
+            ? "Κανένας πελάτης δεν ταιριάζει με την αναζήτηση."
+            : scope === "archived"
+              ? "Δεν υπάρχουν αρχειοθετημένοι πελάτες."
+              : "Δεν υπάρχουν ενεργοί πελάτες ακόμη."}
         </div>
       ) : (
         // No scroll container of its own: in the rail the PAGE already gives
@@ -112,7 +173,10 @@ export function ClientGrid({ clients, alerts, compact = false }: Props) {
         >
           {visible.map((client) => (
             <ClientCard
-              key={client.id ?? client.key}
+              // Scope-prefixed: under "Όλοι" the two lists are concatenated,
+              // and an id-less client (the Airtable path) would otherwise
+              // collide with an archived namesake on the name key alone.
+              key={`${client.archived ? "a" : "c"}:${client.id ?? client.key}`}
               client={client}
               daysOverdue={overdue.get(client.key)}
               // Client ids are numeric in PostgreSQL but serialised as strings

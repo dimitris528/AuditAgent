@@ -552,11 +552,17 @@ def _client_key(name):
     return (name or "").strip().lower()
 
 
-def build_clients(active_projects, grouped, debt_by_client):
-    """One rich client object per ACTIVE project: identity + the 5 metrics +
-    the income-tax status. The order mirrors the projects list."""
+def build_clients(projects, grouped, debt_by_client, archived=False):
+    """One rich client object per project: identity + the 5 metrics + the
+    income-tax status. The order mirrors the projects list.
+
+    `archived` marks the batch as closed clients rather than active ones. It is
+    a property of the LIST, not of the record: the caller already knows which
+    of the two tables it is passing, and the finance record shape carries no
+    status field of its own.
+    """
     clients = []
-    for proj in active_projects:
+    for proj in projects:
         name = proj["fields"].get("Name") or "—"
         key = _client_key(name)
         m = client_metrics(name, grouped, debt_by_client.get(key, 0.0))
@@ -567,6 +573,7 @@ def build_clients(active_projects, grouped, debt_by_client):
             # Absent on the Airtable path, which never had the column — the UI
             # treats it as optional and simply searches by name there.
             "afm": proj["fields"].get("AFM"),
+            "archived": archived,
             "metrics": m,
             "tax": income_tax_status(m["taxable"]),
         })
@@ -644,6 +651,13 @@ def build_dashboard(active_projects, completed_projects, transactions,
     debt_by_client = debts_by_client(debts)
 
     clients = build_clients(active_projects, grouped, debt_by_client)
+    # Closed clients, costed the same way and over the same period, so the
+    # dashboard can offer an "Αρχειοθετημένοι" filter without a second request.
+    # Kept in their OWN list rather than folded into `clients`: the header and
+    # the analytics below are defined as the exact sum of the ACTIVE cards, and
+    # merging the two here would silently restate every total on the page.
+    archived_clients = build_clients(completed_projects, grouped,
+                                     debt_by_client, archived=True)
     active_keys = {c["key"] for c in clients}
     orphan_debt = round(
         sum(v for k, v in debt_by_client.items() if k not in active_keys), 2)
@@ -678,6 +692,7 @@ def build_dashboard(active_projects, completed_projects, transactions,
     return {
         "header": header,
         "clients": clients,
+        "archived_clients": archived_clients,
         "analytics": analytics,
         "debt_alerts": alerts,
         "counts": {

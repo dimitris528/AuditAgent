@@ -1,4 +1,4 @@
-import { AlertTriangle, Building2 } from "lucide-react";
+import { AlertTriangle, Archive, Building2 } from "lucide-react";
 import type { ClientData } from "@/lib/types";
 import { money, moneyAbs } from "@/lib/format";
 import { clsx } from "@/lib/clsx";
@@ -51,16 +51,27 @@ export function ClientCard({
   const vatRefund = m.net_vat < 0;
   const profitPositive = m.net_profit >= 0;
   const overdue = daysOverdue !== undefined;
+  const archived = client.archived === true;
 
   return (
     <div
       className={clsx(
-        "flex flex-col rounded-2xl border bg-white p-5 shadow-card transition duration-200 dark:bg-slate-900 dark:shadow-card-dark",
+        "flex flex-col rounded-2xl border p-5 shadow-card transition duration-200 dark:shadow-card-dark",
+        // A closed client reads as a DRAFT of itself: dashed edge, cooler
+        // surface. The figures stay at full contrast — they are still real
+        // money, and this card is how someone checks what a client closed at.
+        archived
+          ? "border-dashed bg-slate-50 dark:bg-slate-900/60"
+          : "bg-white dark:bg-slate-900",
         // Red border rather than a red card: the figures inside still have to
-        // be readable, and a tinted card fights the metric colours.
+        // be readable, and a tinted card fights the metric colours. Overdue
+        // outranks archived — a closed client that still owes is the debt most
+        // likely to be forgotten.
         overdue
           ? "border-rose-300 dark:border-rose-500/40"
-          : "border-slate-200 dark:border-slate-800",
+          : archived
+            ? "border-slate-300 dark:border-slate-700"
+            : "border-slate-200 dark:border-slate-800",
         onOpen &&
           "cursor-pointer hover:-translate-y-0.5 hover:border-indigo-300 hover:shadow-md motion-reduce:transform-none dark:hover:border-indigo-500/40",
       )}
@@ -70,8 +81,19 @@ export function ClientCard({
     >
       {/* Header */}
       <div className="mb-4 flex items-center gap-2.5">
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600 dark:bg-indigo-500/10 dark:text-indigo-400">
-          <Building2 className="h-5 w-5" />
+        <span
+          className={clsx(
+            "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg",
+            archived
+              ? "bg-slate-200/70 text-slate-500 dark:bg-slate-800 dark:text-slate-400"
+              : "bg-indigo-50 text-indigo-600 dark:bg-indigo-500/10 dark:text-indigo-400",
+          )}
+        >
+          {archived ? (
+            <Archive className="h-5 w-5" />
+          ) : (
+            <Building2 className="h-5 w-5" />
+          )}
         </span>
         {onOpen ? (
           <button
@@ -89,14 +111,30 @@ export function ClientCard({
             {client.name.trim() || "—"}
           </h3>
         )}
-        {overdue ? (
-          <span
-            className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-full bg-rose-100 px-2 py-0.5 text-[10px] font-semibold text-rose-700 dark:bg-rose-500/15 dark:text-rose-300"
-            title={`Ληξιπρόθεσμο εδώ και ${daysOverdue} ημέρες`}
-          >
-            <AlertTriangle className="h-3 w-3" />
-            {daysOverdue} ημ.
-          </span>
+        {/* Both badges can be on at once — an archived client that still owes
+            is exactly the case worth marking twice — so they share one
+            right-aligned group rather than each claiming ml-auto. */}
+        {archived || overdue ? (
+          <div className="ml-auto flex shrink-0 items-center gap-1.5">
+            {archived ? (
+              <span
+                className="inline-flex shrink-0 items-center gap-1 rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-semibold text-slate-600 dark:bg-slate-700 dark:text-slate-300"
+                title="Ο πελάτης είναι αρχειοθετημένος"
+              >
+                <Archive className="h-3 w-3" />
+                Αρχειοθετημένος
+              </span>
+            ) : null}
+            {overdue ? (
+              <span
+                className="inline-flex shrink-0 items-center gap-1 rounded-full bg-rose-100 px-2 py-0.5 text-[10px] font-semibold text-rose-700 dark:bg-rose-500/15 dark:text-rose-300"
+                title={`Ληξιπρόθεσμο εδώ και ${daysOverdue} ημέρες`}
+              >
+                <AlertTriangle className="h-3 w-3" />
+                {daysOverdue} ημ.
+              </span>
+            ) : null}
+          </div>
         ) : null}
       </div>
 
