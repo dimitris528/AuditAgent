@@ -53,10 +53,11 @@ function ClientRow({ client }: { client: DebtAlertClient }) {
   return (
     <li
       className={clsx(
-        "flex items-center justify-between gap-3 rounded-xl border px-3 py-2.5 transition",
+        "flex items-center justify-between gap-3 rounded-xl border px-3 py-2.5",
+        "transition duration-200 hover:-translate-y-px hover:shadow-sm motion-reduce:transform-none",
         overdue
-          ? "border-rose-200 bg-rose-50/60 dark:border-rose-500/30 dark:bg-rose-500/5"
-          : "border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900",
+          ? "border-rose-200 bg-rose-50/60 hover:border-rose-300 dark:border-rose-500/30 dark:bg-rose-500/5 dark:hover:border-rose-500/50"
+          : "border-slate-200 bg-white hover:border-indigo-200 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-indigo-500/30",
       )}
     >
       <div className="flex min-w-0 items-center gap-2">

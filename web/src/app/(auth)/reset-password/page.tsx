@@ -5,7 +5,6 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   AlertCircle,
-  Calculator,
   CheckCircle2,
   KeyRound,
   Loader2,
@@ -17,6 +16,14 @@ import {
   MIN_PASSWORD_LENGTH,
 } from "@/lib/api";
 import { PasswordField } from "@/components/PasswordField";
+import {
+  AuthCard,
+  authButton,
+  authField,
+  authHint,
+  authLabel,
+  authLink,
+} from "@/components/auth/AuthCard";
 
 // One route, two jobs, chosen by whether the URL carries a token:
 //
@@ -28,48 +35,10 @@ import { PasswordField } from "@/components/PasswordField";
 // email — a separate /forgot-password URL would be a page nobody navigates to
 // twice.
 
-const field =
-  "w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 outline-none transition focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 dark:border-slate-700 dark:bg-slate-800 dark:text-white";
-const labelCls = "mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400";
-
-function Shell({
-  title,
-  subtitle,
-  children,
-  footer,
-}: {
-  title: string;
-  subtitle: string;
-  children: React.ReactNode;
-  footer?: React.ReactNode;
-}) {
-  return (
-    <div className="flex min-h-[calc(100vh-8rem)] items-center justify-center">
-      <div className="w-full max-w-sm">
-        <div className="mb-6 flex flex-col items-center text-center">
-          <span className="mb-3 flex h-12 w-12 items-center justify-center rounded-xl bg-indigo-600 text-white">
-            <Calculator className="h-6 w-6" />
-          </span>
-          <h1 className="text-lg font-bold text-slate-900 dark:text-white">
-            {title}
-          </h1>
-          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-            {subtitle}
-          </p>
-        </div>
-        <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-card dark:border-slate-800 dark:bg-slate-900 dark:shadow-card-dark">
-          {children}
-        </div>
-        {footer}
-      </div>
-    </div>
-  );
-}
-
 function Problem({ message }: { message: string }) {
   if (!message) return null;
   return (
-    <div className="flex items-start gap-1.5 text-xs text-rose-600 dark:text-rose-400">
+    <div className="flex items-start gap-1.5 text-xs text-rose-300">
       <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
       {message}
     </div>
@@ -77,12 +46,9 @@ function Problem({ message }: { message: string }) {
 }
 
 const backToLogin = (
-  <p className="mt-4 text-center text-xs text-slate-500 dark:text-slate-400">
+  <p className="mt-4 text-center text-xs text-slate-300">
     Θυμηθήκατε τον κωδικό;{" "}
-    <Link
-      href="/login"
-      className="font-semibold text-indigo-600 hover:underline dark:text-indigo-400"
-    >
+    <Link href="/login" className={authLink}>
       Σύνδεση
     </Link>
   </p>
@@ -109,47 +75,48 @@ function RequestLink() {
 
   if (status === "sent") {
     return (
-      <Shell
+      <AuthCard
         title="Ελέγξτε το email σας"
         subtitle="Αν υπάρχει λογαριασμός, ο σύνδεσμος είναι καθ' οδόν"
         footer={backToLogin}
       >
         <div className="flex flex-col items-center gap-3 text-center">
-          <span className="flex h-11 w-11 items-center justify-center rounded-full bg-emerald-50 text-emerald-600 dark:bg-emerald-500/10 dark:text-emerald-400">
+          <span className="flex h-11 w-11 items-center justify-center rounded-full bg-emerald-400/15 text-emerald-300">
             <CheckCircle2 className="h-6 w-6" />
           </span>
           {/* Worded to match what the server actually promises. The backend
               answers identically for a known and an unknown address so it
               cannot be used to discover who has an account — saying "we sent
               it" here would leak exactly what that protects. */}
-          <p className="text-sm text-slate-600 dark:text-slate-300">
-            Αν υπάρχει λογαριασμός με το <strong>{email.trim()}</strong>, θα
-            λάβετε σύνδεσμο επαναφοράς. Ο σύνδεσμος λήγει σε 30 λεπτά.
+          <p className="text-sm text-slate-200">
+            Αν υπάρχει λογαριασμός με το{" "}
+            <strong className="text-white">{email.trim()}</strong>, θα λάβετε
+            σύνδεσμο επαναφοράς. Ο σύνδεσμος λήγει σε 30 λεπτά.
           </p>
-          <p className="text-xs text-slate-400 dark:text-slate-500">
+          <p className="text-xs text-slate-400">
             Δεν ήρθε τίποτα; Ελέγξτε τα ανεπιθύμητα ή δοκιμάστε ξανά.
           </p>
         </div>
-      </Shell>
+      </AuthCard>
     );
   }
 
   return (
-    <Shell
+    <AuthCard
       title="Επαναφορά κωδικού"
       subtitle="Θα σας στείλουμε σύνδεσμο για νέο κωδικό"
       footer={backToLogin}
     >
       <form onSubmit={submit} className="space-y-4">
         <div>
-          <label className={labelCls} htmlFor="fp-email">
+          <label className={authLabel} htmlFor="fp-email">
             Email λογαριασμού
           </label>
           <input
             id="fp-email"
             type="email"
             required
-            className={field}
+            className={authField}
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             autoComplete="email"
@@ -157,11 +124,7 @@ function RequestLink() {
           />
         </div>
         <Problem message={message} />
-        <button
-          type="submit"
-          disabled={status === "loading"}
-          className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-2.5 text-sm font-semibold text-white transition hover:bg-indigo-500 disabled:opacity-60"
-        >
+        <button type="submit" disabled={status === "loading"} className={authButton}>
           {status === "loading" ? (
             <Loader2 className="h-4 w-4 animate-spin" />
           ) : (
@@ -170,7 +133,7 @@ function RequestLink() {
           Αποστολή συνδέσμου
         </button>
       </form>
-    </Shell>
+    </AuthCard>
   );
 }
 
@@ -215,27 +178,24 @@ function ChooseNewPassword({ token }: { token: string }) {
 
   if (status === "done") {
     return (
-      <Shell title="Ο κωδικός άλλαξε" subtitle="Μπορείτε να συνδεθείτε">
+      <AuthCard title="Ο κωδικός άλλαξε" subtitle="Μπορείτε να συνδεθείτε">
         <div className="flex flex-col items-center gap-3 text-center">
-          <span className="flex h-11 w-11 items-center justify-center rounded-full bg-emerald-50 text-emerald-600 dark:bg-emerald-500/10 dark:text-emerald-400">
+          <span className="flex h-11 w-11 items-center justify-center rounded-full bg-emerald-400/15 text-emerald-300">
             <CheckCircle2 className="h-6 w-6" />
           </span>
-          <p className="text-sm text-slate-600 dark:text-slate-300">
+          <p className="text-sm text-slate-200">
             Ο κωδικός σας ενημερώθηκε. Μεταφέρεστε στη σύνδεση…
           </p>
-          <Link
-            href="/login"
-            className="text-xs font-semibold text-indigo-600 hover:underline dark:text-indigo-400"
-          >
+          <Link href="/login" className={`text-xs ${authLink}`}>
             Μετάβαση τώρα
           </Link>
         </div>
-      </Shell>
+      </AuthCard>
     );
   }
 
   return (
-    <Shell
+    <AuthCard
       title="Νέος κωδικός"
       subtitle="Επιλέξτε έναν κωδικό που δεν έχετε ξαναχρησιμοποιήσει"
       footer={backToLogin}
@@ -244,7 +204,9 @@ function ChooseNewPassword({ token }: { token: string }) {
         <PasswordField
           id="rp-password"
           label="Νέος κωδικός"
-          className={field}
+          className={authField}
+          labelClassName={authLabel}
+          hintClassName={authHint}
           value={password}
           onChange={setPassword}
           autoComplete="new-password"
@@ -254,17 +216,14 @@ function ChooseNewPassword({ token }: { token: string }) {
         <PasswordField
           id="rp-confirm"
           label="Επιβεβαίωση κωδικού"
-          className={field}
+          className={authField}
+          labelClassName={authLabel}
           value={confirm}
           onChange={setConfirm}
           autoComplete="new-password"
         />
         <Problem message={message} />
-        <button
-          type="submit"
-          disabled={status === "loading"}
-          className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-2.5 text-sm font-semibold text-white transition hover:bg-indigo-500 disabled:opacity-60"
-        >
+        <button type="submit" disabled={status === "loading"} className={authButton}>
           {status === "loading" ? (
             <Loader2 className="h-4 w-4 animate-spin" />
           ) : (
@@ -273,7 +232,7 @@ function ChooseNewPassword({ token }: { token: string }) {
           Αποθήκευση κωδικού
         </button>
       </form>
-    </Shell>
+    </AuthCard>
   );
 }
 

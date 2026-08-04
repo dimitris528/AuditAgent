@@ -272,6 +272,18 @@ export async function startCheckout(): Promise<{ url: string }> {
 }
 
 /**
+ * Open Stripe's hosted customer portal — card, invoices, cancellation.
+ *
+ * Same contract as startCheckout: the URL is single-use and short-lived, so it
+ * is fetched on the click rather than rendered into the page, and the caller
+ * navigates to it with `window.location.assign`.
+ */
+export async function openBillingPortal(): Promise<{ url: string }> {
+  const res = await fetch(`/api/billing/portal`, { method: "POST" });
+  return unwrap(res, "Αποτυχία ανοίγματος διαχείρισης συνδρομής");
+}
+
+/**
  * Start a password reset.
  *
  * Always resolves for a well-formed address, whether or not an account exists —

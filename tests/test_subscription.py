@@ -513,6 +513,95 @@ def test_an_expired_tenant_can_still_open_a_checkout(api, stripe_configured):
     assert api.post("/api/v1/billing/checkout").status_code == 200
 
 
+# --------------------------------------------------------------------------
+# Stripe customer portal
+# --------------------------------------------------------------------------
+@pytest.fixture()
+def portal_configured(monkeypatch):
+    """A secret key and a stand-in for billing_portal.Session.create.
+
+    NOTE it sets no STRIPE_PRICE_ID: the portal must work without one, which is
+    the whole reason portal_is_configured() exists separately.
+    """
+    monkeypatch.setattr(billing, "STRIPE_SECRET_KEY", "sk_test_fake")
+    sent = {}
+
+    def fake_create(**params):
+        sent.update(params)
+        return {"id": "bps_test_1",
+                "url": "https://billing.stripe.com/p/session/test_1"}
+
+    monkeypatch.setattr(stripe.billing_portal.Session, "create",
+                        staticmethod(fake_create))
+    return sent
+
+
+def test_portal_is_503_when_stripe_is_not_configured(api):
+    assert billing.portal_is_configured() is False
+    assert api.post("/api/v1/billing/portal").status_code == 503
+
+
+def test_portal_is_409_without_a_stripe_customer(api, portal_configured):
+    """A tenant who has never checked out has nothing for the portal to show.
+    409 rather than opening a session for a customer id that does not exist."""
+    res = api.post("/api/v1/billing/portal")
+    assert res.status_code == 409
+    assert portal_configured == {}  # Stripe was never called
+
+
+def test_portal_returns_a_stripe_url_for_the_signed_in_customer(api,
+                                                                portal_configured):
+    _pay(api)  # the webhook stores stripe_customer_id
+    res = api.post("/api/v1/billing/portal")
+    assert res.status_code == 200, res.text
+    assert res.json()["url"].startswith("https://billing.stripe.com/")
+    # The customer comes from the TENANT'S ROW, never from the request — this
+    # assertion is what keeps one tenant out of another's invoices.
+    assert portal_configured["customer"] == "cus_test_123"
+    assert portal_configured["return_url"].endswith("/billing")
+
+
+def test_portal_needs_no_price_id(api, portal_configured):
+    """Checkout is unconfigured here (no STRIPE_PRICE_ID), and the portal still
+    opens — a deployment mid-setup can still let subscribers manage a card."""
+    _pay(api)
+    assert billing.is_configured() is False
+    assert api.post("/api/v1/billing/portal").status_code == 200
+
+
+def test_a_lapsed_subscriber_can_still_open_the_portal(api, portal_configured):
+    """The person with a declined card is the one who most needs this."""
+    _pay(api)
+    _patch_user(subscription_status=subscription.INACTIVE, trial_ends_at=None)
+    assert api.post("/api/v1/billing/portal").status_code == 200
+
+
+def test_a_portal_failure_is_reported_as_502(api, monkeypatch):
+    _pay(api)
+    monkeypatch.setattr(billing, "STRIPE_SECRET_KEY", "sk_test_fake")
+
+    def boom(**_params):
+        raise stripe.InvalidRequestError("No such customer: cus_test_123", "customer")
+
+    monkeypatch.setattr(stripe.billing_portal.Session, "create", staticmethod(boom))
+    res = api.post("/api/v1/billing/portal")
+    assert res.status_code == 502
+    # Stripe's own English message is logged, not shown.
+    assert "No such customer" not in res.text
+
+
+def test_billing_status_reports_whether_the_portal_is_available(api, monkeypatch):
+    # No key, no customer.
+    assert api.get("/api/v1/billing/status").json()["portal_enabled"] is False
+
+    # A customer but still no key.
+    _pay(api)
+    assert api.get("/api/v1/billing/status").json()["portal_enabled"] is False
+
+    monkeypatch.setattr(billing, "STRIPE_SECRET_KEY", "sk_test_fake")
+    assert api.get("/api/v1/billing/status").json()["portal_enabled"] is True
+
+
 def test_a_stripe_failure_is_reported_as_502(api, monkeypatch):
     monkeypatch.setattr(billing, "STRIPE_SECRET_KEY", "sk_test_fake")
     monkeypatch.setattr(billing, "STRIPE_PRICE_ID", "price_fake")
@@ -549,10 +638,12 @@ def test_billing_endpoints_require_a_session(api):
     bare = api.__class__(api.app)  # no Authorization header
     assert bare.get("/api/v1/billing/status").status_code == 401
     assert bare.post("/api/v1/billing/checkout").status_code == 401
+    assert bare.post("/api/v1/billing/portal").status_code == 401
 
 
 def test_status_endpoint_reports_the_billing_configuration(api):
     body = api.get("/api/status").json()
     assert body["stripe_webhook_configured"] is True
     assert body["stripe_checkout_configured"] is False
+    assert body["stripe_portal_configured"] is False
     assert body["trial_days"] == 14

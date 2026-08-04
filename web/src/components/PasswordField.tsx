@@ -32,6 +32,8 @@ export function PasswordField({
   label,
   hint,
   className,
+  labelClassName = "mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400",
+  hintClassName = "mt-1 text-[11px] text-slate-400 dark:text-slate-500",
   autoFocus,
   required,
   name,
@@ -45,6 +47,12 @@ export function PasswordField({
   hint?: React.ReactNode;
   /** The form's input styling, passed in so each page keeps its own look. */
   className?: string;
+  /** …and the label/hint styling with it. The auth forms sit on a fixed blue
+   *  background where the slate defaults below are barely legible, and the
+   *  theme-aware variants do not help — that background is dark in light mode
+   *  too. Defaulted, so every in-app caller is unchanged. */
+  labelClassName?: string;
+  hintClassName?: string;
   autoFocus?: boolean;
   required?: boolean;
   name?: string;
@@ -80,10 +88,7 @@ export function PasswordField({
 
   return (
     <div>
-      <label
-        className="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400"
-        htmlFor={inputId}
-      >
+      <label className={labelClassName} htmlFor={inputId}>
         {label}
       </label>
       <div className="relative">
@@ -114,7 +119,10 @@ export function PasswordField({
           title={visible ? "Απόκρυψη κωδικού" : "Εμφάνιση κωδικού"}
           aria-pressed={visible}
           aria-controls={inputId}
-          className="absolute inset-y-0 right-0 flex w-10 items-center justify-center rounded-r-lg text-slate-400 transition hover:text-slate-600 focus:outline-none focus-visible:ring-1 focus-visible:ring-indigo-500 dark:text-slate-500 dark:hover:text-slate-300"
+          // Inherits the surrounding text colour instead of naming a slate:
+          // this field is used on white cards and on the auth page's dark glass
+          // one, and a fixed grey is invisible on one of the two.
+          className="absolute inset-y-0 right-0 flex w-10 items-center justify-center rounded-r-lg text-current opacity-50 transition hover:opacity-100 focus:outline-none focus-visible:ring-1 focus-visible:ring-indigo-500"
         >
           {visible ? (
             <EyeOff className="h-4 w-4" aria-hidden="true" />
@@ -123,9 +131,7 @@ export function PasswordField({
           )}
         </button>
       </div>
-      {hint ? (
-        <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-500">{hint}</p>
-      ) : null}
+      {hint ? <p className={hintClassName}>{hint}</p> : null}
     </div>
   );
 }

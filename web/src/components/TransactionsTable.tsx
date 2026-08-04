@@ -190,7 +190,11 @@ export function TransactionsTable({
                 {visible.map((t) => (
                   <tr
                     key={t.id ?? `${t.client}-${t.date}-${t.amount}`}
-                    className="transition-colors hover:bg-slate-50 dark:hover:bg-slate-800/50"
+                    // A tinted hover rather than a grey one, plus a 3px inset
+                    // rule down the left edge: on a dense table the tint alone
+                    // is easy to lose track of when the eye is on the amount
+                    // column, and the rule marks the row start.
+                    className="transition-colors hover:bg-indigo-50/70 hover:[box-shadow:inset_3px_0_0_0_#6366f1] dark:hover:bg-indigo-500/[0.07]"
                   >
                     <td className="whitespace-nowrap px-4 py-2.5 tabular-nums text-slate-500 dark:text-slate-400">
                       {t.date ?? "—"}
@@ -243,7 +247,7 @@ export function TransactionsTable({
             {visible.map((t) => (
               <li
                 key={t.id ?? `${t.client}-${t.date}-${t.amount}`}
-                className="p-4"
+                className="p-4 transition-colors hover:bg-indigo-50/70 dark:hover:bg-indigo-500/[0.07]"
               >
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">

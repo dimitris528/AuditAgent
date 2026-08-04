@@ -380,6 +380,10 @@ def status():
         # (a webhook with no checkout, or the reverse) is the usual mistake and
         # each half fails in a completely different place.
         "stripe_checkout_configured": billing.is_configured(),
+        # The customer portal needs only the secret key, so it can be live while
+        # checkout is not (a missing STRIPE_PRICE_ID) — worth reporting on its
+        # own rather than inferring from the line above.
+        "stripe_portal_configured": billing.portal_is_configured(),
         "trial_days": subscription.TRIAL_DAYS,
     }
     if configured:

@@ -51,14 +51,18 @@ function MetricCard({
 }) {
   const t = TONES[tone];
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-card transition-colors dark:border-slate-800 dark:bg-slate-900 dark:shadow-card-dark">
+    // The hover lift is 2px and 200ms on purpose: enough to confirm the card is
+    // a live surface, not enough to make a row of four feel like it is
+    // breathing. motion-reduce drops the transform and keeps the shadow, so the
+    // feedback survives without the movement.
+    <div className="group rounded-2xl border border-slate-200 bg-white p-4 shadow-card transition duration-200 hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md motion-reduce:transform-none dark:border-slate-800 dark:bg-slate-900 dark:shadow-card-dark dark:hover:border-slate-700">
       <div className="flex items-start justify-between gap-3">
         <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
           {label}
         </span>
         <span
           className={clsx(
-            "flex h-7 w-7 shrink-0 items-center justify-center rounded-lg",
+            "flex h-7 w-7 shrink-0 items-center justify-center rounded-lg transition-transform duration-200 group-hover:scale-110 motion-reduce:transform-none",
             t.chip,
           )}
         >

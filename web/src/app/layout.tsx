@@ -1,13 +1,7 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
-import { cookies } from "next/headers";
-import Link from "next/link";
-import { Calculator, CreditCard } from "lucide-react";
 import "./globals.css";
-import { SESSION_COOKIE } from "@/lib/constants";
 import { ThemeProvider, themeInitScript } from "@/components/theme/ThemeProvider";
-import { ThemeToggle } from "@/components/theme/ThemeToggle";
-import { LogoutButton } from "@/components/LogoutButton";
 
 const inter = Inter({ subsets: ["latin", "greek"], variable: "--font-inter" });
 
@@ -16,12 +10,21 @@ export const metadata: Metadata = {
   description: "Enterprise accounting dashboard — έσοδα, έξοδα, Φ.Π.Α. & φόρος ανά πελάτη",
 };
 
-export default async function RootLayout({
+/**
+ * The document itself, and nothing else.
+ *
+ * The app chrome (header, centred main) used to live here, which is why the
+ * signed-out pages were stuck rendering inside it — a full-bleed background
+ * cannot exist inside a `max-w-7xl` main. It now lives in `(app)/layout.tsx`,
+ * and `(auth)/layout.tsx` provides its own. Both are ROUTE GROUPS: the
+ * parentheses are not part of any URL, so /login, /billing and / are exactly
+ * where they were.
+ */
+export default function RootLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
-  const authed = Boolean((await cookies()).get(SESSION_COOKIE)?.value);
   return (
     <html lang="el" suppressHydrationWarning>
       <head>
@@ -30,48 +33,7 @@ export default async function RootLayout({
       <body
         className={`${inter.variable} min-h-full bg-slate-50 font-sans text-slate-900 antialiased dark:bg-slate-950 dark:text-slate-100`}
       >
-        <ThemeProvider>
-          {/* print:hidden — the app chrome has no business on a statement
-              that gets saved as PDF and sent to a client. */}
-          <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/80 backdrop-blur print:hidden dark:border-slate-800 dark:bg-slate-950/80">
-            <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-4 sm:px-6">
-              <div className="flex items-center gap-2.5">
-                <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600 text-white">
-                  <Calculator className="h-5 w-5" />
-                </span>
-                <div className="leading-tight">
-                  <div className="text-sm font-bold tracking-tight text-slate-900 dark:text-white">
-                    Λογιστήριο<span className="text-indigo-600 dark:text-indigo-400">Pro</span>
-                  </div>
-                  <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                    Accounting Dashboard
-                  </div>
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                {/* Always reachable while signed in — including for a lapsed
-                    account, whose only way back is through this link. */}
-                {authed ? (
-                  <Link
-                    href="/billing"
-                    title="Συνδρομή"
-                    className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 text-slate-600 transition hover:border-slate-300 hover:text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:border-slate-600 dark:hover:text-white"
-                  >
-                    <CreditCard className="h-4 w-4" />
-                    <span className="hidden sm:inline text-xs font-medium">
-                      Συνδρομή
-                    </span>
-                  </Link>
-                ) : null}
-                <ThemeToggle />
-                {authed ? <LogoutButton /> : null}
-              </div>
-            </div>
-          </header>
-          <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 print:max-w-none print:p-0">
-            {children}
-          </main>
-        </ThemeProvider>
+        <ThemeProvider>{children}</ThemeProvider>
       </body>
     </html>
   );

@@ -131,6 +131,9 @@ export interface BillingStatus extends SubscriptionInfo {
   stripe_configured: boolean;
   /** …and a database is configured, so checkout can actually be opened. */
   checkout_enabled: boolean;
+  /** This tenant can open the Stripe customer portal: the server has a secret
+   *  key AND the account has a Stripe customer to open it for. */
+  portal_enabled?: boolean;
 }
 
 /** A client row as returned by /api/v1/clients (not the finance shape). */

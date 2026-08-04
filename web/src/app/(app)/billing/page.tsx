@@ -15,6 +15,7 @@ import type { BillingStatus } from "@/lib/types";
 import { Badge } from "@/components/ui/Badge";
 import { Card } from "@/components/ui/Card";
 import { SubscribeButton } from "@/components/SubscribeButton";
+import { ManageBillingButton } from "@/components/ManageBillingButton";
 
 // The one page a lapsed tenant can always reach, so it must never be cached
 // with someone else's status.
@@ -266,6 +267,20 @@ export default async function BillingPage({
             />
             <p className="mt-3 text-center text-[11px] text-slate-400 dark:text-slate-500">
               Ασφαλής πληρωμή μέσω Stripe. Μπορείτε να ακυρώσετε οποτεδήποτε.
+            </p>
+          </div>
+        ) : null}
+
+        {/* Shown to anyone with a Stripe customer, subscribed or not.
+            A lapsed subscriber is exactly who needs to replace a declined card,
+            and hiding this behind an active status would leave them with only
+            the button that starts a brand-new subscription. */}
+        {status.portal_enabled ? (
+          <div className={canSubscribe ? "mt-3" : "mt-6"}>
+            <ManageBillingButton />
+            <p className="mt-3 text-center text-[11px] text-slate-400 dark:text-slate-500">
+              Κάρτα πληρωμής, τιμολόγια και ακύρωση — μέσω του ασφαλούς
+              περιβάλλοντος της Stripe.
             </p>
           </div>
         ) : null}

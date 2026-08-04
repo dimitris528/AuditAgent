@@ -34,6 +34,125 @@ body {
 }
 
 /* --------------------------------------------------------------------------
+   Auth pages (login / register / reset-password) — the "tech mesh".
+
+   Everything here is STATIC and composited by the GPU: a blue gradient, two
+   corner glows, and a grid that drifts a couple of dozen pixels on a long
+   loop. The two moving curves on top are the canvas in
+   components/auth/AuthBackground.tsx — that is the only thing costing a frame
+   budget, and it is the only thing that needed to.
+   -------------------------------------------------------------------------- */
+.auth-mesh {
+  background-color: #061635;
+  background-image:
+    radial-gradient(1100px 620px at 12% -10%, rgba(56, 189, 248, 0.2), transparent 62%),
+    radial-gradient(900px 620px at 92% 108%, rgba(99, 102, 241, 0.26), transparent 62%),
+    linear-gradient(158deg, #071b40 0%, #0a2a63 46%, #05132e 100%);
+}
+
+.auth-mesh::before {
+  content: "";
+  position: absolute;
+  /* Oversized so the drift below never exposes an edge. */
+  inset: -15%;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right, rgba(148, 197, 255, 0.07) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(148, 197, 255, 0.07) 1px, transparent 1px);
+  background-size: 58px 58px;
+  /* Fades the grid out towards the edges, so it reads as depth rather than as
+     graph paper. */
+  -webkit-mask-image: radial-gradient(circle at 50% 42%, #000 0%, transparent 70%);
+  mask-image: radial-gradient(circle at 50% 42%, #000 0%, transparent 70%);
+  animation: auth-drift 28s ease-in-out infinite alternate;
+}
+
+/* A soft dark wash behind the sign-in column.
+
+   Without it the curves pass straight through the heading and the "already
+   have an account?" line — both of which sit OUTSIDE the frosted card, on the
+   background itself — and a bright cyan stroke behind white text takes the
+   contrast somewhere between ugly and unreadable. The card is unaffected; this
+   only darkens the few hundred pixels around it, and fades out long before the
+   viewport edge so the design still reads as one background. */
+.auth-scrim::before {
+  content: "";
+  position: absolute;
+  inset: -14% -30%;
+  z-index: -1;
+  pointer-events: none;
+  background: radial-gradient(
+    closest-side,
+    rgba(2, 9, 24, 0.66),
+    rgba(2, 9, 24, 0.3) 62%,
+    transparent 100%
+  );
+}
+
+/* Chrome paints an autofilled field with its own near-white background and
+   near-black text, which on these translucent dark inputs is a jarring flash of
+   a totally different form. There is no property that turns it off, so the
+   documented workaround: an inset shadow large enough to cover the field, and a
+   9999s transition so the browser's own fade never repaints it. */
+.auth-mesh input:-webkit-autofill,
+.auth-mesh input:-webkit-autofill:hover,
+.auth-mesh input:-webkit-autofill:focus {
+  -webkit-text-fill-color: #fff;
+  -webkit-box-shadow: 0 0 0 1000px rgba(11, 26, 56, 0.92) inset;
+  caret-color: #fff;
+  transition: background-color 9999s ease-out 0s;
+}
+
+/* transform only — no layout, no paint, one composited layer. */
+@keyframes auth-drift {
+  from {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    transform: translate3d(-30px, -20px, 0) scale(1.03);
+  }
+}
+
+/* --------------------------------------------------------------------------
+   The signed-in shell — an ambient wash, and nothing that moves.
+
+   A dashboard is read for hours at a time. Anything animating in the corner of
+   that view is fatigue, not polish, so the in-app backdrop is a single static
+   paint; the micro-interactions are all hover-driven and therefore only ever
+   run when the pointer asks for them.
+   -------------------------------------------------------------------------- */
+.app-ambient {
+  background-image:
+    radial-gradient(900px 520px at 10% -8%, rgba(99, 102, 241, 0.06), transparent 70%),
+    radial-gradient(820px 520px at 96% -2%, rgba(56, 189, 248, 0.05), transparent 70%);
+}
+:root.dark .app-ambient {
+  background-image:
+    radial-gradient(900px 520px at 10% -8%, rgba(99, 102, 241, 0.1), transparent 70%),
+    radial-gradient(820px 520px at 96% -2%, rgba(56, 189, 248, 0.07), transparent 70%);
+}
+
+/* Vertical rails that scroll inside themselves (the dashboard's client/alert
+   panel). Momentum on touch, and a scroll that stops at the panel instead of
+   grabbing the page once it bottoms out. */
+.rail-scroll {
+  overscroll-behavior: contain;
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* One switch for every decorative animation in the app. A visitor who has
+   asked their OS for less motion gets the same design, holding still. */
+@media (prefers-reduced-motion: reduce) {
+  .auth-mesh::before {
+    animation: none;
+  }
+  .rail-scroll {
+    scroll-behavior: auto;
+  }
+}
+
+/* --------------------------------------------------------------------------
    Print — the Καρτέλα Πελάτη statement (app/clients/[id]/statement).
    The page IS the PDF: the browser's "Save as PDF" is what produces the file,
    because the document is entirely in Greek and no server-side PDF library

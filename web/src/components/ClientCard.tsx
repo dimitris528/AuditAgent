@@ -55,14 +55,14 @@ export function ClientCard({
   return (
     <div
       className={clsx(
-        "flex flex-col rounded-2xl border bg-white p-5 shadow-card transition dark:bg-slate-900 dark:shadow-card-dark",
+        "flex flex-col rounded-2xl border bg-white p-5 shadow-card transition duration-200 dark:bg-slate-900 dark:shadow-card-dark",
         // Red border rather than a red card: the figures inside still have to
         // be readable, and a tinted card fights the metric colours.
         overdue
           ? "border-rose-300 dark:border-rose-500/40"
           : "border-slate-200 dark:border-slate-800",
         onOpen &&
-          "cursor-pointer hover:border-indigo-300 hover:shadow-md dark:hover:border-indigo-500/40",
+          "cursor-pointer hover:-translate-y-0.5 hover:border-indigo-300 hover:shadow-md motion-reduce:transform-none dark:hover:border-indigo-500/40",
       )}
       // The whole card is the target, but the accessible control is the button
       // in the header — a div with a click handler is invisible to keyboards.

@@ -4,6 +4,7 @@ server/main.py:
 
     GET  /api/v1/billing/status     what the /billing page renders
     POST /api/v1/billing/checkout   -> { url } to redirect the browser to
+    POST /api/v1/billing/portal     -> { url } for Stripe's own billing portal
 
 The other half of the loop is server/webhooks.py, which receives Stripe's
 callback and is what actually flips the account to `active`. Nothing here marks
@@ -28,6 +29,19 @@ Checkout session, field by field
 Without STRIPE_SECRET_KEY / STRIPE_PRICE_ID the endpoint answers 503 and
 /status reports `stripe_configured: false`, so the UI can explain that billing
 is not set up rather than offering a button that only ever errors.
+
+The customer portal
+-------------------
+/portal is the after-sale half: changing the card, downloading invoices,
+cancelling. Stripe hosts all of it, which is the point — none of those screens
+exist here, and a card number must never reach this server.
+
+It needs only STRIPE_SECRET_KEY (there is no Price involved), so it is
+configured separately from checkout, and it needs a `stripe_customer_id`. That
+id is the ONLY thing that identifies whose billing is being opened: a portal
+session created for the wrong customer would hand one tenant another tenant's
+invoices and card. It is therefore read from the signed-in tenant's row and
+never from the request.
 """
 
 import stripe
@@ -45,9 +59,22 @@ router = APIRouter(prefix="/api/v1/billing", tags=["billing"])
 _SUCCESS_URL = f"{APP_BASE_URL}/billing?checkout=success&session_id={{CHECKOUT_SESSION_ID}}"
 _CANCEL_URL = f"{APP_BASE_URL}/billing?checkout=cancelled"
 
+# Where Stripe's "← Return to …" link sends the browser back to.
+_PORTAL_RETURN_URL = f"{APP_BASE_URL}/billing"
+
 
 def is_configured():
     return bool(STRIPE_SECRET_KEY and STRIPE_PRICE_ID)
+
+
+def portal_is_configured():
+    """The portal sells nothing, so it needs no Price — only the API key.
+
+    Kept separate from is_configured() so a deployment that has a key but no
+    Price can still let existing subscribers manage their card, instead of
+    being told billing is switched off.
+    """
+    return bool(STRIPE_SECRET_KEY)
 
 
 def _stripe_status():
@@ -74,6 +101,12 @@ def billing_status(user: str = Depends(deps.get_current_user)):
                 "username": tenant.username,
                 "email": tenant.email,
                 "has_stripe_customer": bool(tenant.stripe_customer_id),
+                # Whether THIS tenant can open the portal, not merely whether
+                # the server could in principle: an account that has never been
+                # through checkout has no Stripe customer, and offering it a
+                # "manage your card" button would only ever produce an error.
+                "portal_enabled": bool(
+                    portal_is_configured() and tenant.stripe_customer_id),
                 **state.to_dict(),
                 **_stripe_status(),
             }
@@ -164,3 +197,68 @@ def create_checkout_session(user: str = Depends(deps.get_current_user)):
 
     return {"url": url, "id": checkout.get("id") if isinstance(checkout, dict)
             else getattr(checkout, "id", None)}
+
+
+@router.post("/portal")
+def create_portal_session(user: str = Depends(deps.get_current_user)):
+    """Open Stripe's hosted customer portal and hand back the URL.
+
+    Deliberately NOT gated on an active subscription. Someone whose card was
+    declined, or whose subscription Stripe has already cancelled, is precisely
+    the person who needs to update a card or read an invoice — and they are the
+    one the paywall is currently blocking. What is required is a Stripe customer
+    (i.e. they have been through checkout at least once); without one there is
+    nothing for the portal to show, and that is a 409 rather than an error the
+    user is left to interpret.
+
+    Sessions are single-use and short-lived, so the URL is generated per click
+    and never stored.
+    """
+    if not portal_is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Οι πληρωμές δεν έχουν ρυθμιστεί (ορίστε STRIPE_SECRET_KEY).")
+    deps.require_db()
+
+    try:
+        with database.session_scope() as session:
+            tenant, _state = deps.subscription_state(session, user)
+            username = tenant.username
+            customer_id = tenant.stripe_customer_id
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+
+    if not customer_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Δεν υπάρχει ακόμη συνδρομή προς διαχείριση. "
+                   "Ενεργοποιήστε πρώτα συνδρομή.")
+
+    try:
+        # Per call, for the same reason as in the checkout above: the key is
+        # read from config at import time.
+        stripe.api_key = STRIPE_SECRET_KEY
+        portal = stripe.billing_portal.Session.create(
+            customer=customer_id,
+            return_url=_PORTAL_RETURN_URL,
+        )
+    except stripe.StripeError as exc:
+        # The commonest failure here is a live-mode key against a test-mode
+        # customer id (or the reverse), which Stripe reports as "No such
+        # customer". Logged in full; the user gets something actionable.
+        print(f"[ERROR] Stripe portal failed for username={username!r} "
+              f"customer={customer_id!r}: {exc}")
+        raise HTTPException(
+            status_code=502,
+            detail="Δεν ήταν δυνατό το άνοιγμα της διαχείρισης συνδρομής. "
+                   "Δοκιμάστε ξανά.")
+
+    url = (portal.get("url") if isinstance(portal, dict)
+           else getattr(portal, "url", None))
+    if not url:
+        raise HTTPException(
+            status_code=502,
+            detail="Το Stripe δεν επέστρεψε διεύθυνση διαχείρισης.")
+    return {"url": url}

@@ -165,9 +165,33 @@ export default async function Page({
         <div className="lg:col-span-7">
           <AnalyticsSection analytics={data.analytics} />
         </div>
-        <div className="space-y-4 lg:col-span-5">
-          <DebtAlerts alerts={data.debt_alerts} />
-          <ClientGrid clients={data.clients} alerts={data.debt_alerts} compact />
+
+        {/* The right rail is a BOUNDED, self-scrolling panel.
+
+            It used to be an ordinary grid item, so its height was the sum of
+            every alert and every client card — which meant the row grew with
+            the client list and left a widening blank column under the charts.
+            One tenant with forty clients turned the dashboard into a metre of
+            whitespace.
+
+            The fix, in two halves:
+              lg:absolute lg:inset-0  takes the rail's content OUT of flow, so
+                                      it can no longer drive the row height. The
+                                      row is now exactly as tall as the charts,
+                                      and the rail fills it precisely — no gap
+                                      on either side, whatever the client count.
+              lg:min-h-[500px]        a floor for the opposite case: a book with
+                                      almost no analytics would otherwise
+                                      squeeze the rail to nothing.
+
+            Everything below `lg` is untouched — on a phone the rail is a normal
+            stacked section, and a nested scroll area inside a scrolling page is
+            the last thing a small screen needs. */}
+        <div className="lg:relative lg:col-span-5 lg:min-h-[500px]">
+          <div className="rail-scroll flex flex-col gap-4 lg:absolute lg:inset-0 lg:overflow-y-auto lg:pr-1">
+            <DebtAlerts alerts={data.debt_alerts} />
+            <ClientGrid clients={data.clients} alerts={data.debt_alerts} compact />
+          </div>
         </div>
 
         {/* --- Bottom: the full-width transactions table ----------------- */}
