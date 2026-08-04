@@ -12,13 +12,23 @@ Flow:
     Stripe -> POST /api/v1/webhooks/stripe
         -> signature verified against STRIPE_WEBHOOK_SECRET (reject 400)
         -> on checkout.session.completed, match the payer to a users row and
-           flip subscription_status to "Active" (which also clears trial_expiry).
+           flip subscription_status to "active" (which also clears
+           trial_ends_at — see store.set_subscription_status).
+        -> on customer.subscription.deleted, flip that customer back to
+           "inactive" so a cancellation actually re-closes the paywall.
 
 Payer matching, in order:
     1. client_reference_id — the checkout URL stamps the tenant's username, so
        this is an exact match.
     2. customer email — every account now has one (registration requires it).
     3. stripe_customer_id — for repeat checkouts that carry neither.
+
+DEACTIVATION matches on stripe_customer_id ONLY. The asymmetry is deliberate:
+a cancellation event carries no client_reference_id, and the email fallback is a
+guess — guessing wrong when granting access hands a stranger a paid account,
+and guessing wrong when revoking it locks a paying customer out of their own
+books. Neither is acceptable, so an unmatched cancellation is logged for manual
+reconciliation instead.
 
 Status codes are chosen for Stripe's retry behaviour, which is the whole point
 of getting them right — Stripe re-delivers on 5xx for ~3 days and gives up on
@@ -37,7 +47,8 @@ event-id ledger.
 
 Stripe endpoint config: point the endpoint at
     https://<accounting-api host>/api/v1/webhooks/stripe
-and subscribe it to checkout.session.completed.
+and subscribe it to checkout.session.completed and
+customer.subscription.deleted.
 
 Local test:
     uvicorn server.main:app --reload --port 8000
@@ -52,16 +63,16 @@ from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy.exc import SQLAlchemyError
 
 from config import STRIPE_WEBHOOK_SECRET
-from server import database, store
+from server import database, store, subscription
 
 router = APIRouter(prefix="/api/v1/webhooks", tags=["webhooks"])
 
-# Event that means "this tenant just paid". Renewals
-# (invoice.payment_succeeded) and cancellations are deliberately NOT handled:
-# those events carry no client_reference_id, so the only way to match a payer
-# would be the email fallback, and a wrong match there would hand a stranger a
-# paid account. Add them only alongside a stored Stripe customer id.
+# Event that means "this tenant just paid".
 CHECKOUT_COMPLETED = "checkout.session.completed"
+# ...and the one that means they stopped. Renewals (invoice.payment_succeeded)
+# stay UNHANDLED: they would only ever re-set a status that is already active,
+# and the account is already active for as long as Stripe has not cancelled it.
+SUBSCRIPTION_DELETED = "customer.subscription.deleted"
 
 
 @router.post("/stripe")
@@ -89,22 +100,30 @@ async def stripe_webhook(request: Request):
     # interface (no .get) in newer stripe-python majors, so relying on it
     # couples this handler to the SDK's accessor API.
     event = json.loads(payload)
-    if event.get("type") == CHECKOUT_COMPLETED:
-        _activate_payer(event.get("data", {}).get("object", {}))
+    kind = event.get("type")
+    body = event.get("data", {}).get("object", {})
+    if kind == CHECKOUT_COMPLETED:
+        _activate_payer(body)
+    elif kind == SUBSCRIPTION_DELETED:
+        _deactivate_customer(body)
     return {"received": True}
 
 
+def _require_db(action):
+    if not database.is_configured():
+        print(f"[ERROR] DATABASE_URL is not configured — cannot {action}.")
+        raise HTTPException(status_code=503, detail="Database not configured.")
+
+
 def _activate_payer(checkout):
-    """Flip the paying tenant's users row to Active. Raises HTTPException(502)
+    """Flip the paying tenant's users row to `active`. Raises HTTPException(502)
     on transient database failures so Stripe re-delivers."""
     username = checkout.get("client_reference_id")
     email = ((checkout.get("customer_details") or {}).get("email")
              or checkout.get("customer_email"))
     customer_id = checkout.get("customer")
 
-    if not database.is_configured():
-        print("[ERROR] DATABASE_URL is not configured — cannot activate payer.")
-        raise HTTPException(status_code=503, detail="Database not configured.")
+    _require_db("activate payer")
 
     try:
         with database.session_scope() as session:
@@ -120,12 +139,40 @@ def _activate_payer(checkout):
                       f"no row updated; reconcile manually in Stripe.")
                 return
 
-            store.set_subscription_status(session, user, "Active")
-            # Remember the Stripe customer so later billing events can be
-            # matched by id rather than by guessing from an email.
+            # Remember the Stripe customer FIRST: set_subscription_status
+            # commits and refreshes, and a failure between the two writes must
+            # not leave an active account that no future event can match.
             if customer_id and user.stripe_customer_id != customer_id:
                 store.set_stripe_customer(session, user, customer_id)
+            store.set_subscription_status(session, user, subscription.ACTIVE)
             print(f"[INFO] Subscription activated for username={user.username!r}.")
     except SQLAlchemyError as exc:
         print(f"[ERROR] Activation failed (client_reference_id={username!r}): {exc}")
+        raise HTTPException(status_code=502, detail="Database write failed.")
+
+
+def _deactivate_customer(sub):
+    """Close the paywall again when a subscription ends.
+
+    Matched STRICTLY by stripe_customer_id — see the module docstring for why
+    the email fallback is not available on this side.
+    """
+    customer_id = sub.get("customer")
+    if not customer_id:
+        print(f"[WARN] {SUBSCRIPTION_DELETED} carried no customer id — ignored.")
+        return
+
+    _require_db("deactivate customer")
+
+    try:
+        with database.session_scope() as session:
+            user = store.get_user_by_stripe_customer(session, customer_id)
+            if user is None:
+                print(f"[WARN] {SUBSCRIPTION_DELETED} for unknown customer "
+                      f"{customer_id!r} — no row updated; reconcile manually.")
+                return
+            store.set_subscription_status(session, user, subscription.INACTIVE)
+            print(f"[INFO] Subscription cancelled for username={user.username!r}.")
+    except SQLAlchemyError as exc:
+        print(f"[ERROR] Deactivation failed (customer={customer_id!r}): {exc}")
         raise HTTPException(status_code=502, detail="Database write failed.")

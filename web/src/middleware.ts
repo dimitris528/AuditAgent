@@ -7,6 +7,15 @@ import { SESSION_COOKIE } from "@/lib/constants";
 // redirected to /login. Presence is checked here for a fast redirect; the JWT
 // is actually VALIDATED server-side by FastAPI on every data call (an expired
 // token yields 401 → the page redirects to /login).
+//
+// The SUBSCRIPTION paywall is deliberately NOT enforced here. This middleware
+// runs on the Edge runtime with nothing but the cookie: it cannot read the
+// database, and the JWT carries no subscription claim (nor should it — a token
+// minted during a trial would keep asserting "trialing" for its full 12 hours
+// after the trial ended). The gate therefore lives where the answer is
+// current: FastAPI returns 402 on writes, and the dashboard page redirects to
+// /billing. /billing itself only needs a session, which this already ensures.
+//
 // Pages reachable without a session. /register must be here or a new visitor
 // is redirected to /login before they can ever sign up.
 const PUBLIC_PATHS = new Set(["/login", "/register"]);

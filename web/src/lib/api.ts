@@ -224,6 +224,17 @@ export async function login(
 /** Minimum enforced server-side too — this only mirrors it for the form. */
 export const MIN_PASSWORD_LENGTH = 8;
 
+/**
+ * Free-trial length, for the signup copy only.
+ *
+ * The trial is granted and timed entirely by the backend
+ * (server/subscription.py); this constant never decides anything, so a
+ * deployment that overrides TRIAL_DAYS gets the right trial and slightly stale
+ * marketing copy — not a mismatch that matters. Every page that shows a live
+ * countdown reads `trial_days` off the API instead.
+ */
+export const TRIAL_DAYS = 14;
+
 export async function register(
   username: string,
   email: string,
@@ -246,4 +257,16 @@ export async function register(
 
 export async function logout(): Promise<void> {
   await fetch(`/api/auth/logout`, { method: "POST" });
+}
+
+/**
+ * Open a Stripe Checkout session and return the URL to send the browser to.
+ *
+ * The redirect is the CALLER's job: `window.location.assign(url)` rather than
+ * a router push, because the destination is Stripe's own domain and the Next
+ * router would refuse it.
+ */
+export async function startCheckout(): Promise<{ url: string }> {
+  const res = await fetch(`/api/billing/checkout`, { method: "POST" });
+  return unwrap(res, "Αποτυχία έναρξης πληρωμής");
 }

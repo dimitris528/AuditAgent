@@ -178,7 +178,53 @@ _ADDITIVE_MIGRATIONS = (
     "ON transactions (doc_type)",
     "CREATE INDEX IF NOT EXISTS ix_transactions_due_date "
     "ON transactions (due_date)",
+    # Billing. Covers the case where `users` predates the trial columns
+    # entirely; the rename below covers the far commoner case where it has them
+    # under the old name.
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS trial_ends_at TIMESTAMPTZ",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_customer_id VARCHAR(128)",
 )
+
+# The ONE non-additive statement in this file, and the reason it is here rather
+# than in a hand-run migration: `users.trial_expiry` was renamed to
+# `trial_ends_at`, and until it runs, every query naming the new column fails on
+# an already-deployed database — i.e. the whole app is down, not degraded.
+#
+# It is data-preserving (RENAME moves the column, values and all) and idempotent
+# by construction: the DO block renames ONLY when the old name is present and
+# the new one is not, so a second boot, a fresh database, and a half-applied
+# state all converge on the same schema. It touches nothing else.
+#
+# The status lower-casing that follows is the data half of the same change. The
+# column used to hold Airtable's Title Case single-select ("Active"); the code
+# now compares against lower-case constants (server/subscription.py). Written
+# once here so the stored values match what is read, rather than leaving every
+# comparison to remember to fold case.
+_RENAME_MIGRATIONS = (
+    """
+    DO $$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = current_schema()
+                      AND table_name = 'users'
+                      AND column_name = 'trial_expiry')
+           AND NOT EXISTS (SELECT 1 FROM information_schema.columns
+                            WHERE table_schema = current_schema()
+                              AND table_name = 'users'
+                              AND column_name = 'trial_ends_at')
+        THEN
+            ALTER TABLE users RENAME COLUMN trial_expiry TO trial_ends_at;
+        END IF;
+    END $$;
+    """,
+)
+
+_NORMALISE_STATUS = """
+UPDATE users
+   SET subscription_status = lower(btrim(subscription_status))
+ WHERE subscription_status IS NOT NULL
+   AND subscription_status <> lower(btrim(subscription_status))
+"""
 
 # Link transactions written before client_id existed to their client, matching
 # on the denormalised name within the same tenant. Only fills NULLs, so it can
@@ -212,9 +258,17 @@ def init_db():
     from sqlalchemy import text  # local import keeps the module surface small
 
     with engine.begin() as conn:
+        # Renames FIRST: the ALTERs below would otherwise add a second, empty
+        # trial_ends_at alongside the populated trial_expiry, and the rename
+        # would then never fire — silently losing every trial date.
+        for statement in _RENAME_MIGRATIONS:
+            conn.execute(text(statement))
         for statement in _ADDITIVE_MIGRATIONS:
             conn.execute(text(statement))
+        folded = conn.execute(text(_NORMALISE_STATUS)).rowcount
         linked = conn.execute(text(_BACKFILL_CLIENT_ID)).rowcount
+    if folded:
+        print(f"[INFO] Lower-cased subscription_status on {folded} user row(s).")
     if linked:
         print(f"[INFO] Linked {linked} transaction(s) to their client row.")
 

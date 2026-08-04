@@ -99,6 +99,39 @@ export interface DashboardData {
    *  hidden rather than offered as a control that can only fail. */
   scan_enabled: boolean;
   period: PeriodInfo;
+  /** Rides along on the dashboard payload so the page can redirect a lapsed
+   *  tenant to /billing before rendering, without a second round trip. */
+  subscription: SubscriptionInfo;
+}
+
+/** "demo" only ever appears when the backend runs without a database. */
+export type SubscriptionStatus = "trialing" | "active" | "inactive" | "demo";
+
+/** server/subscription.py → SubscriptionState.to_dict(). */
+export interface SubscriptionInfo {
+  status: SubscriptionStatus;
+  /** ISO-8601 (UTC, "Z") end of the free trial. Null once paid. */
+  trial_ends_at: string | null;
+  /** Whole days left, rounded up. 0 unless trialing. */
+  days_left: number;
+  is_trialing: boolean;
+  /** The paywall, in one boolean: false = writes return 402. */
+  allows_writes: boolean;
+  ending_soon: boolean;
+  /** Trial length the backend grants, so copy never hard-codes "14". */
+  trial_days: number;
+}
+
+/** GET /api/v1/billing/status — the subscription plus what billing can do. */
+export interface BillingStatus extends SubscriptionInfo {
+  username: string;
+  email?: string;
+  demo: boolean;
+  has_stripe_customer?: boolean;
+  /** STRIPE_SECRET_KEY + STRIPE_PRICE_ID are both set. */
+  stripe_configured: boolean;
+  /** …and a database is configured, so checkout can actually be opened. */
+  checkout_enabled: boolean;
 }
 
 /** A client row as returned by /api/v1/clients (not the finance shape). */

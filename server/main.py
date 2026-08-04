@@ -27,7 +27,6 @@ from typing import Literal
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import text as _text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -36,7 +35,8 @@ import auth
 import finance
 import passwords
 from config import STRIPE_WEBHOOK_SECRET
-from server import database, demo, ocr, store
+from server import billing, database, demo, deps, ocr, store, subscription
+from server.billing import router as billing_router
 from server.webhooks import router as webhooks_router
 
 @asynccontextmanager
@@ -63,6 +63,9 @@ app = FastAPI(title="Accounting SaaS API", version="3.0.0", lifespan=lifespan)
 # Stripe billing webhook (POST /api/v1/webhooks/stripe). Public by design —
 # it authenticates via Stripe's payload signature, not a bearer token.
 app.include_router(webhooks_router)
+# Subscription status + Stripe Checkout (GET/POST /api/v1/billing/*). Bearer
+# auth, like every other data route.
+app.include_router(billing_router)
 
 _origins = os.getenv(
     "FRONTEND_ORIGINS",
@@ -78,31 +81,23 @@ app.add_middleware(
 
 DEMO_ENABLED = os.getenv("DASHBOARD_DEMO", "1") != "0"
 TREND_MONTHS = int(os.getenv("DASHBOARD_TREND_MONTHS", "12"))
-# Free-trial length for self-service signups, and the minimum password we will
-# store. Both are enforced server-side; the UI only mirrors them.
-TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "15"))
+# Shortest password we will store, enforced server-side; the UI only mirrors
+# it. (The free-trial length lives in server/subscription.py, which owns both
+# granting the trial and expiring it — so the two cannot disagree about how
+# long 14 days is.)
 MIN_PASSWORD_LENGTH = 8
 _TXN_TYPES = {"Έσοδο", "Έξοδο", finance.DEBT_TYPE}
 
-_bearer = HTTPBearer(auto_error=False)
-
 
 # --------------------------------------------------------------------------
-# Auth dependency — the tenant is the JWT subject, nothing else
+# Auth + subscription dependencies
 # --------------------------------------------------------------------------
-def get_current_user(
-    cred: HTTPAuthorizationCredentials | None = Depends(_bearer),
-) -> str:
-    if cred is None or not cred.credentials:
-        raise HTTPException(status_code=401, detail="Απαιτείται σύνδεση.")
-    try:
-        payload = auth.decode_token(cred.credentials)
-    except auth.AuthError as exc:
-        raise HTTPException(status_code=exc.status, detail=str(exc))
-    sub = payload.get("sub")
-    if not sub:
-        raise HTTPException(status_code=401, detail="Μη έγκυρη συνεδρία.")
-    return sub
+# Defined in server/deps.py so the billing router can share them without
+# importing this module (which imports it). Re-bound here under the names the
+# rest of the file has always used.
+get_current_user = deps.get_current_user
+_require_db = deps.require_db
+_resolve_user = deps.resolve_user
 
 
 # --------------------------------------------------------------------------
@@ -208,44 +203,51 @@ class ClientUpdate(BaseModel):
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
-def _require_db():
-    """Fail with 503 when writes are attempted without a database."""
-    if not database.is_configured():
-        raise HTTPException(
-            status_code=503,
-            detail="Η βάση δεδομένων δεν έχει ρυθμιστεί (ορίστε DATABASE_URL).")
-
-
-def _resolve_user(session, username):
-    """Turn the JWT subject into the tenant's row, or 401 if it no longer
-    exists — a token outliving its account must not resolve to anything."""
-    user = store.get_user_by_username(session, username)
-    if user is None:
-        raise HTTPException(status_code=401, detail="Ο λογαριασμός δεν βρέθηκε.")
-    return user
-
-
 def _load(username):
-    """Return (active, completed, transactions, is_demo) for one tenant.
+    """Return (active, completed, transactions, is_demo, subscription) for one
+    tenant.
 
     The live database is preferred whenever it is configured, and its errors
     surface (502) rather than being masked. The demo dataset is used ONLY when
     DATABASE_URL is absent (bootstrap), so live data can never be silently
-    replaced by demo figures."""
+    replaced by demo figures.
+
+    The subscription rides along because _resolve_user has already resolved it:
+    returning it here is what lets the dashboard tell the UI to redirect an
+    expired tenant to /billing without a second round trip."""
     if not database.is_configured():
         if DEMO_ENABLED:
             return (demo.demo_active_projects(), demo.demo_completed_projects(),
-                    demo.demo_transactions(), True)
+                    demo.demo_transactions(), True, subscription.demo_state())
         raise HTTPException(
             status_code=503,
             detail="Η βάση δεδομένων δεν έχει ρυθμιστεί (ορίστε DATABASE_URL).")
     try:
         with database.session_scope() as session:
-            user = _resolve_user(session, username)
+            user, state = deps.resolve_user_state(session, username)
             return (store.get_active_projects(session, user),
                     store.get_completed_projects(session, user),
                     store.get_transactions(session, user),
-                    False)
+                    False, state)
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+
+
+def _assert_can_write(username):
+    """Refuse a paid-feature request from a lapsed account BEFORE it costs
+    anything.
+
+    Only the scan endpoint needs this: every other write resolves the tenant
+    inside its own session and gates there, but OCR spends an Anthropic call
+    before it ever touches the database, so the check has to come first.
+    """
+    if not database.is_configured():
+        return
+    try:
+        with database.session_scope() as session:
+            _resolve_user(session, username, write=True)
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
@@ -337,6 +339,12 @@ def status():
         "auth_mode": "postgres" if configured else ("demo" if DEMO_ENABLED else "disabled"),
         "jwt_secret_set": not auth.JWT_SECRET_IS_DEFAULT,
         "stripe_webhook_configured": bool(STRIPE_WEBHOOK_SECRET),
+        # Checkout needs the secret key AND a price; the webhook needs only the
+        # signing secret. Reported separately because half-configured billing
+        # (a webhook with no checkout, or the reverse) is the usual mistake and
+        # each half fails in a completely different place.
+        "stripe_checkout_configured": billing.is_configured(),
+        "trial_days": subscription.TRIAL_DAYS,
     }
     if configured:
         try:
@@ -409,9 +417,13 @@ def me(user: str = Depends(get_current_user)):
 def register(body: RegisterRequest):
     """Self-service signup, writing straight to PostgreSQL.
 
-    New accounts start Active on a 15-day trial; trial_expiry is what the
-    subscription gate reads to flip them to Inactive, and a paid Stripe
-    checkout clears it (see server/webhooks.py).
+    Every new account starts on a free 14-day trial: `subscription_status`
+    "trialing" and `trial_ends_at` = now + TRIAL_DAYS. No card, no extra step —
+    the trial is granted by the act of registering.
+
+    `trial_ends_at` is what the paywall reads (server/subscription.py): the
+    first request after it passes flips the account to "inactive", and a paid
+    Stripe checkout clears the date entirely (see server/webhooks.py).
 
     Availability is checked first for a friendly 409, but the UNIQUE
     constraints on username/email are the real guard — two simultaneous
@@ -441,17 +453,19 @@ def register(body: RegisterRequest):
                 email=email,
                 # Hashed here — a plaintext password never reaches the database.
                 password_hash=passwords.hash_password(body.password),
-                subscription_status="Active",
-                trial_expiry=store.utcnow() + _dt.timedelta(days=TRIAL_DAYS),
+                subscription_status=subscription.TRIALING,
+                trial_ends_at=subscription.trial_end(),
             )
             token = auth.create_access_token(user.username, extra={"demo": False})
+            state = subscription.resolve(user.subscription_status,
+                                         user.trial_ends_at)
             return {
                 "ok": True,
                 "access_token": token,
                 "token_type": "bearer",
                 "username": user.username,
                 "email": user.email,
-                "subscription": user.subscription_status,
+                "subscription": state.to_dict(),
                 "demo": False,
                 "expires_hours": auth.JWT_EXPIRE_HOURS,
             }
@@ -490,7 +504,7 @@ def dashboard(user: str = Depends(get_current_user),
     and the UI labels it as all-time so the two are not read as contradicting
     each other.
     """
-    active, completed, transactions, is_demo = _load(user)
+    active, completed, transactions, is_demo, state = _load(user)
     start, end = finance.period_bounds(year, quarter, month)
     scoped = finance.filter_period(transactions, start, end)
     payload = finance.build_dashboard(active, completed, scoped,
@@ -502,6 +516,11 @@ def dashboard(user: str = Depends(get_current_user),
     payload["username"] = user
     payload["demo"] = is_demo
     payload["scan_enabled"] = ocr.is_configured()
+    # Carried on the dashboard payload rather than fetched separately: the page
+    # has to know whether to redirect a lapsed tenant to /billing BEFORE it
+    # renders, and a second request to find that out would show the dashboard
+    # for a frame first.
+    payload["subscription"] = state.to_dict()
     payload["period"] = {
         "year": year,
         "quarter": quarter,
@@ -580,7 +599,7 @@ def create_client(body: ClientCreate, user: str = Depends(get_current_user)):
     _require_db()
     try:
         with database.session_scope() as session:
-            tenant = _resolve_user(session, user)
+            tenant = _resolve_user(session, user, write=True)
             clash, reason = store.detect_client_duplicate(
                 session, tenant, name=body.name, afm=body.afm)
             if clash is not None:
@@ -672,7 +691,7 @@ def update_client(client_id: int, body: ClientUpdate,
         raise HTTPException(status_code=422, detail="Κανένα πεδίο προς ενημέρωση.")
     try:
         with database.session_scope() as session:
-            tenant = _resolve_user(session, user)
+            tenant = _resolve_user(session, user, write=True)
             # Both the rename and the ΑΦΜ are checked, and against every OTHER
             # client only — editing a client without changing either must not
             # collide with itself.
@@ -701,7 +720,7 @@ def transactions(user: str = Depends(get_current_user),
     """Recent transactions (newest first) for the tenant, optionally filtered
     to one client."""
     limit = max(1, min(limit, 1000))
-    _active, _completed, txns, is_demo = _load(user)
+    _active, _completed, txns, is_demo, _state = _load(user)
     if client:
         target = client.strip().lower()
         txns = [t for t in txns
@@ -763,7 +782,7 @@ def create_transaction(body: TransactionCreate,
         vat_amount = finance.vat_for_write(signed, is_revenue, body.vat_rate)
     try:
         with database.session_scope() as session:
-            tenant = _resolve_user(session, user)
+            tenant = _resolve_user(session, user, write=True)
             # Same invoice, same issuer, same date = the same document being
             # entered twice. WARN rather than refuse: a genuine reissue under
             # the same number exists, so the caller can repeat the request with
@@ -830,7 +849,7 @@ def _settle(record_id, amount, vat_rate, when, note, user):
     _require_db()
     try:
         with database.session_scope() as session:
-            tenant = _resolve_user(session, user)
+            tenant = _resolve_user(session, user, write=True)
             # store.settle_debt is tenant-scoped, so another tenant's id is
             # indistinguishable from a missing one.
             result = store.settle_debt(session, tenant, record_id,
@@ -919,11 +938,17 @@ async def scan_document(file: UploadFile = File(...),
     through the ordinary create endpoint, so a misread never lands in the books
     unseen. The client match and duplicate check ride along so the form can
     pre-select the client it recognised and warn on an invoice already filed.
+
+    Gated behind the subscription anyway, despite writing nothing: it is the
+    front door of the transaction-entry flow, and it bills a real Anthropic call
+    per request. Checked BEFORE the extraction, so a lapsed account costs
+    nothing rather than being told 402 after the money is spent.
     """
     if not ocr.is_configured():
         raise HTTPException(
             status_code=503,
             detail="Η σάρωση παραστατικών δεν έχει ρυθμιστεί (ορίστε ANTHROPIC_API_KEY).")
+    _assert_can_write(user)
     data = await file.read()
     try:
         extracted = ocr.extract(data, file.content_type, filename=file.filename)
@@ -963,7 +988,7 @@ def delete_transaction(record_id: str, user: str = Depends(get_current_user)):
     _require_db()
     try:
         with database.session_scope() as session:
-            tenant = _resolve_user(session, user)
+            tenant = _resolve_user(session, user, write=True)
             if not store.delete_transaction(session, tenant, record_id):
                 raise HTTPException(status_code=404, detail="Η κίνηση δεν βρέθηκε.")
             return {"ok": True, "id": record_id}

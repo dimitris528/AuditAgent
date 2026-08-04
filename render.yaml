@@ -46,10 +46,27 @@ services:
         sync: false
       # Stripe billing webhook signing secret (whsec_...). Point the Stripe
       # endpoint at https://<this service>/api/v1/webhooks/stripe and subscribe
-      # it to checkout.session.completed. Unset => the endpoint returns 503
-      # rather than trusting unverified payloads.
+      # it to checkout.session.completed AND customer.subscription.deleted.
+      # Unset => the endpoint returns 503 rather than trusting unverified
+      # payloads.
       - key: STRIPE_WEBHOOK_SECRET
         sync: false
+      # Stripe Checkout (POST /api/v1/billing/checkout). Secret key plus the
+      # RECURRING Price id ("price_...", not "prod_..."). Either unset => the
+      # endpoint returns 503 and the /billing page reports that payments are
+      # not configured; the free trial and the paywall still work.
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_PRICE_ID
+        sync: false
+      # Where Stripe returns the BROWSER after checkout — the public URL of the
+      # accounting-web service, not this one. Set it in the dashboard once that
+      # service's URL is known (fromService cannot be used for a URL here).
+      - key: APP_BASE_URL
+        sync: false
+      # Days of free access granted at registration.
+      - key: TRIAL_DAYS
+        value: "14"
       # Anthropic key for the invoice-scan endpoint (POST
       # /api/v1/documents/scan). Unset => the endpoint returns 503 and the UI
       # hides the scan button; everything else works unchanged.

@@ -128,6 +128,12 @@ def migrate(dry_run=False):
                         # Verbatim: already-hashed values keep verifying, and
                         # legacy plaintext still matches via password_matches.
                         password_hash=str(f.get("Password") or ""),
+                        # Airtable's Title Case single-select ("Active" /
+                        # "Expired"); store.create_user folds it onto the
+                        # canonical lower-case status. No trial date comes
+                        # across, so a migrated "Active" account is treated as
+                        # paid rather than as a trial that already ran out —
+                        # which is what those rows meant in Airtable.
                         subscription_status=(f.get("SubscriptionStatus") or "Active"),
                     )
 

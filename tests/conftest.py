@@ -24,6 +24,17 @@ os.environ["DASHBOARD_DEMO"] = "0"
 # No OCR key: every test that touches scanning asserts the disabled path, and a
 # key inherited from the developer's shell would bill real API calls.
 os.environ.pop("ANTHROPIC_API_KEY", None)
+# A FIXED webhook signing secret, so the billing tests can sign a payload the
+# way Stripe does and exercise the real verification path rather than stubbing
+# construct_event out (which would leave the signature check untested).
+WEBHOOK_SECRET = "whsec_test_secret_for_the_suite_only"
+os.environ["STRIPE_WEBHOOK_SECRET"] = WEBHOOK_SECRET
+# Checkout stays UNCONFIGURED by default: an inherited sk_live_ key would open
+# real Stripe sessions. The tests that need it patch server.billing directly.
+os.environ.pop("STRIPE_SECRET_KEY", None)
+os.environ.pop("STRIPE_PRICE_ID", None)
+# Pinned rather than inherited: the trial assertions count days.
+os.environ["TRIAL_DAYS"] = "14"
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

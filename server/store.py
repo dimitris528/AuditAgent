@@ -21,6 +21,7 @@ from sqlmodel import select
 # instead of making every caller pre-compute cents it cannot know (the amount
 # left owing is only readable once the row has been loaded).
 import finance
+from server import subscription
 from server.models import (
     STATUS_ACTIVE,
     STATUS_COMPLETED,
@@ -83,15 +84,26 @@ def get_user_by_stripe_customer(session, customer_id):
 
 
 def create_user(session, username, email, password_hash,
-                subscription_status="Active", trial_expiry=None):
-    """Insert a new tenant. Callers must check availability first; the unique
-    constraints on username/email are the real guard against a race."""
+                subscription_status=None, trial_ends_at=None):
+    """Insert a new tenant, on a free trial unless told otherwise.
+
+    The trial is the DEFAULT rather than something the caller has to remember:
+    a signup that silently skipped it would create an account that is inactive
+    from its first request. Callers must check availability first; the unique
+    constraints on username/email are the real guard against a race.
+    """
+    status = subscription.normalize(subscription_status or subscription.TRIALING)
+    # A trial with no deadline is not a trial — subscription.resolve reads the
+    # missing date as a lapsed one and fails closed. Fill it in rather than
+    # write a row that is inactive from its very first request.
+    if status == subscription.TRIALING and trial_ends_at is None:
+        trial_ends_at = subscription.trial_end()
     user = User(
         username=str(username).strip(),
         email=str(email).strip().lower(),
         password_hash=password_hash,
-        subscription_status=subscription_status,
-        trial_expiry=trial_expiry,
+        subscription_status=status,
+        trial_ends_at=trial_ends_at,
     )
     session.add(user)
     session.commit()
@@ -100,16 +112,45 @@ def create_user(session, username, email, password_hash,
 
 
 def set_subscription_status(session, user, status):
-    """Flip a tenant's subscription. Setting Active also clears trial_expiry,
-    matching the Airtable behaviour: activation follows a PAID checkout, and a
-    stale trial date would flip the paying account straight back to inactive."""
+    """Flip a tenant's subscription.
+
+    Going ACTIVE also clears trial_ends_at, and that is load-bearing rather than
+    tidying: subscription.resolve() reads a trial date as "this is a trial", so
+    leaving one on a paying account would expire them again the moment it passed
+    — a paid customer locked out by their own dead trial.
+    """
+    status = subscription.normalize(status)
     user.subscription_status = status
-    if status == "Active":
-        user.trial_expiry = None
+    if status == subscription.ACTIVE:
+        user.trial_ends_at = None
     session.add(user)
     session.commit()
     session.refresh(user)
     return user
+
+
+def refresh_subscription(session, user, now=None):
+    """Resolve the tenant's subscription and write back any drift.
+
+    Called on every database-backed request (server/deps.py), which is what
+    makes an expired trial flip itself to `inactive` without a scheduled job:
+    the first request after the deadline does it. The write is skipped unless
+    the verdict actually differs from the stored column, so the overwhelmingly
+    common case — a valid trial, a paid account — costs one SELECT and no
+    transaction at all.
+
+    The trial date is deliberately KEPT when a trial lapses: the billing page
+    says when it ended, and re-resolving an `inactive` row is stable because an
+    explicit inactive wins over any date (subscription.resolve).
+    """
+    state = subscription.resolve(user.subscription_status, user.trial_ends_at,
+                                 now=now)
+    if state.needs_persisting:
+        user.subscription_status = state.status
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+    return state
 
 
 def set_stripe_customer(session, user, customer_id):

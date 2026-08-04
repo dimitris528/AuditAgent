@@ -1,7 +1,8 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import { cookies } from "next/headers";
-import { Calculator } from "lucide-react";
+import Link from "next/link";
+import { Calculator, CreditCard } from "lucide-react";
 import "./globals.css";
 import { SESSION_COOKIE } from "@/lib/constants";
 import { ThemeProvider, themeInitScript } from "@/components/theme/ThemeProvider";
@@ -46,6 +47,20 @@ export default async function RootLayout({
                 </div>
               </div>
               <div className="flex items-center gap-2">
+                {/* Always reachable while signed in — including for a lapsed
+                    account, whose only way back is through this link. */}
+                {authed ? (
+                  <Link
+                    href="/billing"
+                    title="Συνδρομή"
+                    className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 text-slate-600 transition hover:border-slate-300 hover:text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:border-slate-600 dark:hover:text-white"
+                  >
+                    <CreditCard className="h-4 w-4" />
+                    <span className="hidden sm:inline text-xs font-medium">
+                      Συνδρομή
+                    </span>
+                  </Link>
+                ) : null}
                 <ThemeToggle />
                 {authed ? <LogoutButton /> : null}
               </div>

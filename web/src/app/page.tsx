@@ -10,6 +10,7 @@ import { DebtAlerts } from "@/components/DebtAlerts";
 import { AnalyticsSection } from "@/components/AnalyticsSection";
 import { QuickAddTransaction } from "@/components/QuickAddTransaction";
 import { PeriodSelector } from "@/components/PeriodSelector";
+import { TrialBanner } from "@/components/TrialBanner";
 import { Badge } from "@/components/ui/Badge";
 
 // Always render fresh — figures reflect the latest database state.
@@ -69,6 +70,15 @@ export default async function Page({
     );
   }
 
+  // The paywall, at the page level. The backend already refuses an expired
+  // tenant's writes with 402, but letting them sit on a dashboard whose every
+  // control fails is a worse experience than sending them somewhere that
+  // explains why. Outside the try block on purpose: redirect() works by
+  // throwing, and a catch would swallow it.
+  if (!data.subscription.allows_writes) {
+    redirect("/billing");
+  }
+
   return (
     // One drawer for the whole page, so an alert row and a client card cannot
     // each open their own on top of the other. It wraps the spacing container
@@ -104,6 +114,8 @@ export default async function Page({
             />
           </div>
         </div>
+
+        <TrialBanner subscription={data.subscription} />
 
         {/* Period filter — every figure below reflects the selected window. */}
         <div className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 dark:border-slate-800 dark:bg-slate-900">

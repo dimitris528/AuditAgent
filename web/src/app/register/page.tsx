@@ -4,7 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Calculator, Loader2, UserPlus, AlertCircle } from "lucide-react";
-import { register, MIN_PASSWORD_LENGTH } from "@/lib/api";
+import { register, MIN_PASSWORD_LENGTH, TRIAL_DAYS } from "@/lib/api";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -64,7 +64,7 @@ export default function RegisterPage() {
             Δημιουργία λογαριασμού
           </h1>
           <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-            Ξεκινήστε με δωρεάν δοκιμή 15 ημερών
+            Ξεκινήστε με δωρεάν δοκιμή {TRIAL_DAYS} ημερών · χωρίς κάρτα
           </p>
         </div>
 

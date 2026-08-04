@@ -25,7 +25,7 @@ import time
 import jwt
 
 import passwords
-from server import database, store
+from server import database, store, subscription
 
 # --- JWT config ------------------------------------------------------------
 # In production ALWAYS set JWT_SECRET (render.yaml generates one). The dev
@@ -112,7 +112,8 @@ def authenticate(identifier, password):
 
     if not database.is_configured():
         if DEMO_ENABLED and identifier == DEMO_USER and password == DEMO_PASSWORD:
-            return {"username": DEMO_USER, "subscription": "Demo", "demo": True}
+            return {"username": DEMO_USER, "demo": True,
+                    "subscription": subscription.demo_state().to_dict()}
         return None
 
     try:
@@ -125,7 +126,10 @@ def authenticate(identifier, password):
             return {
                 "username": user.username,
                 "email": user.email,
-                "subscription": user.subscription_status,
+                # Resolved, not read raw: signing in is the natural moment to
+                # notice that a trial lapsed while nobody was looking, and
+                # refresh_subscription persists that verdict.
+                "subscription": store.refresh_subscription(session, user).to_dict(),
                 "demo": False,
             }
     except AuthError:

@@ -25,6 +25,8 @@ from typing import Optional
 from sqlalchemy import Column, DateTime
 from sqlmodel import Field, SQLModel
 
+from server import subscription
+
 
 def _tstz(nullable=True):
     """A TIMESTAMPTZ column.
@@ -69,9 +71,17 @@ class User(SQLModel, table=True):
     # invalidate every live session.
     username: str = Field(index=True, unique=True, max_length=120)
     password_hash: str = Field(max_length=255)
-    subscription_status: str = Field(default="Active", max_length=32)
+    # "trialing" | "active" | "inactive" — see server/subscription.py, which
+    # owns what each one is allowed to do. The default fails CLOSED: a row
+    # inserted without a status has no trial date either, so it is not a trial,
+    # and calling it Active would hand out a free account by omission.
+    subscription_status: str = Field(default=subscription.INACTIVE, max_length=32)
     stripe_customer_id: Optional[str] = Field(default=None, index=True, max_length=128)
-    trial_expiry: Optional[dt.datetime] = Field(default=None, sa_column=_tstz())
+    # When the free trial runs out. Set at registration and CLEARED on payment:
+    # its presence is what marks the account as a trial (subscription.resolve),
+    # so a stale date on a paying account would flip them back to inactive.
+    # Renamed from `trial_expiry` — see the guarded rename in database.py.
+    trial_ends_at: Optional[dt.datetime] = Field(default=None, sa_column=_tstz())
     created_at: dt.datetime = Field(default_factory=_utcnow,
                                     sa_column=_tstz(nullable=False))
 

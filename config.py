@@ -62,6 +62,30 @@ AIRTABLE_USERS_TABLE = _env("AIRTABLE_USERS_TABLE", "Users")
 # accepting unverified payloads).
 STRIPE_WEBHOOK_SECRET = _env("STRIPE_WEBHOOK_SECRET")
 
+# Secret API key ("sk_test_..." / "sk_live_...") and the recurring Price the
+# checkout subscribes to ("price_..."). Both are required by
+# POST /api/v1/billing/checkout; with either missing the endpoint reports 503
+# and the billing page says the subscription is not configured yet, rather than
+# opening a checkout that cannot complete.
+#
+# NOTE the price is a Price id, not a Product id. Stripe rejects a "prod_..."
+# here, and the error it returns names neither field.
+STRIPE_SECRET_KEY = _env("STRIPE_SECRET_KEY")
+STRIPE_PRICE_ID = _env("STRIPE_PRICE_ID")
+
+# Public origin of the Next.js dashboard, used to build the Stripe success and
+# cancel URLs. Stripe redirects the BROWSER there after checkout, so it must be
+# the address the user's browser can reach — not the API's own host.
+APP_BASE_URL = _env("APP_BASE_URL", "http://localhost:3000").rstrip("/")
+
+
+# --- Free trial ------------------------------------------------------------
+# Days of full access granted automatically at registration, with no card. When
+# it elapses the account flips itself to "inactive" on its next request: reads
+# still work, writes return 402. server/subscription.py owns what that means
+# and reads the value from here.
+TRIAL_DAYS = int(_env("TRIAL_DAYS", "14"))
+
 
 # --- Anthropic (invoice OCR) ----------------------------------------------
 # Powers POST /api/v1/documents/scan — reading a PDF/photo of an invoice into
