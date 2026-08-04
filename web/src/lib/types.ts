@@ -27,6 +27,8 @@ export interface ClientData {
   id: string | null;
   name: string;
   key: string;
+  /** Α.Φ.Μ. — null on clients that have none, absent on the Airtable path. */
+  afm?: string | null;
   metrics: ClientMetrics;
   tax: TaxInfo;
 }

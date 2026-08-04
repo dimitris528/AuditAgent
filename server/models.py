@@ -147,6 +147,10 @@ class Client(SQLModel, table=True):
                 "Username": username,
                 "Status": self.status,
                 "ClosedDate": self.closed_date.isoformat() if self.closed_date else None,
+                # Carried into the finance record shape so the dashboard's
+                # client cards can be searched by Α.Φ.Μ. without a second
+                # round trip per card.
+                "AFM": self.afm,
             },
         }
 

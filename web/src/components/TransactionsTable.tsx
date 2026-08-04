@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { Receipt, Search, X } from "lucide-react";
 import type { TransactionRow } from "@/lib/types";
 import { money, moneyAbs } from "@/lib/format";
+import { searchHaystack, searchKey } from "@/lib/text";
 import { clsx } from "@/lib/clsx";
 import { Badge } from "./ui/Badge";
 import { useClientDrawer } from "./ClientDrawerProvider";
@@ -53,22 +54,15 @@ function amountClass(t: TransactionRow): string {
 
 function matches(t: TransactionRow, needle: string): boolean {
   if (!needle) return true;
-  // Accent- and case-insensitive: the app's data is Greek, and someone typing
-  // "νησιδα" expects to find "Νησίδα".
-  const hay = [
+  // Accent- and case-insensitive — see lib/text.
+  return searchHaystack([
     t.client,
     t.description,
     t.doc_number,
     t.doc_type,
     t.type,
     t.date,
-  ]
-    .filter(Boolean)
-    .join(" ")
-    .normalize("NFD")
-    .replace(/\p{Diacritic}/gu, "")
-    .toLowerCase();
-  return hay.includes(needle);
+  ]).includes(needle);
 }
 
 export function TransactionsTable({
@@ -87,15 +81,7 @@ export function TransactionsTable({
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
 
-  const needle = useMemo(
-    () =>
-      query
-        .trim()
-        .normalize("NFD")
-        .replace(/\p{Diacritic}/gu, "")
-        .toLowerCase(),
-    [query],
-  );
+  const needle = useMemo(() => searchKey(query), [query]);
 
   const visible = useMemo(() => {
     return rows.filter((t) => {

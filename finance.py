@@ -564,6 +564,9 @@ def build_clients(active_projects, grouped, debt_by_client):
             "id": proj.get("id"),
             "name": name,
             "key": key,
+            # Absent on the Airtable path, which never had the column — the UI
+            # treats it as optional and simply searches by name there.
+            "afm": proj["fields"].get("AFM"),
             "metrics": m,
             "tax": income_tax_status(m["taxable"]),
         })
