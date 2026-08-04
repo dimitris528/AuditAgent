@@ -72,3 +72,59 @@ export async function proxyJson(
   }
   return NextResponse.json(data);
 }
+
+/**
+ * Proxy a FILE download from the backend.
+ *
+ * Separate from proxyJson because the response is not JSON and must not be
+ * re-serialised: the CSV carries a UTF-8 BOM that Excel needs, and round
+ * -tripping it through NextResponse.json() would both corrupt those bytes and
+ * throw away the Content-Disposition that makes the browser save it.
+ *
+ * This exists at all because a plain <a download> cannot send the bearer
+ * token — the session lives in an httpOnly cookie, so the download has to be
+ * proxied server-side exactly like every other data call.
+ */
+export async function proxyDownload(
+  path: string,
+  options: { fallback: string; filename?: string },
+): Promise<Response> {
+  const token = await getToken();
+  if (!token) {
+    return NextResponse.json({ error: "Απαιτείται σύνδεση." }, { status: 401 });
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE_URL}${path}`, {
+      cache: "no-store",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  } catch {
+    return NextResponse.json(
+      { error: "Το backend δεν είναι διαθέσιμο." },
+      { status: 502 },
+    );
+  }
+
+  if (!res.ok) {
+    // An error IS json — surface it the normal way so the UI can show it.
+    const data = await res.json().catch(() => ({}));
+    return NextResponse.json(
+      { error: errorMessage(data, options.fallback) },
+      { status: res.status },
+    );
+  }
+
+  // Streamed straight through, bytes untouched.
+  return new Response(res.body, {
+    status: 200,
+    headers: {
+      "Content-Type": res.headers.get("Content-Type") ?? "text/csv; charset=utf-8",
+      "Content-Disposition":
+        res.headers.get("Content-Disposition") ??
+        `attachment; filename="${options.filename ?? "export.csv"}"`,
+      "Cache-Control": "no-store",
+    },
+  });
+}

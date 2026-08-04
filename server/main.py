@@ -25,7 +25,7 @@ import os
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import text as _text
@@ -35,7 +35,7 @@ import auth
 import finance
 import passwords
 from config import STRIPE_WEBHOOK_SECRET
-from server import billing, database, demo, deps, ocr, store, subscription
+from server import billing, database, demo, deps, exports, ocr, store, subscription
 from server.billing import router as billing_router
 from server.webhooks import router as webhooks_router
 
@@ -713,6 +713,73 @@ def update_client(client_id: int, body: ClientUpdate,
         raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
 
 
+@app.get("/api/v1/exports/transactions.csv")
+def export_transactions(user: str = Depends(get_current_user),
+                        year: int | None = None,
+                        quarter: int | None = None,
+                        month: int | None = None,
+                        client_id: int | None = None,
+                        dialect: Literal["excel", "iso"] = "excel"):
+    """The period's transactions as a spreadsheet.
+
+    Same period parameters as the dashboard, so the download matches what was
+    on screen when the button was pressed rather than silently exporting the
+    whole book. `client_id` narrows it to one client (the drawer's export).
+
+    A READ, and therefore NOT behind the subscription paywall: an account whose
+    trial lapsed must still be able to get its own books out. Locking a
+    customer's data inside the product is how you turn a billing problem into a
+    grievance.
+
+    See server/exports.py for why the default dialect is semicolon-delimited
+    UTF-8-with-BOM rather than RFC 4180 — in one word, Excel.
+    """
+    active, _completed, transactions, _is_demo, _state = _load(user)
+    start, end = finance.period_bounds(year, quarter, month)
+    scoped = finance.filter_period(transactions, start, end)
+
+    afm_by_client = {}
+    paid_by_debt = {}
+    client_name = None
+    if database.is_configured():
+        try:
+            with database.session_scope() as session:
+                tenant = _resolve_user(session, user)
+                if client_id is not None:
+                    target = store.get_client(session, tenant, client_id)
+                    if target is None:
+                        raise HTTPException(status_code=404,
+                                            detail="Ο πελάτης δεν βρέθηκε.")
+                    client_name = target.name
+                for row in store.list_clients(session, tenant):
+                    if row.afm:
+                        afm_by_client[exports.client_key(row.name)] = row.afm
+                paid_by_debt = store.paid_by_debt(
+                    store.get_debt_payments(session, tenant))
+        except HTTPException:
+            raise
+        except SQLAlchemyError as exc:
+            raise HTTPException(status_code=502,
+                                detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+
+    if client_name is not None:
+        key = exports.client_key(client_name)
+        scoped = [t for t in scoped
+                  if exports.client_key(t["fields"].get("Category")) == key]
+
+    body = exports.transactions_csv(scoped, afm_by_client=afm_by_client,
+                                    paid_by_debt=paid_by_debt, dialect=dialect)
+    name = exports.filename(year=year, quarter=quarter, month=month,
+                            client=client_id)
+    return Response(
+        # Encoded here rather than left to Starlette: the BOM is part of the
+        # BYTES, and the charset has to be declared or Excel guesses again.
+        content=body.encode("utf-8"),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
+
+
 @app.get("/api/transactions")
 def transactions(user: str = Depends(get_current_user),
                  client: str | None = None,
@@ -940,14 +1007,14 @@ async def scan_document(file: UploadFile = File(...),
     pre-select the client it recognised and warn on an invoice already filed.
 
     Gated behind the subscription anyway, despite writing nothing: it is the
-    front door of the transaction-entry flow, and it bills a real Anthropic call
+    front door of the transaction-entry flow, and it bills a real OpenAI call
     per request. Checked BEFORE the extraction, so a lapsed account costs
     nothing rather than being told 402 after the money is spent.
     """
     if not ocr.is_configured():
         raise HTTPException(
             status_code=503,
-            detail="Η σάρωση παραστατικών δεν έχει ρυθμιστεί (ορίστε ANTHROPIC_API_KEY).")
+            detail="Η σάρωση παραστατικών δεν έχει ρυθμιστεί (ορίστε OPENAI_API_KEY).")
     _assert_can_write(user)
     data = await file.read()
     try:

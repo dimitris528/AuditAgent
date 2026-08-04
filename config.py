@@ -87,17 +87,24 @@ APP_BASE_URL = _env("APP_BASE_URL", "http://localhost:3000").rstrip("/")
 TRIAL_DAYS = int(_env("TRIAL_DAYS", "14"))
 
 
-# --- Anthropic (invoice OCR) ----------------------------------------------
+# --- OpenAI Vision (invoice OCR) -------------------------------------------
 # Powers POST /api/v1/documents/scan — reading a PDF/photo of an invoice into
 # the transaction form (server/ocr.py). Leave empty to disable the endpoint:
 # it then returns 503 rather than silently handing back a blank extraction,
 # which would be filed as a blank invoice.
-ANTHROPIC_API_KEY = _env("ANTHROPIC_API_KEY")
-ANTHROPIC_MODEL = _env("ANTHROPIC_MODEL", "claude-opus-5")
+OPENAI_API_KEY = _env("OPENAI_API_KEY")
+# Must be a VISION-capable model that also supports Structured Outputs — the
+# scan sends an image (or a PDF) and requires a JSON-schema-shaped reply, and a
+# text-only model fails on the first request rather than at startup. Pinned to
+# a long-lived default; override to move to a newer one without a code change.
+OPENAI_MODEL = _env("OPENAI_MODEL", "gpt-4o")
 
 
 # Removed with the Streamlit retirement, because nothing read them any more:
-# OPENAI_API_KEY and AIRTABLE_TABLE_NAME (invoice OCR / publisher), SMTP_* (the
-# Streamlit password-reset mail), and the WHATSAPP_* block (which already had
-# no consumer anywhere in the repo). Re-add them next to the code that needs
-# them rather than keeping settings nothing reads.
+# AIRTABLE_TABLE_NAME (the publisher), SMTP_* (the Streamlit password-reset
+# mail), and the WHATSAPP_* block (which already had no consumer anywhere in
+# the repo). Re-add them next to the code that needs them rather than keeping
+# settings nothing reads.
+#
+# ANTHROPIC_API_KEY / ANTHROPIC_MODEL went the same way when the invoice OCR
+# moved from the Claude Messages API to OpenAI Vision; nothing reads them now.

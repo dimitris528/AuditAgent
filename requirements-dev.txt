@@ -6,7 +6,7 @@
 #   pytest
 #
 # The suite runs against a throwaway SQLite file (see tests/conftest.py) and
-# needs no Postgres and no ANTHROPIC_API_KEY.
+# needs no Postgres and no OPENAI_API_KEY.
 
 -r requirements.txt
 

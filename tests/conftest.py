@@ -21,9 +21,10 @@ os.environ["DATABASE_URL"] = f"sqlite:///{_DB}"
 os.environ["JWT_SECRET"] = "test-only-secret-not-used-anywhere-real"
 # Live data only: the demo dataset would mask a broken query with fixtures.
 os.environ["DASHBOARD_DEMO"] = "0"
-# No OCR key: every test that touches scanning asserts the disabled path, and a
-# key inherited from the developer's shell would bill real API calls.
-os.environ.pop("ANTHROPIC_API_KEY", None)
+# No OCR key: every test that touches scanning either asserts the disabled path
+# or stubs the SDK, and a key inherited from the developer's shell would bill
+# real OpenAI calls.
+os.environ.pop("OPENAI_API_KEY", None)
 # A FIXED webhook signing secret, so the billing tests can sign a payload the
 # way Stripe does and exercise the real verification path rather than stubbing
 # construct_event out (which would leave the signature check untested).

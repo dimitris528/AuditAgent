@@ -2,7 +2,11 @@
 // Bearer token from the httpOnly cookie so the FastAPI backend scopes data.
 import { getToken, API_BASE_URL } from "./session";
 import { ApiError } from "./errors";
-import type { BillingStatus, DashboardData } from "./types";
+import type {
+  BillingStatus,
+  ClientDetailPayload,
+  DashboardData,
+} from "./types";
 
 export interface PeriodQuery {
   year?: number | null;
@@ -50,6 +54,36 @@ export async function getBillingStatus(): Promise<BillingStatus> {
       res.status);
   }
   return (await res.json()) as BillingStatus;
+}
+
+/**
+ * One client with its transactions and settlement history — the statement.
+ *
+ * The same endpoint the drawer uses. Fetched SERVER-side here because the
+ * statement page is printed: a client-rendered page can reach the print dialog
+ * before its data has loaded, and print an empty statement.
+ */
+export async function getClientStatement(
+  id: number,
+  period?: PeriodQuery,
+): Promise<ClientDetailPayload> {
+  const token = await getToken();
+  if (!token) throw new ApiError("unauthenticated", 401);
+  const qs = new URLSearchParams();
+  if (period?.year) qs.set("year", String(period.year));
+  if (period?.quarter) qs.set("quarter", String(period.quarter));
+  if (period?.month) qs.set("month", String(period.month));
+  const res = await fetch(
+    `${API_BASE_URL}/api/v1/clients/${id}${qs.toString() ? `?${qs}` : ""}`,
+    { cache: "no-store", headers: { Authorization: `Bearer ${token}` } },
+  );
+  if (!res.ok) {
+    throw new ApiError(
+      await detailOf(res, `Client request failed (${res.status})`),
+      res.status,
+    );
+  }
+  return (await res.json()) as ClientDetailPayload;
 }
 
 /** FastAPI's `detail`, when there is a readable one. */

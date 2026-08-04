@@ -29,10 +29,12 @@ python-multipart==0.0.32   # REQUIRED by FastAPI for UploadFile — without it t
                            # first request
 
 # --- Invoice OCR ----------------------------------------------------------
-# server/ocr.py reads a scanned PDF/photo into the transaction form via the
-# Claude Messages API. Inactive without ANTHROPIC_API_KEY (the endpoint then
-# reports 503), but the import must still resolve.
-anthropic==0.120.2
+# server/ocr.py reads a scanned PDF/photo into the transaction form via OpenAI
+# Vision (Chat Completions + Structured Outputs). Inactive without
+# OPENAI_API_KEY (the endpoint then reports 503), but the import must still
+# resolve. Replaced the `anthropic` SDK when the scan moved to OpenAI; nothing
+# else in the repo imported it.
+openai==2.53.0
 
 # --- PostgreSQL (Supabase) ------------------------------------------------
 # The live data layer. server/database.py builds the engine, server/models.py

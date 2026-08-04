@@ -95,7 +95,7 @@ export interface DashboardData {
   debt_alerts: DebtAlerts;
   username: string;
   demo: boolean;
-  /** False when the backend has no ANTHROPIC_API_KEY — the scan button is then
+  /** False when the backend has no OPENAI_API_KEY — the scan button is then
    *  hidden rather than offered as a control that can only fail. */
   scan_enabled: boolean;
   period: PeriodInfo;

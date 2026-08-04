@@ -1,10 +1,10 @@
 """
-Invoice OCR — structured extraction from a scanned document via Claude.
+Invoice OCR — structured extraction from a scanned document via OpenAI Vision.
 
-One Messages API call per document: the file goes up as a `document` block
-(PDF) or an `image` block (JPG/PNG/WEBP, including a camera capture), and the
-reply is constrained to a JSON schema, so the endpoint parses fields rather
-than prose.
+One Chat Completions call per document: the file goes up as an `image_url`
+content part carrying a base64 data URI (JPG/PNG/WEBP/GIF, including a camera
+capture) or as a `file` part (PDF), and the reply is constrained by Structured
+Outputs to a JSON schema — so the endpoint parses fields rather than prose.
 
 The model is asked ONLY to read what is printed on the page. Every DERIVED
 figure — the VAT rate, the net amount, the ΑΦΜ with its formatting stripped —
@@ -13,9 +13,18 @@ thing not to delegate to a language model in an accounting book. Nothing is
 saved either: the extraction is handed to the UI to review, and the user
 confirms it through the ordinary transaction form.
 
-Configuration: ANTHROPIC_API_KEY. Without it the endpoint reports 503 rather
-than pretending to scan — a silently empty extraction reads as a blank invoice
-and would be filed as one.
+Configuration: OPENAI_API_KEY, and OPENAI_MODEL for the model id. Without a key
+the endpoint reports 503 rather than pretending to scan — a silently empty
+extraction reads as a blank invoice and would be filed as one.
+
+Two model requirements, both of which fail on the FIRST REQUEST rather than at
+startup, so they are worth stating plainly:
+  * vision — the document is sent as an image;
+  * Structured Outputs (`response_format` with a json_schema and strict:true) —
+    without it the reply is prose and _normalise has nothing to read.
+Sending a PDF additionally needs a model that accepts file inputs; a deployment
+whose model does not can still scan photos, and _openai_error surfaces the
+refusal instead of masking it.
 """
 
 import base64
@@ -24,18 +33,17 @@ import json
 import re
 
 import finance
-from config import ANTHROPIC_API_KEY, ANTHROPIC_MODEL
+from config import OPENAI_API_KEY, OPENAI_MODEL
 from server.text import afm_key
 
-# What a phone camera and a scanner actually produce. PDFs ride Claude's
-# native document support; everything else is an image block.
+# What a phone camera and a scanner actually produce. PDFs ride the `file`
+# content part; everything else is an image part.
 PDF_TYPE = "application/pdf"
 IMAGE_TYPES = ("image/jpeg", "image/png", "image/webp", "image/gif")
 SUPPORTED_TYPES = (PDF_TYPE,) + IMAGE_TYPES
 
-# Base64 inflates a payload by ~4/3 and the API caps a request at 32 MB, so
-# 12 MB of file is comfortably inside the limit while still accepting a
-# full-resolution phone photo.
+# Base64 inflates a payload by ~4/3, so 12 MB of file stays comfortably inside
+# the request limit while still accepting a full-resolution phone photo.
 MAX_BYTES = 12 * 1024 * 1024
 
 # A VAT rate derived from the printed euros never lands exactly on 0.24; snap
@@ -54,17 +62,22 @@ class OcrError(RuntimeError):
 def is_configured():
     """True when a key is present. Checked before the upload is even read, so
     an unconfigured deployment fails fast instead of after a 10 MB POST."""
-    return bool(ANTHROPIC_API_KEY)
+    return bool(OPENAI_API_KEY)
 
 
 def _nullable(*types):
     """A schema fragment that accepts the given JSON types or null.
 
+    Written as a type UNION (`"type": ["string", "null"]`) rather than an
+    `anyOf`, because that is the form OpenAI Structured Outputs accepts for an
+    optional field under `strict: true`.
+
     Every field is nullable on purpose: a real invoice routinely omits one of
     them, and forcing the model to produce a value is how you get an invented
-    one.
+    one. Strict mode also requires EVERY property to appear in `required`, so
+    "optional" has to be expressed in the type rather than by omission.
     """
-    return {"anyOf": [{"type": t} for t in types] + [{"type": "null"}]}
+    return {"type": list(types) + ["null"]}
 
 
 _FIELDS = {
@@ -125,28 +138,42 @@ def _client():
     still imports on a deployment that never installed the SDK; the endpoint
     reports it instead of the process failing to boot.
     """
-    if not ANTHROPIC_API_KEY:
+    if not OPENAI_API_KEY:
         raise OcrError(
-            "Η σάρωση παραστατικών δεν έχει ρυθμιστεί (ορίστε ANTHROPIC_API_KEY).",
+            "Η σάρωση παραστατικών δεν έχει ρυθμιστεί (ορίστε OPENAI_API_KEY).",
             status=503)
     try:
-        import anthropic
+        import openai
     except ImportError as exc:  # pragma: no cover - deployment problem
         raise OcrError(
-            "Λείπει η βιβλιοθήκη anthropic στον server.", status=503) from exc
-    return anthropic, anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+            "Λείπει η βιβλιοθήκη openai στον server.", status=503) from exc
+    return openai, openai.OpenAI(api_key=OPENAI_API_KEY)
 
 
-def _content_block(data, media_type):
-    """The document/image block for one uploaded file."""
+def _data_uri(data, media_type):
+    """base64 data URI — how both content parts carry the bytes inline.
+
+    Inline rather than through the Files API on purpose: an upload would need a
+    second round trip and would leave the customer's invoice sitting in
+    OpenAI's file storage afterwards, which is a retention decision this
+    endpoint has no business making on its own.
+    """
     encoded = base64.standard_b64encode(data).decode("ascii")
+    return f"data:{media_type};base64,{encoded}"
+
+
+def _content_block(data, media_type, filename=None):
+    """The image/file content part for one uploaded document."""
+    uri = _data_uri(data, media_type)
     if media_type == PDF_TYPE:
-        return {"type": "document",
-                "source": {"type": "base64", "media_type": PDF_TYPE,
-                           "data": encoded}}
-    return {"type": "image",
-            "source": {"type": "base64", "media_type": media_type,
-                       "data": encoded}}
+        return {"type": "file",
+                # The filename is required by the API for a file part and is
+                # only a label; the bytes are what get read.
+                "file": {"filename": filename or "document.pdf",
+                         "file_data": uri}}
+    # "high" detail: an invoice is small type, and the low-detail path
+    # downsamples enough to lose a document number.
+    return {"type": "image_url", "image_url": {"url": uri, "detail": "high"}}
 
 
 def extract(data, media_type, filename=None):
@@ -167,46 +194,69 @@ def extract(data, media_type, filename=None):
             f"Το αρχείο ξεπερνά το όριο των {MAX_BYTES // (1024 * 1024)} MB.",
             status=413)
 
-    anthropic, client = _client()
+    openai, client = _client()
     try:
-        message = client.messages.create(
-            model=ANTHROPIC_MODEL,
-            max_tokens=8000,
-            system=_SYSTEM,
-            # A scoped extraction, not a reasoning task: low effort keeps the
-            # scan fast and cheap. The schema is what guarantees the shape.
-            output_config={
-                "effort": "low",
-                "format": {"type": "json_schema", "schema": _SCHEMA},
+        completion = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            max_completion_tokens=4000,
+            # Deterministic as the API allows: the same invoice scanned twice
+            # should not produce two different document numbers.
+            temperature=0,
+            # Structured Outputs. `strict` is what makes the schema a
+            # GUARANTEE rather than a request, so the parse below cannot meet
+            # a stray "Here is the invoice:" preamble.
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "greek_invoice", "strict": True,
+                                "schema": _SCHEMA},
             },
-            messages=[{
-                "role": "user",
-                "content": [_content_block(data, media_type),
-                            {"type": "text", "text": _PROMPT}],
-            }],
+            messages=[
+                {"role": "system", "content": _SYSTEM},
+                {"role": "user",
+                 "content": [_content_block(data, media_type, filename),
+                             {"type": "text", "text": _PROMPT}]},
+            ],
         )
-    except anthropic.AuthenticationError as exc:
-        raise OcrError("Το ANTHROPIC_API_KEY δεν έγινε δεκτό.", status=502) from exc
-    except anthropic.RateLimitError as exc:
+    except openai.AuthenticationError as exc:
+        raise OcrError("Το OPENAI_API_KEY δεν έγινε δεκτό.", status=502) from exc
+    except openai.RateLimitError as exc:
         raise OcrError(
             "Υπέρβαση ορίου κλήσεων στη σάρωση. Δοκιμάστε ξανά σε λίγο.",
             status=429) from exc
-    except anthropic.APIStatusError as exc:
+    except openai.BadRequestError as exc:
+        # Overwhelmingly a model that cannot do what this endpoint needs —
+        # no vision, no Structured Outputs, or no PDF input. Named explicitly
+        # because the generic "service error" below sends people looking at
+        # their network instead of at OPENAI_MODEL.
+        print(f"[ERROR] OpenAI rejected the scan request (model={OPENAI_MODEL}): {exc}")
+        raise OcrError(
+            "Το μοντέλο σάρωσης δεν δέχτηκε το έγγραφο. Ελέγξτε το OPENAI_MODEL "
+            "(χρειάζεται μοντέλο με υποστήριξη εικόνας).", status=502) from exc
+    except openai.APIStatusError as exc:
         raise OcrError(
             f"Η υπηρεσία σάρωσης απάντησε με σφάλμα ({exc.status_code}).",
             status=502) from exc
-    except anthropic.APIConnectionError as exc:
+    except openai.APIConnectionError as exc:
         raise OcrError("Δεν ήταν δυνατή η σύνδεση με την υπηρεσία σάρωσης.",
                        status=502) from exc
 
-    # A safety refusal returns HTTP 200 with an empty content list, so the
-    # stop reason has to be checked before the content is indexed.
-    if getattr(message, "stop_reason", None) == "refusal":
-        raise OcrError("Η σάρωση του εγγράφου απορρίφθηκε.", status=422)
+    choice = completion.choices[0]
+    message = choice.message
 
-    raw = next((b.text for b in message.content if b.type == "text"), "")
+    # A Structured Outputs refusal comes back as HTTP 200 with `refusal` set
+    # and `content` empty, so it has to be checked BEFORE the content is read
+    # or the parse fails with a misleading "unreadable document".
+    if getattr(message, "refusal", None):
+        raise OcrError("Η σάρωση του εγγράφου απορρίφθηκε.", status=422)
+    # A truncated reply is invalid JSON, and reporting it as unreadable would
+    # send someone re-photographing a document that scanned perfectly well.
+    if choice.finish_reason == "length":
+        raise OcrError(
+            "Το έγγραφο ήταν πολύ μεγάλο για να διαβαστεί σε μία σάρωση.",
+            status=422)
+
     try:
-        parsed = json.loads(raw)
+        parsed = json.loads(message.content)
     except (TypeError, ValueError) as exc:
         raise OcrError("Δεν ήταν δυνατή η ανάγνωση του παραστατικού.",
                        status=502) from exc

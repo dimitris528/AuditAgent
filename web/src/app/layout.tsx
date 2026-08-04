@@ -31,7 +31,9 @@ export default async function RootLayout({
         className={`${inter.variable} min-h-full bg-slate-50 font-sans text-slate-900 antialiased dark:bg-slate-950 dark:text-slate-100`}
       >
         <ThemeProvider>
-          <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/80 backdrop-blur dark:border-slate-800 dark:bg-slate-950/80">
+          {/* print:hidden — the app chrome has no business on a statement
+              that gets saved as PDF and sent to a client. */}
+          <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/80 backdrop-blur print:hidden dark:border-slate-800 dark:bg-slate-950/80">
             <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-4 sm:px-6">
               <div className="flex items-center gap-2.5">
                 <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600 text-white">
@@ -66,7 +68,9 @@ export default async function RootLayout({
               </div>
             </div>
           </header>
-          <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6">{children}</main>
+          <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 print:max-w-none print:p-0">
+            {children}
+          </main>
         </ThemeProvider>
       </body>
     </html>

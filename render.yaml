@@ -67,10 +67,15 @@ services:
       # Days of free access granted at registration.
       - key: TRIAL_DAYS
         value: "14"
-      # Anthropic key for the invoice-scan endpoint (POST
-      # /api/v1/documents/scan). Unset => the endpoint returns 503 and the UI
-      # hides the scan button; everything else works unchanged.
-      - key: ANTHROPIC_API_KEY
+      # OpenAI key for the invoice-scan endpoint (POST
+      # /api/v1/documents/scan), which runs on OpenAI Vision. Unset => the
+      # endpoint returns 503 and the UI hides the scan button; everything else
+      # works unchanged.
+      - key: OPENAI_API_KEY
+        sync: false
+      # Vision + Structured Outputs capable model id. Set only to override the
+      # default in config.py.
+      - key: OPENAI_MODEL
         sync: false
       # JWT signing key — Render generates a strong random value and keeps it
       # stable across deploys.

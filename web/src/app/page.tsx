@@ -11,6 +11,7 @@ import { AnalyticsSection } from "@/components/AnalyticsSection";
 import { QuickAddTransaction } from "@/components/QuickAddTransaction";
 import { PeriodSelector } from "@/components/PeriodSelector";
 import { TrialBanner } from "@/components/TrialBanner";
+import { ExportButton } from "@/components/ExportButton";
 import { Badge } from "@/components/ui/Badge";
 
 // Always render fresh — figures reflect the latest database state.
@@ -106,6 +107,9 @@ export default async function Page({
                 DEMO — χωρίς βάση δεδομένων
               </Badge>
             ) : null}
+            {/* Exports the period currently selected below, not the whole
+                book — the file matches what is on screen. */}
+            <ExportButton period={period} />
             <QuickAddTransaction
               vatRates={data.vat_rates}
               docTypes={data.doc_types}
@@ -125,7 +129,7 @@ export default async function Page({
         <DebtAlerts alerts={data.debt_alerts} />
         <ExecutiveHeader header={data.header} />
         <ClientGrid clients={data.clients} alerts={data.debt_alerts} />
-        <AnalyticsSection analytics={data.analytics} />
+        <AnalyticsSection analytics={data.analytics} period={period} />
       </div>
     </ClientDrawerProvider>
   );

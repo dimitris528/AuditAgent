@@ -32,3 +32,41 @@ body {
 .recharts-surface:focus {
   outline: none;
 }
+
+/* --------------------------------------------------------------------------
+   Print — the Καρτέλα Πελάτη statement (app/clients/[id]/statement).
+   The page IS the PDF: the browser's "Save as PDF" is what produces the file,
+   because the document is entirely in Greek and no server-side PDF library
+   here ships a font with Greek glyphs. See components/PrintButton.tsx.
+   -------------------------------------------------------------------------- */
+@media print {
+  @page {
+    size: A4;
+    margin: 14mm;
+  }
+
+  /* Dark mode must not follow the statement onto paper: it either burns a
+     cartridge or prints unreadable. Forced light, backgrounds off. */
+  html,
+  body {
+    height: auto;
+    background: #fff !important;
+    color: #0f172a !important;
+  }
+
+  /* Keep the ink the design intends (status colours, the header rule) rather
+     than letting the browser drop every background and border. */
+  * {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* A long statement runs to several pages; the column headings have to come
+     with it or pages two and three are unlabelled numbers. */
+  thead {
+    display: table-header-group;
+  }
+  tr {
+    break-inside: avoid;
+  }
+}
