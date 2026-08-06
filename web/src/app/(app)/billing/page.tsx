@@ -152,6 +152,19 @@ export default async function BillingPage({
   const { title, body } = summary(status);
   const canSubscribe = status.status !== "active";
 
+  // Whether this tenant has a Stripe customer, i.e. a portal that can actually
+  // be opened. Anyone else is routed through Checkout instead — see
+  // ManageBillingButton.
+  const hasCustomer = Boolean(status.portal_enabled);
+  const subscribed = status.status === "active" || status.status === "trialing";
+  // Managing the subscription is offered to every account the hand-off can
+  // reach: one with a Stripe customer goes straight to the portal (subscribed
+  // or not — a lapsed subscriber replacing a declined card is exactly who needs
+  // it), and an active or trialing account without one can still be sent to
+  // Checkout. It is hidden only when neither route exists, so the button never
+  // appears as something that can only ever error.
+  const showManage = hasCustomer || (subscribed && status.checkout_enabled);
+
   return (
     <div className="mx-auto max-w-2xl space-y-5">
       <div className="flex items-center justify-between gap-3">
@@ -271,16 +284,15 @@ export default async function BillingPage({
           </div>
         ) : null}
 
-        {/* Shown to anyone with a Stripe customer, subscribed or not.
-            A lapsed subscriber is exactly who needs to replace a declined card,
-            and hiding this behind an active status would leave them with only
-            the button that starts a brand-new subscription. */}
-        {status.portal_enabled ? (
+        {showManage ? (
           <div className={canSubscribe ? "mt-3" : "mt-6"}>
-            <ManageBillingButton />
+            <ManageBillingButton hasCustomer={hasCustomer} />
             <p className="mt-3 text-center text-[11px] text-slate-400 dark:text-slate-500">
-              Κάρτα πληρωμής, τιμολόγια και ακύρωση — μέσω του ασφαλούς
-              περιβάλλοντος της Stripe.
+              {hasCustomer
+                ? "Κάρτα πληρωμής, τιμολόγια και ακύρωση — μέσω του ασφαλούς "
+                  + "περιβάλλοντος της Stripe."
+                : "Η διαχείριση κάρτας και τιμολογίων ανοίγει στη Stripe μόλις "
+                  + "ενεργοποιηθεί η συνδρομή."}
             </p>
           </div>
         ) : null}

@@ -1,17 +1,19 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { ChevronDown, CreditCard, LogOut } from "lucide-react";
+import { ChevronDown, LogOut } from "lucide-react";
 import { logout } from "@/lib/api";
 
 /**
- * The account dropdown in the top-right: who is signed in, their subscription,
- * and the way out.
+ * The account dropdown in the top-right: who is signed in, and the way out.
+ *
+ * Deliberately just those two things. Συνδρομή is a top-level item in MainNav,
+ * and repeating it here gave the same destination two places to live — the
+ * second of which nobody looks in once the first exists.
  *
  * Written by hand rather than pulled from a headless-UI dependency, because a
- * menu with two items needs four behaviours and all four are short:
+ * menu this small needs four behaviours and all four are short:
  *
  *   * click outside closes it — `pointerdown` rather than `click`, so a click
  *     that lands on a button elsewhere closes this first instead of firing
@@ -115,16 +117,6 @@ export function UserMenu({ username }: { username: string | null }) {
               {label}
             </div>
           </div>
-
-          <Link
-            href="/billing"
-            role="menuitem"
-            onClick={() => setOpen(false)}
-            className={item}
-          >
-            <CreditCard className="h-4 w-4 text-slate-400" />
-            Συνδρομή & χρέωση
-          </Link>
 
           <button
             type="button"

@@ -10,9 +10,9 @@ import { clsx } from "@/lib/clsx";
  *
  * Συνδρομή is a first-class destination here rather than a link buried in a
  * menu, because it is the one page a lapsed account can still reach and the
- * only route back from a paywall. It keeps its credit-card icon in every
- * surface it appears in (here and in the user menu) so it is recognisable
- * before it is read.
+ * only route back from a paywall. This row is its ONLY entry point: the user
+ * menu used to carry a second link to the same page, which is one destination
+ * in two places and half the reason the nav was hard to scan.
  *
  * The active item is decided from the pathname rather than passed down: the
  * layout that renders this is a Server Component and would have to become

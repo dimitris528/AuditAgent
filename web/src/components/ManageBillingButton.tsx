@@ -2,10 +2,24 @@
 
 import { useState } from "react";
 import { AlertCircle, ExternalLink, Loader2, Wallet } from "lucide-react";
-import { openBillingPortal } from "@/lib/api";
+import { openBillingPortal, startCheckout } from "@/lib/api";
+import { ApiError } from "@/lib/errors";
 
 /**
- * Opens Stripe's hosted customer portal: card, invoices, cancellation.
+ * Opens Stripe's hosted customer portal: card, invoices, plan change,
+ * cancellation.
+ *
+ * `hasCustomer` says whether this tenant has ever been through checkout. The
+ * portal can only be opened for a Stripe customer, so without one the backend
+ * answers 409 and there is nothing to manage yet — the click is sent to
+ * Checkout instead, which is the step that creates the customer. That makes the
+ * button safe to render for a trial account that has never paid: it hands off
+ * to Stripe either way rather than landing on an error.
+ *
+ * The 409 is ALSO caught after the fact, not just pre-empted by the prop: the
+ * prop comes from a server render that can be seconds stale, and the failure
+ * mode it guards against (customer deleted in the Stripe dashboard, status
+ * fetched before a checkout completed) is exactly the one a user cannot act on.
  *
  * Secondary styling on purpose — on the billing page this sits next to
  * "Ενεργοποίηση συνδρομής", and two filled indigo buttons would give a visitor
@@ -15,7 +29,12 @@ import { openBillingPortal } from "@/lib/api";
  * replaced by Stripe's, and returning the button to idle mid-hand-off invites a
  * second click and a second (wasted) portal session.
  */
-export function ManageBillingButton() {
+export function ManageBillingButton({
+  hasCustomer = true,
+}: {
+  /** False when the account has no Stripe customer yet — see above. */
+  hasCustomer?: boolean;
+}) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -23,7 +42,7 @@ export function ManageBillingButton() {
     setBusy(true);
     setError("");
     try {
-      const { url } = await openBillingPortal();
+      const { url } = hasCustomer ? await openPortalOrCheckout() : await startCheckout();
       // Full navigation, not router.push — the destination is stripe.com.
       window.location.assign(url);
     } catch (err) {
@@ -49,7 +68,7 @@ export function ManageBillingButton() {
         ) : (
           <Wallet className="h-4 w-4" />
         )}
-        {busy ? "Άνοιγμα διαχείρισης…" : "Διαχείριση κάρτας & χρέωσης"}
+        {busy ? "Άνοιγμα διαχείρισης…" : "Διαχείριση συνδρομής"}
         {busy ? null : <ExternalLink className="h-3.5 w-3.5 opacity-60" />}
       </button>
       {error ? (
@@ -60,4 +79,16 @@ export function ManageBillingButton() {
       ) : null}
     </div>
   );
+}
+
+/** The portal, falling back to Checkout when there is no customer to manage. */
+async function openPortalOrCheckout(): Promise<{ url: string }> {
+  try {
+    return await openBillingPortal();
+  } catch (err) {
+    // 409 is the backend's "no Stripe customer yet" — the one portal failure
+    // that has a sensible next step rather than a message to apologise with.
+    if (err instanceof ApiError && err.status === 409) return startCheckout();
+    throw err;
+  }
 }
