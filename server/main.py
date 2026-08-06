@@ -34,7 +34,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 import auth
 import finance
 import passwords
-from config import STRIPE_WEBHOOK_SECRET
+from config import DOCS_ENABLED, STRIPE_WEBHOOK_SECRET
 from server import (billing, database, deps, exports, mailer, ocr, store,
                     subscription)
 from server.billing import router as billing_router
@@ -60,7 +60,22 @@ async def lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(title="Accounting SaaS API", version="3.0.0", lifespan=lifespan)
+# The interactive docs are OPT-IN (config.DOCS_ENABLED, default off). Passing
+# None for a URL is what actually removes the route — FastAPI never registers
+# it — rather than registering a handler that 404s, so there is no endpoint left
+# to probe and the schema is not merely hidden.
+#
+# openapi_url has to go too, and it is the one that matters: /docs and /redoc
+# are only viewers, and leaving /openapi.json up would keep serving the entire
+# machine-readable schema to anyone who asked for it directly.
+app = FastAPI(
+    title="Accounting SaaS API",
+    version="3.0.0",
+    lifespan=lifespan,
+    docs_url="/docs" if DOCS_ENABLED else None,
+    redoc_url="/redoc" if DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if DOCS_ENABLED else None,
+)
 
 # Stripe billing webhook (POST /api/v1/webhooks/stripe). Public by design —
 # it authenticates via Stripe's payload signature, not a bearer token.
@@ -354,7 +369,13 @@ def _duplicate_payload(txn):
 # --------------------------------------------------------------------------
 @app.get("/")
 def root():
-    return {"service": "Accounting SaaS API", "status": "ok", "docs": "/docs"}
+    # "docs" is omitted rather than reported as null when the docs are off:
+    # advertising a path that 404s is worse than saying nothing, and a null
+    # would still tell a prober the feature exists and is merely disabled.
+    body = {"service": "Accounting SaaS API", "status": "ok"}
+    if DOCS_ENABLED:
+        body["docs"] = "/docs"
+    return body
 
 
 @app.get("/api/health")

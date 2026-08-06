@@ -29,6 +29,21 @@ def _env(name, default=""):
     return value or default
 
 
+def _flag(name, default=False):
+    """Read a boolean env var.
+
+    Accepts the spellings people actually type into a hosting dashboard rather
+    than only Python's idea of truth: "1", "true", "yes", "on" (any case).
+    ANYTHING else — including a typo like "ture" or an empty string — reads as
+    False, so a flag that guards an exposure fails CLOSED rather than being
+    switched on by a misspelling.
+    """
+    raw = _env(name).lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
+
+
 # --- PostgreSQL (Supabase) — the live data layer --------------------------
 # Full connection string, e.g.
 #   postgresql://postgres.<ref>:<password>@<host>:6543/postgres
@@ -38,6 +53,19 @@ def _env(name, default=""):
 # Read by server/database.py directly from the environment; listed here so the
 # full configuration surface is documented in one place.
 DATABASE_URL = _env("DATABASE_URL")
+
+
+# --- Interactive API documentation ----------------------------------------
+# Serves /docs (Swagger UI), /redoc and /openapi.json. Every route behind them
+# is auth-gated, so exposing the schema is not itself a breach — but it hands a
+# stranger a complete, accurate map of the API's shape, parameters and error
+# codes, which is free reconnaissance for anyone probing the deployment. It is
+# also the only publicly reachable surface here that serves no customer.
+#
+# DEFAULT OFF, deliberately: a new deployment that forgets to set anything is
+# closed rather than open. Turn it on locally (DOCS_ENABLED=true in .env) while
+# working on the API.
+DOCS_ENABLED = _flag("DOCS_ENABLED", default=False)
 
 
 # --- Airtable (MIGRATION ONLY) --------------------------------------------

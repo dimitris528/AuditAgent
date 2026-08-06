@@ -37,6 +37,13 @@ services:
       # credentials rather than a malformed URL.
       - key: DATABASE_URL
         sync: false
+      # Interactive API docs (/docs, /redoc, /openapi.json). Pinned to false
+      # rather than left to the default so the production manifest STATES that
+      # the schema is not published — a reader should not have to go and check
+      # what the default is. Set it to true here temporarily if you ever need
+      # Swagger UI against the deployed API.
+      - key: DOCS_ENABLED
+        value: "false"
       # Airtable — MIGRATION ONLY. Nothing the API serves reads these any more;
       # they are needed solely by scripts/migrate_airtable_to_postgres.py. Once
       # the backfill has run against production, remove them.
