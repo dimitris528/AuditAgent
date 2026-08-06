@@ -5,6 +5,7 @@ server/main.py:
     GET  /api/v1/billing/status     what the /billing page renders
     POST /api/v1/billing/checkout   -> { url } to redirect the browser to
     POST /api/v1/billing/portal     -> { url } for Stripe's own billing portal
+    POST /api/v1/billing/cancel     schedule the subscription to end
 
 The other half of the loop is server/webhooks.py, which receives Stripe's
 callback and is what actually flips the account to `active`. Nothing here marks
@@ -37,11 +38,33 @@ cancelling. Stripe hosts all of it, which is the point — none of those screens
 exist here, and a card number must never reach this server.
 
 It needs only STRIPE_SECRET_KEY (there is no Price involved), so it is
-configured separately from checkout, and it needs a `stripe_customer_id`. That
-id is the ONLY thing that identifies whose billing is being opened: a portal
-session created for the wrong customer would hand one tenant another tenant's
-invoices and card. It is therefore read from the signed-in tenant's row and
-never from the request.
+configured separately from checkout.
+
+It opens for EVERY signed-in tenant, whatever their status — active, on trial,
+or lapsed. Stripe's portal is addressed by customer, so an account that has
+never been through checkout has one created for it on the spot (_ensure_customer
+below). That costs nothing: a Stripe customer with no subscription is a free
+record, and it is the same customer checkout would have created later. The
+alternative — refusing the button until the first payment — hides the card and
+invoice screens from precisely the people trying to start paying.
+
+Which customer is opened is read from the signed-in tenant's row and NEVER from
+the request. That id is the only thing identifying whose billing this is, and a
+portal session created for the wrong customer would hand one tenant another
+tenant's invoices and card.
+
+Cancellation
+------------
+/cancel sets `cancel_at_period_end` on the tenant's Stripe subscription rather
+than deleting it. The tenant has already paid to the end of the current period,
+so ending access the instant they click Cancel would be charging for days they
+cannot use; it also leaves the decision reversible, which Stripe's portal
+supports and the webhook syncs back.
+
+The users row is stamped with the effective date here as well as by the webhook.
+The webhook stays authoritative — it is what eventually flips the account
+inactive — but it can land seconds after the click, and the page the user
+returns to has to already show what they just did.
 """
 
 import stripe
@@ -61,6 +84,19 @@ _CANCEL_URL = f"{APP_BASE_URL}/billing?checkout=cancelled"
 
 # Where Stripe's "← Return to …" link sends the browser back to.
 _PORTAL_RETURN_URL = f"{APP_BASE_URL}/billing"
+
+
+def _get(obj, key, default=None):
+    """Read one field off whatever the Stripe SDK handed back.
+
+    StripeObject dropped its dict interface (no .get) in newer majors, while the
+    webhook path and the test doubles deal in plain dicts — so neither accessor
+    works on its own, and every call site was otherwise repeating the same
+    isinstance dance inline.
+    """
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
 
 
 def is_configured():
@@ -97,16 +133,27 @@ def billing_status(user: str = Depends(deps.get_current_user)):
     try:
         with database.session_scope() as session:
             tenant, state = deps.subscription_state(session, user)
+            cancel_at = tenant.subscription_cancel_at
+            # Pending only while the subscription it belongs to is still
+            # running. Once the account is inactive the cancellation has
+            # happened and is no longer something to warn about.
+            pending = bool(cancel_at) and state.status == subscription.ACTIVE
             return {
                 "username": tenant.username,
                 "email": tenant.email,
                 "has_stripe_customer": bool(tenant.stripe_customer_id),
-                # Whether THIS tenant can open the portal, not merely whether
-                # the server could in principle: an account that has never been
-                # through checkout has no Stripe customer, and offering it a
-                # "manage your card" button would only ever produce an error.
-                "portal_enabled": bool(
-                    portal_is_configured() and tenant.stripe_customer_id),
+                # The portal opens for anyone once the server has a key: a
+                # tenant without a Stripe customer gets one created on the way
+                # in (see /portal), so this no longer depends on having paid.
+                "portal_enabled": portal_is_configured(),
+                # There is a live Stripe subscription to cancel only if the
+                # account is ACTIVE — our own free trial is not one — and it has
+                # not been cancelled already.
+                "can_cancel": (portal_is_configured()
+                               and state.status == subscription.ACTIVE
+                               and not pending),
+                "pending_cancellation": pending,
+                "cancel_at": subscription.iso_utc(cancel_at) if pending else None,
                 **state.to_dict(),
                 **_stripe_status(),
             }
@@ -175,7 +222,7 @@ def create_checkout_session(user: str = Depends(deps.get_current_user)):
             status_code=502,
             detail="Δεν ήταν δυνατή η έναρξη της πληρωμής. Δοκιμάστε ξανά.")
 
-    url = checkout.get("url") if isinstance(checkout, dict) else getattr(checkout, "url", None)
+    url = _get(checkout, "url")
     if not url:
         raise HTTPException(
             status_code=502, detail="Το Stripe δεν επέστρεψε διεύθυνση πληρωμής.")
@@ -183,8 +230,7 @@ def create_checkout_session(user: str = Depends(deps.get_current_user)):
     # The customer id exists from this moment even though nothing has been paid
     # yet. Storing it now means a checkout the user abandons and retries reuses
     # the same Stripe customer instead of creating a duplicate every attempt.
-    stripe_customer = (checkout.get("customer") if isinstance(checkout, dict)
-                       else getattr(checkout, "customer", None))
+    stripe_customer = _get(checkout, "customer")
     if stripe_customer and not customer_id:
         try:
             with database.session_scope() as session:
@@ -195,24 +241,138 @@ def create_checkout_session(user: str = Depends(deps.get_current_user)):
             # Not fatal: the webhook can still match on client_reference_id.
             print(f"[WARN] Could not store Stripe customer id: {exc}")
 
-    return {"url": url, "id": checkout.get("id") if isinstance(checkout, dict)
-            else getattr(checkout, "id", None)}
+    return {"url": url, "id": _get(checkout, "id")}
+
+
+def _ensure_customer(username, email, customer_id):
+    """The tenant's Stripe customer id, creating the customer if there is none.
+
+    This is what lets the portal open for an account that has never paid. The
+    id is persisted immediately, so the customer is reused by a later checkout
+    instead of being duplicated — and the metadata carries the username, which
+    is what makes an orphaned customer traceable back to an account when
+    reconciling by hand in the Stripe dashboard.
+
+    A failure to persist is logged, not raised: the portal session about to be
+    created is still perfectly valid, and refusing to open it because a write
+    failed would turn a bookkeeping problem into a broken button.
+    """
+    if customer_id:
+        return customer_id
+
+    customer = stripe.Customer.create(
+        email=email or None,
+        metadata={"username": username},
+    )
+    customer_id = _get(customer, "id")
+    if not customer_id:
+        raise HTTPException(
+            status_code=502, detail="Το Stripe δεν επέστρεψε πελάτη χρέωσης.")
+
+    try:
+        with database.session_scope() as session:
+            tenant = store.get_user_by_username(session, username)
+            if tenant is not None and not tenant.stripe_customer_id:
+                store.set_stripe_customer(session, tenant, customer_id)
+    except SQLAlchemyError as exc:
+        print(f"[WARN] Could not store Stripe customer id for "
+              f"username={username!r}: {exc}")
+    return customer_id
 
 
 @router.post("/portal")
 def create_portal_session(user: str = Depends(deps.get_current_user)):
     """Open Stripe's hosted customer portal and hand back the URL.
 
-    Deliberately NOT gated on an active subscription. Someone whose card was
-    declined, or whose subscription Stripe has already cancelled, is precisely
-    the person who needs to update a card or read an invoice — and they are the
-    one the paywall is currently blocking. What is required is a Stripe customer
-    (i.e. they have been through checkout at least once); without one there is
-    nothing for the portal to show, and that is a 409 rather than an error the
-    user is left to interpret.
+    Open to EVERY signed-in tenant, whatever their subscription says. Someone
+    whose card was declined, or whose subscription Stripe has already
+    cancelled, is precisely the person who needs to update a card or read an
+    invoice — and they are the one the paywall is blocking. Someone still on
+    the free trial is the person about to become a customer. Neither is made to
+    earn access to their own billing screens first: a tenant with no Stripe
+    customer has one created here (see _ensure_customer).
 
     Sessions are single-use and short-lived, so the URL is generated per click
     and never stored.
+    """
+    if not portal_is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Οι πληρωμές δεν έχουν ρυθμιστεί (ορίστε STRIPE_SECRET_KEY).")
+    deps.require_db()
+
+    try:
+        with database.session_scope() as session:
+            tenant, _state = deps.subscription_state(session, user)
+            username = tenant.username
+            email = tenant.email
+            customer_id = tenant.stripe_customer_id
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+
+    try:
+        # Per call, for the same reason as in the checkout above: the key is
+        # read from config at import time.
+        stripe.api_key = STRIPE_SECRET_KEY
+        customer_id = _ensure_customer(username, email, customer_id)
+        portal = stripe.billing_portal.Session.create(
+            customer=customer_id,
+            return_url=_PORTAL_RETURN_URL,
+        )
+    except stripe.StripeError as exc:
+        # The commonest failure here is a live-mode key against a test-mode
+        # customer id (or the reverse), which Stripe reports as "No such
+        # customer". Logged in full; the user gets something actionable.
+        print(f"[ERROR] Stripe portal failed for username={username!r} "
+              f"customer={customer_id!r}: {exc}")
+        raise HTTPException(
+            status_code=502,
+            detail="Δεν ήταν δυνατό το άνοιγμα της διαχείρισης συνδρομής. "
+                   "Δοκιμάστε ξανά.")
+
+    url = _get(portal, "url")
+    if not url:
+        raise HTTPException(
+            status_code=502,
+            detail="Το Stripe δεν επέστρεψε διεύθυνση διαχείρισης.")
+    return {"url": url}
+
+
+# Stripe subscription states that still have something left to cancel. One that
+# is already "canceled" or "incomplete_expired" is finished, and asking Stripe
+# to cancel it again is an error rather than a no-op.
+_CANCELABLE = ("active", "trialing", "past_due", "unpaid", "incomplete")
+
+
+def _find_subscription(customer_id):
+    """The tenant's cancelable Stripe subscription, or None.
+
+    Looked up by customer rather than stored on the users row. The row would
+    have to be kept in step with every plan change, upgrade and resubscribe
+    Stripe performs on its own — and a stale id here would cancel nothing, or
+    cancel the wrong thing. Asking Stripe costs one request on a button nobody
+    presses twice.
+    """
+    listing = stripe.Subscription.list(customer=customer_id, status="all", limit=20)
+    for sub in _get(listing, "data") or []:
+        if _get(sub, "status") in _CANCELABLE:
+            return sub
+    return None
+
+
+@router.post("/cancel")
+def cancel_subscription(user: str = Depends(deps.get_current_user)):
+    """Schedule the tenant's subscription to end when the paid period does.
+
+    `cancel_at_period_end`, never an immediate delete — see the module
+    docstring. The account therefore stays ACTIVE and keeps write access until
+    the date this returns; nothing about the paywall changes today.
+
+    Idempotent: cancelling something already cancelled returns the existing date
+    instead of erroring, so a double-click, a retry, or a cancellation made in
+    Stripe's portal a moment earlier all land in the same place.
     """
     if not portal_is_configured():
         raise HTTPException(
@@ -230,35 +390,52 @@ def create_portal_session(user: str = Depends(deps.get_current_user)):
     except SQLAlchemyError as exc:
         raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
 
+    # No customer means no subscription was ever bought. Unlike the portal,
+    # there is nothing useful to create here — cancelling nothing is a mistake
+    # worth reporting, not a request to fulfil.
     if not customer_id:
         raise HTTPException(
-            status_code=409,
-            detail="Δεν υπάρχει ακόμη συνδρομή προς διαχείριση. "
-                   "Ενεργοποιήστε πρώτα συνδρομή.")
+            status_code=409, detail="Δεν υπάρχει ενεργή συνδρομή προς ακύρωση.")
 
     try:
-        # Per call, for the same reason as in the checkout above: the key is
-        # read from config at import time.
         stripe.api_key = STRIPE_SECRET_KEY
-        portal = stripe.billing_portal.Session.create(
-            customer=customer_id,
-            return_url=_PORTAL_RETURN_URL,
-        )
+        sub = _find_subscription(customer_id)
+        if sub is None:
+            raise HTTPException(
+                status_code=409, detail="Δεν υπάρχει ενεργή συνδρομή προς ακύρωση.")
+        if not _get(sub, "cancel_at_period_end"):
+            sub = stripe.Subscription.modify(
+                _get(sub, "id"), cancel_at_period_end=True)
+    except HTTPException:
+        raise
     except stripe.StripeError as exc:
-        # The commonest failure here is a live-mode key against a test-mode
-        # customer id (or the reverse), which Stripe reports as "No such
-        # customer". Logged in full; the user gets something actionable.
-        print(f"[ERROR] Stripe portal failed for username={username!r} "
+        # English, and can quote ids — logged in full, summarised in the reply.
+        print(f"[ERROR] Stripe cancellation failed for username={username!r} "
               f"customer={customer_id!r}: {exc}")
         raise HTTPException(
             status_code=502,
-            detail="Δεν ήταν δυνατό το άνοιγμα της διαχείρισης συνδρομής. "
-                   "Δοκιμάστε ξανά.")
+            detail="Δεν ήταν δυνατή η ακύρωση της συνδρομής. Δοκιμάστε ξανά.")
 
-    url = (portal.get("url") if isinstance(portal, dict)
-           else getattr(portal, "url", None))
-    if not url:
-        raise HTTPException(
-            status_code=502,
-            detail="Το Stripe δεν επέστρεψε διεύθυνση διαχείρισης.")
-    return {"url": url}
+    # `cancel_at` is what Stripe fills in once the cancellation is scheduled;
+    # current_period_end is the same instant and is the fallback for an API
+    # version that does not set it.
+    cancel_at = subscription.from_unix(
+        _get(sub, "cancel_at") or _get(sub, "current_period_end"))
+
+    try:
+        with database.session_scope() as session:
+            tenant = store.get_user_by_username(session, username)
+            if tenant is not None:
+                store.set_subscription_cancel_at(session, tenant, cancel_at)
+    except SQLAlchemyError as exc:
+        # Stripe has accepted the cancellation, which is the part that matters.
+        # The webhook will stamp the row on its own.
+        print(f"[WARN] Cancellation stored in Stripe but not locally for "
+              f"username={username!r}: {exc}")
+
+    print(f"[INFO] Subscription set to cancel at period end for "
+          f"username={username!r} (cancel_at={cancel_at!r}).")
+    return {
+        "pending_cancellation": True,
+        "cancel_at": subscription.iso_utc(cancel_at),
+    }

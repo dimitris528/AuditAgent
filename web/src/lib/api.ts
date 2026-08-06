@@ -284,6 +284,21 @@ export async function openBillingPortal(): Promise<{ url: string }> {
 }
 
 /**
+ * Schedule the subscription to end when the paid period does.
+ *
+ * Returns the effective date rather than a bare ok: the account stays active
+ * until then, and the one thing the user needs told afterwards is when access
+ * actually stops.
+ */
+export async function cancelSubscription(): Promise<{
+  pending_cancellation: boolean;
+  cancel_at: string | null;
+}> {
+  const res = await fetch(`/api/billing/cancel`, { method: "POST" });
+  return unwrap(res, "Αποτυχία ακύρωσης συνδρομής");
+}
+
+/**
  * Start a password reset.
  *
  * Always resolves for a well-formed address, whether or not an account exists —

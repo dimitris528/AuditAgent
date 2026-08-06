@@ -140,9 +140,19 @@ export interface BillingStatus extends SubscriptionInfo {
   stripe_configured: boolean;
   /** …and a database is configured, so checkout can actually be opened. */
   checkout_enabled: boolean;
-  /** This tenant can open the Stripe customer portal: the server has a secret
-   *  key AND the account has a Stripe customer to open it for. */
+  /** The Stripe customer portal can be opened — for ANY status. A tenant with
+   *  no Stripe customer has one created on the way in, so this needs only the
+   *  server's secret key. */
   portal_enabled?: boolean;
+  /** There is a live Stripe subscription to cancel: the account is active and
+   *  has not already been cancelled. False on a free trial, which is ours and
+   *  not a Stripe subscription at all. */
+  can_cancel?: boolean;
+  /** Cancelled, but still paid up — access continues until `cancel_at`. */
+  pending_cancellation?: boolean;
+  /** ISO-8601 (UTC, "Z") date the cancellation takes effect. Null unless
+   *  `pending_cancellation`. */
+  cancel_at?: string | null;
 }
 
 /** A client row as returned by /api/v1/clients (not the finance shape). */

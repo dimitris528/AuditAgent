@@ -82,6 +82,17 @@ class User(SQLModel, table=True):
     # so a stale date on a paying account would flip them back to inactive.
     # Renamed from `trial_expiry` — see the guarded rename in database.py.
     trial_ends_at: Optional[dt.datetime] = Field(default=None, sa_column=_tstz())
+    # When a subscription the tenant has asked to cancel will actually end.
+    #
+    # Set while the account is still ACTIVE: Stripe cancels at the close of the
+    # period already paid for, so this is "pending cancellation", not
+    # "cancelled", and the paywall stays open until the date passes. Cleared
+    # whenever the account changes state — a fresh checkout, or the
+    # cancellation finally landing — so it never outlives the decision it
+    # records. Stripe remains the source of truth (server/webhooks.py syncs it
+    # both ways, including cancellations made in Stripe's own portal).
+    subscription_cancel_at: Optional[dt.datetime] = Field(default=None,
+                                                          sa_column=_tstz())
     created_at: dt.datetime = Field(default_factory=_utcnow,
                                     sa_column=_tstz(nullable=False))
 

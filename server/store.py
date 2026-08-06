@@ -126,6 +126,12 @@ def set_subscription_status(session, user, status):
     user.subscription_status = status
     if status == subscription.ACTIVE:
         user.trial_ends_at = None
+    # A pending cancellation belongs to the subscription that was running when
+    # it was requested, so any change of status retires it: going ACTIVE means a
+    # new (uncancelled) subscription, and going INACTIVE means the cancellation
+    # already happened. Leaving the date behind would show "λήγει στις …" on an
+    # account with nothing left to expire.
+    user.subscription_cancel_at = None
     session.add(user)
     session.commit()
     session.refresh(user)
@@ -158,6 +164,21 @@ def refresh_subscription(session, user, now=None):
 
 def set_stripe_customer(session, user, customer_id):
     user.stripe_customer_id = customer_id
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    return user
+
+
+def set_subscription_cancel_at(session, user, cancel_at):
+    """Record (or clear, with None) the date a cancellation takes effect.
+
+    Deliberately does NOT touch subscription_status: a subscription cancelling
+    at the end of the period is still paid for and still active until then, and
+    closing the paywall early would be taking money for days the tenant cannot
+    use. The status flips when Stripe says so (customer.subscription.deleted).
+    """
+    user.subscription_cancel_at = cancel_at
     session.add(user)
     session.commit()
     session.refresh(user)

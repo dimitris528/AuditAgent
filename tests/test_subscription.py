@@ -522,6 +522,10 @@ def portal_configured(monkeypatch):
 
     NOTE it sets no STRIPE_PRICE_ID: the portal must work without one, which is
     the whole reason portal_is_configured() exists separately.
+
+    Customer.create is stubbed too, because the portal now creates a customer
+    for a tenant who has never paid. Leaving it unstubbed would send the suite
+    at Stripe's real API.
     """
     monkeypatch.setattr(billing, "STRIPE_SECRET_KEY", "sk_test_fake")
     sent = {}
@@ -531,8 +535,13 @@ def portal_configured(monkeypatch):
         return {"id": "bps_test_1",
                 "url": "https://billing.stripe.com/p/session/test_1"}
 
+    def fake_customer(**params):
+        sent["customer_create"] = params
+        return {"id": "cus_created_by_portal"}
+
     monkeypatch.setattr(stripe.billing_portal.Session, "create",
                         staticmethod(fake_create))
+    monkeypatch.setattr(stripe.Customer, "create", staticmethod(fake_customer))
     return sent
 
 
@@ -541,12 +550,37 @@ def test_portal_is_503_when_stripe_is_not_configured(api):
     assert api.post("/api/v1/billing/portal").status_code == 503
 
 
-def test_portal_is_409_without_a_stripe_customer(api, portal_configured):
-    """A tenant who has never checked out has nothing for the portal to show.
-    409 rather than opening a session for a customer id that does not exist."""
+def test_portal_opens_for_a_tenant_who_has_never_paid(api, portal_configured):
+    """The button is offered to everyone, so the endpoint must serve everyone.
+
+    A trial account has no Stripe customer, and the portal is addressed by
+    customer — so one is created on the way in rather than the request being
+    refused.
+    """
     res = api.post("/api/v1/billing/portal")
-    assert res.status_code == 409
-    assert portal_configured == {}  # Stripe was never called
+    assert res.status_code == 200, res.text
+    assert res.json()["url"].startswith("https://billing.stripe.com/")
+    assert portal_configured["customer"] == "cus_created_by_portal"
+    # Traceable back to the account when reconciling by hand in Stripe.
+    assert portal_configured["customer_create"]["metadata"] == {"username": "tester"}
+
+
+def test_portal_stores_the_customer_it_created(api, portal_configured):
+    """Otherwise every visit to the billing page mints another Stripe customer,
+    and a later checkout would not recognise the one already there."""
+    api.post("/api/v1/billing/portal")
+    assert _user().stripe_customer_id == "cus_created_by_portal"
+
+    portal_configured.pop("customer_create", None)
+    api.post("/api/v1/billing/portal")
+    assert "customer_create" not in portal_configured  # reused, not recreated
+    assert portal_configured["customer"] == "cus_created_by_portal"
+
+
+def test_a_lapsed_tenant_can_still_open_the_portal(api, portal_configured):
+    """The person whose card was declined is exactly who needs the card screen."""
+    _expire_trial()
+    assert api.post("/api/v1/billing/portal").status_code == 200
 
 
 def test_portal_returns_a_stripe_url_for_the_signed_in_customer(api,
@@ -602,6 +636,15 @@ def test_billing_status_reports_whether_the_portal_is_available(api, monkeypatch
     assert api.get("/api/v1/billing/status").json()["portal_enabled"] is True
 
 
+def test_the_portal_is_offered_before_the_first_payment(api, monkeypatch):
+    """portal_enabled used to require a Stripe customer, which hid the button
+    from every trial account. The key alone is now enough."""
+    monkeypatch.setattr(billing, "STRIPE_SECRET_KEY", "sk_test_fake")
+    body = api.get("/api/v1/billing/status").json()
+    assert body["has_stripe_customer"] is False
+    assert body["portal_enabled"] is True
+
+
 def test_a_stripe_failure_is_reported_as_502(api, monkeypatch):
     monkeypatch.setattr(billing, "STRIPE_SECRET_KEY", "sk_test_fake")
     monkeypatch.setattr(billing, "STRIPE_PRICE_ID", "price_fake")
@@ -639,6 +682,7 @@ def test_billing_endpoints_require_a_session(api):
     assert bare.get("/api/v1/billing/status").status_code == 401
     assert bare.post("/api/v1/billing/checkout").status_code == 401
     assert bare.post("/api/v1/billing/portal").status_code == 401
+    assert bare.post("/api/v1/billing/cancel").status_code == 401
 
 
 def test_status_endpoint_reports_the_billing_configuration(api):
@@ -647,3 +691,198 @@ def test_status_endpoint_reports_the_billing_configuration(api):
     assert body["stripe_checkout_configured"] is False
     assert body["stripe_portal_configured"] is False
     assert body["trial_days"] == 14
+
+
+# --------------------------------------------------------------------------
+# Cancellation
+#
+# Cancelling sets cancel_at_period_end rather than deleting the subscription:
+# the tenant has paid to the end of the period, so the account stays ACTIVE and
+# keeps write access until the date arrives. Stripe's own
+# customer.subscription.deleted is what finally closes the paywall — which means
+# "pending cancellation" and "cancelled" are two different states, and most of
+# what follows is about not confusing them.
+# --------------------------------------------------------------------------
+_PERIOD_END = 1793491200  # 2026-11-01T00:00:00Z
+
+
+@pytest.fixture()
+def cancellable(monkeypatch):
+    """A key, a paid tenant's subscription, and a recording Subscription.modify."""
+    monkeypatch.setattr(billing, "STRIPE_SECRET_KEY", "sk_test_fake")
+    state = {"status": "active", "cancel_at_period_end": False, "modified": {}}
+
+    def fake_list(**_params):
+        return {"data": [{
+            "id": "sub_test_1",
+            "object": "subscription",
+            "status": state["status"],
+            "cancel_at_period_end": state["cancel_at_period_end"],
+            "current_period_end": _PERIOD_END,
+        }]}
+
+    def fake_modify(sub_id, **params):
+        state["modified"] = {"id": sub_id, **params}
+        return {"id": sub_id, "status": state["status"],
+                "cancel_at_period_end": True, "cancel_at": _PERIOD_END,
+                "current_period_end": _PERIOD_END}
+
+    monkeypatch.setattr(stripe.Subscription, "list", staticmethod(fake_list))
+    monkeypatch.setattr(stripe.Subscription, "modify", staticmethod(fake_modify))
+    return state
+
+
+def test_cancel_is_503_when_stripe_is_not_configured(api):
+    _pay(api)
+    assert api.post("/api/v1/billing/cancel").status_code == 503
+
+
+def test_cancel_is_409_without_a_stripe_customer(api, cancellable):
+    """A trial account never bought anything. Unlike the portal there is nothing
+    useful to create here, so this is a mistake worth reporting."""
+    res = api.post("/api/v1/billing/cancel")
+    assert res.status_code == 409
+    assert cancellable["modified"] == {}  # Stripe was never asked
+
+
+def test_cancel_schedules_the_end_of_the_paid_period(api, cancellable):
+    _pay(api)
+    res = api.post("/api/v1/billing/cancel")
+    assert res.status_code == 200, res.text
+    # cancel_at_period_end, NOT a delete: deleting would revoke access the
+    # tenant has already paid for.
+    assert cancellable["modified"] == {"id": "sub_test_1",
+                                       "cancel_at_period_end": True}
+    assert res.json()["pending_cancellation"] is True
+    assert res.json()["cancel_at"] == "2026-11-01T00:00:00Z"
+
+
+def test_cancelling_does_not_close_the_paywall_today(api, cancellable):
+    """The whole point of cancel_at_period_end. Writes must keep working."""
+    _pay(api)
+    api.post("/api/v1/billing/cancel")
+    assert _user().subscription_status == subscription.ACTIVE
+    body = api.get("/api/v1/billing/status").json()
+    assert body["status"] == "active"
+    assert body["allows_writes"] is True
+    assert api.post("/api/v1/clients", json={"name": "Ακόμη Γράφει"}).status_code == 201
+
+
+def test_status_reports_the_pending_cancellation(api, cancellable):
+    before = api.get("/api/v1/billing/status").json()
+    assert before["pending_cancellation"] is False
+    assert before["cancel_at"] is None
+
+    _pay(api)
+    assert api.get("/api/v1/billing/status").json()["can_cancel"] is True
+
+    api.post("/api/v1/billing/cancel")
+    after = api.get("/api/v1/billing/status").json()
+    assert after["pending_cancellation"] is True
+    assert after["cancel_at"] == "2026-11-01T00:00:00Z"
+    # Nothing left to cancel — the button must not be offered twice.
+    assert after["can_cancel"] is False
+
+
+def test_a_trial_has_no_stripe_subscription_to_cancel(api, cancellable):
+    """Our free trial is not a Stripe subscription, so can_cancel stays false
+    however configured the server is."""
+    assert api.get("/api/v1/billing/status").json()["can_cancel"] is False
+
+
+def test_cancelling_twice_is_idempotent(api, cancellable):
+    """A double click, a retry, or a cancellation just made in Stripe's portal."""
+    _pay(api)
+    api.post("/api/v1/billing/cancel")
+    cancellable["cancel_at_period_end"] = True
+    cancellable["modified"] = {}
+
+    res = api.post("/api/v1/billing/cancel")
+    assert res.status_code == 200, res.text
+    assert cancellable["modified"] == {}  # Stripe was not asked a second time
+    assert res.json()["cancel_at"] == "2026-11-01T00:00:00Z"
+
+
+def test_cancel_is_409_when_the_subscription_is_already_finished(api, cancellable):
+    _pay(api)
+    cancellable["status"] = "canceled"
+    assert api.post("/api/v1/billing/cancel").status_code == 409
+
+
+def test_a_stripe_failure_during_cancellation_is_reported_as_502(api, monkeypatch):
+    _pay(api)
+    monkeypatch.setattr(billing, "STRIPE_SECRET_KEY", "sk_test_fake")
+
+    def boom(**_params):
+        raise stripe.InvalidRequestError("No such customer: cus_test_123", "customer")
+
+    monkeypatch.setattr(stripe.Subscription, "list", staticmethod(boom))
+    res = api.post("/api/v1/billing/cancel")
+    assert res.status_code == 502
+    assert "No such customer" not in res.text  # English, and quotes ids
+
+
+def _subscription_updated_event(customer="cus_test_123", pending=True):
+    return _envelope("customer.subscription.updated", {
+        "id": "sub_test_1",
+        "object": "subscription",
+        "customer": customer,
+        "status": "active",
+        "cancel_at_period_end": pending,
+        "cancel_at": _PERIOD_END if pending else None,
+        "current_period_end": _PERIOD_END,
+    })
+
+
+def test_a_cancellation_made_in_stripes_portal_shows_up_here(api):
+    """The portal can cancel without ever touching /billing/cancel. Without this
+    webhook the billing page would keep claiming everything is fine."""
+    _pay(api)
+    body, headers = _signed(_subscription_updated_event())
+    assert api.post(WEBHOOK_URL, content=body, headers=headers).status_code == 200
+    assert api.get("/api/v1/billing/status").json()["pending_cancellation"] is True
+
+
+def test_resuming_in_stripes_portal_clears_the_pending_cancellation(api, cancellable):
+    """Stripe's portal lets a tenant change their mind. The flag has to go."""
+    _pay(api)
+    api.post("/api/v1/billing/cancel")
+    body, headers = _signed(_subscription_updated_event(pending=False))
+    assert api.post(WEBHOOK_URL, content=body, headers=headers).status_code == 200
+
+    after = api.get("/api/v1/billing/status").json()
+    assert after["pending_cancellation"] is False
+    assert after["cancel_at"] is None
+    assert after["can_cancel"] is True
+
+
+def test_a_subscription_update_for_an_unknown_customer_is_accepted(api):
+    """200, not an error: every update Stripe sends for a customer this
+    deployment does not own arrives here too, and a 5xx would have Stripe
+    retrying it for three days."""
+    body, headers = _signed(_subscription_updated_event(customer="cus_someone_else"))
+    assert api.post(WEBHOOK_URL, content=body, headers=headers).status_code == 200
+
+
+def test_the_cancellation_landing_clears_the_pending_date(api, cancellable):
+    """Once the subscription is actually deleted the account is inactive, and a
+    leftover date would render as "expires on …" on an account with nothing left
+    to expire."""
+    _pay(api)
+    api.post("/api/v1/billing/cancel")
+    body, headers = _signed(_cancellation_event())
+    assert api.post(WEBHOOK_URL, content=body, headers=headers).status_code == 200
+
+    assert _user().subscription_cancel_at is None
+    after = api.get("/api/v1/billing/status").json()
+    assert after["status"] == "inactive"
+    assert after["pending_cancellation"] is False
+    assert after["cancel_at"] is None
+
+
+def test_paying_again_clears_a_stale_pending_cancellation(api, cancellable):
+    _pay(api)
+    api.post("/api/v1/billing/cancel")
+    _pay(api)  # a fresh checkout, i.e. a brand-new subscription
+    assert _user().subscription_cancel_at is None
+    assert api.get("/api/v1/billing/status").json()["pending_cancellation"] is False

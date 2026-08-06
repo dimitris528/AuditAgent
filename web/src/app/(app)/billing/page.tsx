@@ -16,6 +16,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Card } from "@/components/ui/Card";
 import { SubscribeButton } from "@/components/SubscribeButton";
 import { ManageBillingButton } from "@/components/ManageBillingButton";
+import { CancelSubscriptionButton } from "@/components/CancelSubscriptionButton";
 
 // The one page a lapsed tenant can always reach, so it must never be cached
 // with someone else's status.
@@ -56,8 +57,30 @@ const PRESENTATION = {
   },
 };
 
+/** Pending cancellation is not one of the three stored statuses — the account
+ *  is still `active` and still paid up — so it gets its own badge rather than
+ *  being shown as an ordinary active subscription. */
+const CANCELLING = {
+  tone: "warning" as const,
+  label: "Ακύρωση σε εκκρεμότητα",
+  icon: <CalendarClock className="h-3 w-3" />,
+};
+
 /** The headline + explanation for each state. */
 function summary(s: BillingStatus): { title: string; body: string } {
+  // Checked before the status, which still reads "active": what the user needs
+  // to know is the date it stops, not that it currently works.
+  if (s.pending_cancellation) {
+    return {
+      title: s.cancel_at
+        ? `Η συνδρομή λήγει στις ${formatDate(s.cancel_at)}`
+        : "Η συνδρομή σας έχει ακυρωθεί",
+      body: "Η ακύρωση καταχωρήθηκε και δεν θα υπάρξει νέα χρέωση. Έχετε "
+        + "πλήρη πρόσβαση μέχρι τη λήξη της περιόδου που έχετε ήδη πληρώσει. "
+        + "Μπορείτε να επαναφέρετε τη συνδρομή οποτεδήποτε πριν από τότε, "
+        + "μέσω της Διαχείρισης συνδρομής.",
+    };
+  }
   switch (s.status) {
     case "trialing":
       return {
@@ -148,22 +171,20 @@ export default async function BillingPage({
     );
   }
 
-  const look = PRESENTATION[status.status] ?? PRESENTATION.inactive;
+  const pending = Boolean(status.pending_cancellation);
+  const look = pending
+    ? CANCELLING
+    : PRESENTATION[status.status] ?? PRESENTATION.inactive;
   const { title, body } = summary(status);
   const canSubscribe = status.status !== "active";
 
-  // Whether this tenant has a Stripe customer, i.e. a portal that can actually
-  // be opened. Anyone else is routed through Checkout instead — see
-  // ManageBillingButton.
-  const hasCustomer = Boolean(status.portal_enabled);
-  const subscribed = status.status === "active" || status.status === "trialing";
-  // Managing the subscription is offered to every account the hand-off can
-  // reach: one with a Stripe customer goes straight to the portal (subscribed
-  // or not — a lapsed subscriber replacing a declined card is exactly who needs
-  // it), and an active or trialing account without one can still be sent to
-  // Checkout. It is hidden only when neither route exists, so the button never
-  // appears as something that can only ever error.
-  const showManage = hasCustomer || (subscribed && status.checkout_enabled);
+  // The portal opens for every status — the backend creates the Stripe customer
+  // if there is not one yet — so the only thing that can hide this button is a
+  // server with no Stripe key at all.
+  const showManage = Boolean(status.portal_enabled);
+  // A live Stripe subscription that has not already been cancelled. False on a
+  // free trial: that is ours, not Stripe's, and there is nothing to cancel.
+  const showCancel = Boolean(status.can_cancel);
 
   return (
     <div className="mx-auto max-w-2xl space-y-5">
@@ -202,8 +223,16 @@ export default async function BillingPage({
               {body}
             </p>
           </div>
-          <span className="hidden h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600 sm:flex dark:bg-indigo-500/10 dark:text-indigo-400">
-            {status.status === "active" ? (
+          <span
+            className={
+              pending
+                ? "hidden h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-amber-50 text-amber-600 sm:flex dark:bg-amber-500/10 dark:text-amber-400"
+                : "hidden h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600 sm:flex dark:bg-indigo-500/10 dark:text-indigo-400"
+            }
+          >
+            {pending ? (
+              <CalendarClock className="h-6 w-6" />
+            ) : status.status === "active" ? (
               <ShieldCheck className="h-6 w-6" />
             ) : (
               <CreditCard className="h-6 w-6" />
@@ -260,6 +289,16 @@ export default async function BillingPage({
               value={formatDate(status.trial_ends_at)}
             />
           ) : null}
+          {pending ? (
+            <Row
+              label="Λήξη πρόσβασης"
+              value={
+                <span className="text-amber-600 dark:text-amber-400">
+                  {formatDate(status.cancel_at ?? null)}
+                </span>
+              }
+            />
+          ) : null}
         </dl>
 
         {canSubscribe ? (
@@ -286,13 +325,20 @@ export default async function BillingPage({
 
         {showManage ? (
           <div className={canSubscribe ? "mt-3" : "mt-6"}>
-            <ManageBillingButton hasCustomer={hasCustomer} />
+            <ManageBillingButton />
             <p className="mt-3 text-center text-[11px] text-slate-400 dark:text-slate-500">
-              {hasCustomer
-                ? "Κάρτα πληρωμής, τιμολόγια και ακύρωση — μέσω του ασφαλούς "
-                  + "περιβάλλοντος της Stripe."
-                : "Η διαχείριση κάρτας και τιμολογίων ανοίγει στη Stripe μόλις "
-                  + "ενεργοποιηθεί η συνδρομή."}
+              Κάρτα πληρωμής, τιμολόγια και αλλαγή πλάνου — μέσω του ασφαλούς
+              περιβάλλοντος της Stripe.
+            </p>
+          </div>
+        ) : null}
+
+        {showCancel ? (
+          <div className="mt-4 border-t border-slate-100 pt-4 dark:border-slate-800">
+            <CancelSubscriptionButton />
+            <p className="mt-3 text-center text-[11px] text-slate-400 dark:text-slate-500">
+              Η πρόσβαση παραμένει ενεργή έως το τέλος της περιόδου που έχετε
+              ήδη πληρώσει.
             </p>
           </div>
         ) : null}

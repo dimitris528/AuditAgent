@@ -183,6 +183,9 @@ _ADDITIVE_MIGRATIONS = (
     # under the old name.
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS trial_ends_at TIMESTAMPTZ",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_customer_id VARCHAR(128)",
+    # Pending cancellation: the date Stripe will end a subscription the tenant
+    # has asked to cancel. NULL for everyone who has not asked.
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_cancel_at TIMESTAMPTZ",
     # password_reset_tokens needs nothing here — create_all() issues CREATE
     # TABLE for a table that does not exist yet. The index is listed because a
     # database that somehow has the table WITHOUT it would do a sequential scan

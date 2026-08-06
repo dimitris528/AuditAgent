@@ -154,6 +154,22 @@ def iso_utc(stamp):
     return stamp.isoformat().replace("+00:00", "Z") if stamp else None
 
 
+def from_unix(seconds):
+    """A tz-aware UTC datetime from a Stripe timestamp, or None.
+
+    Every instant Stripe reports (`cancel_at`, `current_period_end`) is an
+    integer count of seconds, and the rest of this codebase stores TIMESTAMPTZ.
+    Tolerant of None and of the string form some webhook payloads carry, so a
+    caller never has to pre-validate what came off the wire.
+    """
+    if seconds is None:
+        return None
+    try:
+        return dt.datetime.fromtimestamp(int(seconds), dt.timezone.utc)
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+
+
 def normalize(status):
     """Map whatever is stored onto one of the three canonical statuses.
 

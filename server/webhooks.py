@@ -16,6 +16,9 @@ Flow:
            trial_ends_at — see store.set_subscription_status).
         -> on customer.subscription.deleted, flip that customer back to
            "inactive" so a cancellation actually re-closes the paywall.
+        -> on customer.subscription.updated, mirror cancel_at_period_end onto
+           the row so a PENDING cancellation is visible before it lands, and
+           disappears again if the tenant resumes.
 
 Payer matching, in order:
     1. client_reference_id — the checkout URL stamps the tenant's username, so
@@ -47,8 +50,8 @@ event-id ledger.
 
 Stripe endpoint config: point the endpoint at
     https://<accounting-api host>/api/v1/webhooks/stripe
-and subscribe it to checkout.session.completed and
-customer.subscription.deleted.
+and subscribe it to checkout.session.completed,
+customer.subscription.deleted and customer.subscription.updated.
 
 Local test:
     uvicorn server.main:app --reload --port 8000
@@ -73,6 +76,12 @@ CHECKOUT_COMPLETED = "checkout.session.completed"
 # stay UNHANDLED: they would only ever re-set a status that is already active,
 # and the account is already active for as long as Stripe has not cancelled it.
 SUBSCRIPTION_DELETED = "customer.subscription.deleted"
+# "something about the subscription changed" — watched ONLY for
+# cancel_at_period_end, which is how a cancellation announces itself before it
+# takes effect. This is what makes a cancellation performed in Stripe's own
+# portal appear on the billing page, and equally what clears the flag when the
+# tenant changes their mind and resumes (the portal allows both).
+SUBSCRIPTION_UPDATED = "customer.subscription.updated"
 
 
 @router.post("/stripe")
@@ -106,6 +115,8 @@ async def stripe_webhook(request: Request):
         _activate_payer(body)
     elif kind == SUBSCRIPTION_DELETED:
         _deactivate_customer(body)
+    elif kind == SUBSCRIPTION_UPDATED:
+        _sync_cancellation(body)
     return {"received": True}
 
 
@@ -175,4 +186,51 @@ def _deactivate_customer(sub):
             print(f"[INFO] Subscription cancelled for username={user.username!r}.")
     except SQLAlchemyError as exc:
         print(f"[ERROR] Deactivation failed (customer={customer_id!r}): {exc}")
+        raise HTTPException(status_code=502, detail="Database write failed.")
+
+
+def _sync_cancellation(sub):
+    """Mirror Stripe's cancel_at_period_end onto the users row.
+
+    Deliberately does NOT touch subscription_status: a subscription cancelling
+    at period end is still paid for and still active until the date arrives.
+    Closing the paywall here would revoke access the tenant has already bought,
+    days early. SUBSCRIPTION_DELETED is the event that ends access.
+
+    Matched STRICTLY by stripe_customer_id, like deactivation — this event
+    carries no client_reference_id, and the email fallback is a guess.
+
+    An update that changes something else entirely (a plan, a quantity, a card)
+    arrives here too and is a no-op beyond re-writing the same value, which is
+    what makes redelivery safe.
+    """
+    customer_id = sub.get("customer")
+    if not customer_id:
+        print(f"[WARN] {SUBSCRIPTION_UPDATED} carried no customer id — ignored.")
+        return
+
+    pending = bool(sub.get("cancel_at_period_end"))
+    # Stripe fills in cancel_at when the cancellation is scheduled; on an API
+    # version that does not, the period end is the same instant.
+    cancel_at = (subscription.from_unix(
+        sub.get("cancel_at") or sub.get("current_period_end")) if pending else None)
+
+    _require_db("sync cancellation")
+
+    try:
+        with database.session_scope() as session:
+            user = store.get_user_by_stripe_customer(session, customer_id)
+            if user is None:
+                # Common and harmless: every subscription update for a customer
+                # this deployment does not own lands here too.
+                print(f"[INFO] {SUBSCRIPTION_UPDATED} for unknown customer "
+                      f"{customer_id!r} — nothing to sync.")
+                return
+            if user.subscription_cancel_at == cancel_at:
+                return
+            store.set_subscription_cancel_at(session, user, cancel_at)
+            print(f"[INFO] Cancellation {'scheduled' if pending else 'cleared'} "
+                  f"for username={user.username!r} (cancel_at={cancel_at!r}).")
+    except SQLAlchemyError as exc:
+        print(f"[ERROR] Cancellation sync failed (customer={customer_id!r}): {exc}")
         raise HTTPException(status_code=502, detail="Database write failed.")
