@@ -6,6 +6,7 @@ import type { ClientData, DebtAlerts } from "@/lib/types";
 import { searchHaystack, searchKey } from "@/lib/text";
 import { clsx } from "@/lib/clsx";
 import { ClientCard } from "./ClientCard";
+import { ImportDataButton } from "./ImportDataModal";
 import { useClientDrawer } from "./ClientDrawerProvider";
 
 /** Which clients the panel is showing. Active is the default: the dashboard is
@@ -100,6 +101,11 @@ export function ClientGrid({
             {visible.length}
             {visible.length !== pool.length ? ` / ${pool.length}` : ""}
           </span>
+          {/* Pushed to the far end of the heading row: bulk import is a
+              setup-time action, and it must not sit where the eye looks for
+              the client count. Compact in the rail, where the whole panel is
+              ~370px wide. */}
+          <ImportDataButton kind="clients" compact={compact} className="ml-auto" />
         </div>
 
         {showScopes ? (

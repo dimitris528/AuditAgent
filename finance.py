@@ -240,6 +240,55 @@ def vat_for_write(signed_amount, revenue, rate):
     return vat_of(bucket, rate)
 
 
+def book_amounts(amount, type_, doc_type=None, vat_rate=DEFAULT_VAT_RATE,
+                 vat_amount=None, basis="gross"):
+    """(Amount, VAT_Amount) exactly as a new transaction must be STORED.
+
+    The one place that composes the four rules a stored row obeys — the
+    net→gross conversion, the sign convention, the credit-note reversal and the
+    VAT orientation — so every writer produces byte-identical cents. It is
+    shared by the transaction form (server/main.py) and the bulk importer
+    (server/store.py) for precisely that reason: a second copy of this
+    arithmetic is how total VAT stops equalling Σ per-client VATs, and the
+    discrepancy would only surface as a dashboard that no longer reconciles.
+
+    `basis` says which side of the VAT line `amount` is on — an invoice states
+    its net value, a till receipt only its total. `vat_amount`, when given, is
+    the ΦΠΑ printed on the document and wins over the derived figure, but is
+    re-oriented here: a stored VAT disagreeing with its own row's sign would
+    break the same summation guarantee.
+
+    Callers validate the combination first; in particular a Πιστωτικό cannot be
+    a Χρεωστούμενο, and this function does not police it.
+    """
+    is_debt = type_ == DEBT_TYPE
+    is_revenue = type_ == "Έσοδο"
+    credit = is_credit_note(doc_type)
+
+    # Whichever side was typed, the row stores the GROSS figure.
+    gross = (gross_from_net(amount, vat_rate) if basis == "net"
+             else round(amount, 2))
+
+    # Sign convention: revenue/debt positive, expense negative — the analytics
+    # read the sign, not the Type column.
+    signed = gross if (is_revenue or is_debt) else -gross
+    if credit:
+        # A Πιστωτικό reverses an earlier document, so it is booked negative
+        # WITHIN its own bucket: a credit note against a sale is less revenue,
+        # not an expense.
+        signed = -signed
+
+    # Debts carry only the rate; VAT is stamped on Εξόφληση.
+    if is_debt:
+        vat = None
+    elif vat_amount is not None:
+        magnitude = round(abs(vat_amount), 2)
+        vat = -magnitude if credit else magnitude
+    else:
+        vat = vat_for_write(signed, is_revenue, vat_rate)
+    return signed, vat
+
+
 def txn_vat(record):
     """One row's VAT in its bucket's orientation — the STORED VAT_Amount when
     present, else the identical derivation at the default rate (so legacy rows

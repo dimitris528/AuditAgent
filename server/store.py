@@ -599,6 +599,202 @@ def find_duplicate_transaction(session, user, doc_number, counterparty_afm=None,
     return None
 
 
+# --- Bulk import ----------------------------------------------------------
+# The write half of server/imports.py: rows that module has already parsed and
+# validated, matched against what the tenant already has and inserted.
+#
+# Two things separate these from a loop over create_client / create_transaction:
+#
+#   * ONE transaction for the whole file. Committing per row would leave a
+#     failed import half-applied, and a partial book is worse than none — the
+#     user cannot tell which half landed without reconciling every row by hand.
+#     Everything below therefore adds and flushes, and the caller's
+#     session_scope commits once.
+#   * ONE pass over the existing rows. The per-row duplicate guards each scan
+#     the tenant's whole table, so a 500-row import would be 500 full scans;
+#     the maps built here are the same comparisons done once, and they are
+#     UPDATED as rows are inserted, which is also what makes a file containing
+#     the same client (or the same invoice) twice collapse correctly.
+#
+# The source column is stamped "Import" so a migrated book stays
+# distinguishable from what was typed into the app afterwards.
+IMPORT_SOURCE = "Import"
+
+
+def _client_lookups(session, user):
+    """({afm key: Client}, {name key: Client}) for one tenant.
+
+    Both keys are the STRICT duplicate-detection forms (server.text), not
+    store._key: an import is exactly the moment "ΝΗΣΙΔΑ CAFE" must land on the
+    existing "Νησίδα Café" rather than opening a second card beside it.
+    """
+    by_afm, by_name = {}, {}
+    for client in session.exec(
+            select(Client).where(Client.user_id == user.id)).all():
+        key = afm_key(client.afm)
+        if key:
+            by_afm.setdefault(key, client)
+        key = name_key(client.name)
+        if key:
+            by_name.setdefault(key, client)
+    return by_afm, by_name
+
+
+def import_clients(session, user, rows):
+    """Insert the clients from a parsed file. Returns (created, skipped).
+
+    A row matching an existing client is SKIPPED, not merged and not refused.
+    Merging would silently overwrite details the user has already corrected in
+    the app, and refusing the whole upload over a client they happen to have
+    already is the opposite of what a migration tool is for — re-uploading the
+    same file must be safe, and after this it is a no-op.
+    """
+    by_afm, by_name = _client_lookups(session, user)
+    created, skipped = [], []
+
+    for row in rows:
+        afm = afm_key(row.get("afm"))
+        name = name_key(row.get("name"))
+        clash = (by_afm.get(afm) if afm else None) or (by_name.get(name) if name else None)
+        if clash is not None:
+            skipped.append({
+                "row": row.get("row"),
+                "message": f"Υπάρχει ήδη ο πελάτης «{clash.name}».",
+            })
+            continue
+
+        client = Client(user_id=user.id, name=row["name"], status=STATUS_ACTIVE,
+                        afm=row.get("afm"), contact=row.get("contact"),
+                        notes=row.get("notes"))
+        session.add(client)
+        created.append(client)
+        # Registered immediately so the SAME file listing a client twice — under
+        # two spellings, or once with an ΑΦΜ and once without — inserts it once.
+        if afm:
+            by_afm.setdefault(afm, client)
+        if name:
+            by_name.setdefault(name, client)
+
+    if created:
+        session.commit()
+    return created, skipped
+
+
+def _invoice_index(session, user):
+    """{(doc key, date): [(afm key, name key), ...]} for the tenant's invoices.
+
+    The precomputed form of find_duplicate_transaction's rule: same document
+    number, same document date, and EITHER the issuer's ΑΦΜ or the client name
+    agreeing. Rows with no document number are omitted — there is nothing to
+    match them on, and two same-day invoices from one supplier for the same
+    amount are perfectly legitimate.
+    """
+    index = {}
+    for txn in session.exec(
+            select(Transaction).where(Transaction.user_id == user.id)).all():
+        number = doc_key(txn.doc_number)
+        if not number:
+            continue
+        index.setdefault((number, txn.date), []).append(
+            (afm_key(txn.counterparty_afm), name_key(txn.client)))
+    return index
+
+
+def _is_duplicate(index, number, when, afm, name):
+    for issuer, client in index.get((number, when), ()):
+        if afm and issuer and afm == issuer:
+            return True
+        if name and client and name == client:
+            return True
+    return False
+
+
+def import_transactions(session, user, rows):
+    """Insert historic transactions from a parsed file.
+
+    Returns (created, skipped, new_clients) — the transactions written, the
+    rows passed over as already on file, and any clients that had to be created
+    to hold them.
+
+    Clients are matched by ΑΦΜ first and by name second, which is
+    detect_client_duplicate's precedence: the ΑΦΜ is the legal identity, so it
+    wins over a name typed three different ways. A row naming a client the book
+    does not have CREATES it rather than failing — the common case is importing
+    a year of history into an empty account, where every client is new, and
+    demanding the client list be imported first would make the feature useless
+    on its own.
+
+    Amounts and VAT go through finance.book_amounts, the same function the
+    transaction form uses, so an imported row and a typed one storing the same
+    document store the same cents.
+    """
+    by_afm, by_name = _client_lookups(session, user)
+    index = _invoice_index(session, user)
+    created, skipped, new_clients = [], [], []
+
+    for row in rows:
+        afm = afm_key(row.get("afm"))
+        name = name_key(row.get("client"))
+        number = doc_key(row.get("doc_number"))
+        if number and _is_duplicate(index, number, row["date"], afm, name):
+            skipped.append({
+                "row": row.get("row"),
+                "message": f"Το παραστατικό «{row['doc_number']}» υπάρχει ήδη "
+                           "καταχωρημένο.",
+            })
+            continue
+
+        client = (by_afm.get(afm) if afm else None) or (by_name.get(name) if name else None)
+        if client is None:
+            client = Client(user_id=user.id,
+                            # A row identified only by ΑΦΜ still needs a name to
+                            # show on its card; the number is the one thing that
+                            # certainly identifies it.
+                            name=(row.get("client") or f"Α.Φ.Μ. {row['afm']}").strip(),
+                            status=STATUS_ACTIVE, afm=row.get("afm"))
+            session.add(client)
+            # The transaction below needs the foreign key, and the maps need the
+            # row to be findable by the time the next line of the file asks.
+            session.flush()
+            new_clients.append(client)
+            if afm:
+                by_afm.setdefault(afm, client)
+            key = name_key(client.name)
+            if key:
+                by_name.setdefault(key, client)
+
+        signed, vat_amount = finance.book_amounts(
+            row["amount"], row["type"], doc_type=row.get("doc_type"),
+            vat_rate=row["vat_rate"], vat_amount=row.get("vat_amount"),
+            basis=row.get("basis", "gross"))
+
+        session.add(Transaction(
+            user_id=user.id,
+            client_id=client.id,
+            # Denormalised from the client row, not from the file, so the two
+            # can never disagree — see create_transaction.
+            client=client.name,
+            amount=signed,
+            type=row["type"],
+            vat_amount=vat_amount,
+            vat_rate=row["vat_rate"],
+            date=row["date"],
+            description=row.get("description"),
+            source=IMPORT_SOURCE,
+            doc_number=row.get("doc_number"),
+            counterparty_afm=row.get("afm"),
+            doc_type=row.get("doc_type"),
+            due_date=row.get("due_date"),
+        ))
+        created.append(row)
+        if number:
+            index.setdefault((number, row["date"]), []).append((afm, name_key(client.name)))
+
+    if created or new_clients:
+        session.commit()
+    return created, skipped, new_clients
+
+
 # --- Debt settlement ------------------------------------------------------
 def settle_debt(session, user, record_id, amount=None, vat_rate=None,
                 paid_date=None, note=None):
