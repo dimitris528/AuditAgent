@@ -7,6 +7,7 @@ import { money, moneyAbs } from "@/lib/format";
 import { searchHaystack, searchKey } from "@/lib/text";
 import { clsx } from "@/lib/clsx";
 import { Badge } from "./ui/Badge";
+import { ImportDataButton } from "./ImportDataModal";
 import { useClientDrawer } from "./ClientDrawerProvider";
 
 // The bottom row of the dashboard: every transaction in the period, searchable.
@@ -108,6 +109,11 @@ export function TransactionsTable({
         </div>
 
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          {/* First in the toolbar rather than last: on an empty book the
+              filters and the search box have nothing to act on, and this is
+              the control that gives them something. */}
+          <ImportDataButton kind="transactions" />
+
           <div className="flex rounded-lg border border-slate-200 p-0.5 dark:border-slate-700">
             {FILTERS.map((f) => (
               <button

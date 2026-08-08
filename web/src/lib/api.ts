@@ -9,6 +9,8 @@ import type {
   DebtPaymentRow,
   DuplicateClient,
   DuplicateTransaction,
+  ImportKind,
+  ImportSummary,
   ScanResult,
   SettlementResult,
 } from "./types";
@@ -203,6 +205,38 @@ export async function scanDocument(file: File): Promise<ScanResult> {
     body: form,
   });
   return unwrap(res, "Αποτυχία σάρωσης παραστατικού");
+}
+
+/** What the file picker accepts, mirroring what server/imports.py can read. */
+export const IMPORT_ACCEPT =
+  ".csv,.xlsx,text/csv,application/vnd.ms-excel," +
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+/** Mirrors server/imports.MAX_BYTES — checked here only to fail fast. */
+export const IMPORT_MAX_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Upload a CSV/XLSX of clients or historic transactions.
+ *
+ * Resolves for a PARTIALLY successful import as well as a clean one: rows are
+ * validated independently server-side, so the normal outcome of a real
+ * migration file is "42 imported, 3 skipped, 1 could not be read" and the
+ * summary is the answer, not an error. Only a file that could not be read at
+ * all throws.
+ */
+export async function importData(
+  kind: ImportKind,
+  file: File,
+): Promise<ImportSummary> {
+  const form = new FormData();
+  form.append("file", file, file.name || "import.csv");
+  const res = await fetch(`/api/import/${kind}`, { method: "POST", body: form });
+  return unwrap(res, "Αποτυχία εισαγωγής δεδομένων");
+}
+
+/** Where the "Κατεβάστε το πρότυπο αρχείο CSV" link points. A plain href, not
+ *  a fetch: the browser downloads it natively, same as the CSV export. */
+export function importTemplateUrl(kind: ImportKind): string {
+  return `/api/import/templates/${kind}`;
 }
 
 export async function login(

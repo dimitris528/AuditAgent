@@ -36,6 +36,12 @@ python-multipart==0.0.32   # REQUIRED by FastAPI for UploadFile — without it t
 # else in the repo imported it.
 openai==2.53.0
 
+# --- Bulk import (CSV / Excel) --------------------------------------------
+# server/imports.py reads an uploaded .xlsx with openpyxl. CSV needs nothing
+# beyond the stdlib; this is solely so a user migrating from Excel can upload
+# the workbook they already have instead of being told to export it first.
+openpyxl==3.1.5
+
 # --- PostgreSQL (Supabase) ------------------------------------------------
 # The live data layer. server/database.py builds the engine, server/models.py
 # the tables, server/store.py the queries.

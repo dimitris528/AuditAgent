@@ -202,6 +202,44 @@ export interface TransactionRow {
 
 export type DebtStatus = "overdue" | "due_soon" | "current" | "unknown";
 
+/** Which of the two importers a file is headed for. */
+export type ImportKind = "clients" | "transactions";
+
+/** One row the importer had something to say about. `row` is the number the
+ *  user sees in Excel's own gutter, so "line 12" means line 12. */
+export interface ImportIssue {
+  row: number;
+  message: string;
+}
+
+/**
+ * server/main.py → _import_summary. What the upload modal renders.
+ *
+ * The counts always add up: total_rows === imported + skipped + failed. The
+ * three issue LISTS are capped server-side while the counts stay exact, so a
+ * wholly mis-mapped file reports its 4000 failures without shipping 4000
+ * messages.
+ */
+export interface ImportSummary {
+  ok: boolean;
+  kind: ImportKind;
+  filename: string | null;
+  total_rows: number;
+  imported: number;
+  /** Already on file — a duplicate client, or an invoice already entered. */
+  skipped: number;
+  /** Not imported: the row could not be read. */
+  failed: number;
+  /** Transactions only — clients created to hold the imported rows. */
+  clients_created: number;
+  /** Ready-to-show Greek, e.g. "Εισήχθησαν 42 πελάτες επιτυχώς!" */
+  message: string;
+  errors: ImportIssue[];
+  /** Imported, but something was dropped or inferred. */
+  warnings: ImportIssue[];
+  skipped_rows: ImportIssue[];
+}
+
 export interface DocTypeInfo {
   value: string;
   label: string;

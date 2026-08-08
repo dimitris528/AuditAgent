@@ -35,8 +35,8 @@ import auth
 import finance
 import passwords
 from config import DOCS_ENABLED, STRIPE_WEBHOOK_SECRET
-from server import (billing, database, deps, exports, mailer, ocr, store,
-                    subscription)
+from server import (billing, database, deps, exports, imports, mailer, ocr,
+                    store, subscription)
 from server.billing import router as billing_router
 from server.webhooks import router as webhooks_router
 
@@ -942,6 +942,164 @@ def export_transactions(user: str = Depends(get_current_user),
     )
 
 
+# --------------------------------------------------------------------------
+# Bulk import (CSV / Excel)
+# --------------------------------------------------------------------------
+# The mirror image of the export above, and the front door for a new user
+# arriving from Excel or a legacy Greek accounting package. Parsing and
+# validation live in server/imports.py, the matching and the writes in
+# server/store.py; what is left here is the upload, the paywall and the shape
+# of the summary the modal renders.
+async def _read_upload(file):
+    """The uploaded bytes, refusing anything past the size cap.
+
+    Read with an explicit limit rather than `await file.read()`: the unbounded
+    form pulls the whole body into memory BEFORE the size can be checked, so a
+    500 MB upload is a memory problem no later check can undo. One byte past
+    the cap is enough to know it was exceeded.
+    """
+    data = await file.read(imports.MAX_BYTES + 1)
+    if len(data) > imports.MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Το αρχείο ξεπερνά τα {imports.MAX_BYTES // (1024 * 1024)} MB.")
+    if not data:
+        raise HTTPException(status_code=422, detail="Το αρχείο είναι κενό.")
+    return data
+
+
+# Greek needs the noun AND the verb to agree with the count, and "Εισήχθησαν 1
+# πελάτες" is exactly the detail that makes a product feel machine-translated.
+_IMPORT_NOUNS = {
+    imports.CLIENTS: ("πελάτης", "πελάτες"),
+    imports.TRANSACTIONS: ("κίνηση", "κινήσεις"),
+}
+
+
+def _import_message(kind, imported):
+    if not imported:
+        return "Δεν εισήχθη καμία νέα εγγραφή."
+    singular, plural = _IMPORT_NOUNS[kind]
+    if imported == 1:
+        return f"Εισήχθη 1 {singular} επιτυχώς!"
+    return f"Εισήχθησαν {imported} {plural} επιτυχώς!"
+
+
+def _import_summary(kind, filename, parsed, imported, skipped,
+                    clients_created=0):
+    """What the upload modal renders.
+
+    The four counts always add up — total == imported + skipped + failed — so
+    the user can see at a glance that nothing went missing between the file and
+    the book. The per-row lists are CAPPED (imports.MAX_ISSUES) while the counts
+    stay exact: a wholly mis-mapped file produces one error per row, and
+    returning four thousand of them helps nobody and costs a megabyte.
+    """
+    return {
+        "ok": True,
+        "kind": kind,
+        "filename": filename,
+        "total_rows": parsed.total,
+        "imported": imported,
+        "skipped": len(skipped),
+        "failed": len(parsed.errors),
+        # Transactions only: clients that had to be created to hold the rows,
+        # which is the one side effect of this import worth announcing.
+        "clients_created": clients_created,
+        "message": _import_message(kind, imported),
+        "errors": parsed.errors[:imports.MAX_ISSUES],
+        "warnings": parsed.warnings[:imports.MAX_ISSUES],
+        "skipped_rows": skipped[:imports.MAX_ISSUES],
+    }
+
+
+@app.post("/api/import/clients")
+async def import_clients(file: UploadFile = File(...),
+                         user: str = Depends(get_current_user)):
+    """Bulk-create clients from a CSV/XLSX (Επωνυμία, Α.Φ.Μ., Τηλέφωνο, Email).
+
+    Rows are validated independently: a bad ΑΦΜ on line 12 is reported against
+    line 12 and the other 400 rows still import. A client the book already has
+    is skipped rather than duplicated or refused, so re-uploading the same file
+    is a safe no-op — which is what makes "fix the eight rows it complained
+    about and try again" a workable instruction.
+    """
+    _require_db()
+    # Before the file is even parsed: an import is a write, and a lapsed tenant
+    # should be told so rather than after a 5 MB upload has been processed.
+    _assert_can_write(user)
+    data = await _read_upload(file)
+    try:
+        parsed = imports.parse_clients(data)
+    except imports.ImportFileError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+
+    try:
+        with database.session_scope() as session:
+            tenant = _resolve_user(session, user, write=True)
+            created, skipped = store.import_clients(session, tenant, parsed.rows)
+            return _import_summary(imports.CLIENTS, file.filename, parsed,
+                                   len(created), skipped)
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+
+
+@app.post("/api/import/transactions")
+async def import_transactions(file: UploadFile = File(...),
+                              user: str = Depends(get_current_user)):
+    """Bulk-create historic transactions from a CSV/XLSX.
+
+    Each row is matched to a client by ΑΦΜ first and by name second; one that
+    matches neither has its client created, because the ordinary case is a year
+    of history landing in an empty account. Invoices already on file are
+    skipped by the same (number, date, issuer) rule the manual duplicate guard
+    uses, so an interrupted import can simply be re-run.
+    """
+    _require_db()
+    _assert_can_write(user)
+    data = await _read_upload(file)
+    try:
+        parsed = imports.parse_transactions(data)
+    except imports.ImportFileError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+
+    try:
+        with database.session_scope() as session:
+            tenant = _resolve_user(session, user, write=True)
+            created, skipped, new_clients = store.import_transactions(
+                session, tenant, parsed.rows)
+            return _import_summary(imports.TRANSACTIONS, file.filename, parsed,
+                                   len(created), skipped,
+                                   clients_created=len(new_clients))
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+
+
+@app.get("/api/import/templates/{kind}")
+def import_template(kind: str, user: str = Depends(get_current_user)):
+    """The blank file to fill in — "Κατεβάστε το πρότυπο αρχείο CSV".
+
+    Served by the backend rather than written into the bundle so the template
+    and the parser cannot drift: the columns below are the same tuples
+    server/imports.py matches on. Same Excel dialect as the export (BOM,
+    semicolons, decimal commas), so a template downloaded, filled in and
+    re-uploaded survives a round trip through a Greek Excel unaltered.
+    """
+    try:
+        body, name = imports.template(kind)
+    except imports.ImportFileError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+    return Response(
+        content=body.encode("utf-8"),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
+
+
 @app.get("/api/transactions")
 def transactions(user: str = Depends(get_current_user),
                  client: str | None = None,
@@ -974,41 +1132,18 @@ def create_transaction(body: TransactionCreate,
             status_code=422,
             detail=f"doc_type must be one of {list(finance.DOC_TYPES)}")
     _require_db()
-    is_debt = body.type == finance.DEBT_TYPE
-    is_revenue = body.type == "Έσοδο"
-    credit = finance.is_credit_note(body.doc_type)
-    if credit and is_debt:
+    if finance.is_credit_note(body.doc_type) and body.type == finance.DEBT_TYPE:
         raise HTTPException(
             status_code=422,
             detail="Το πιστωτικό δεν μπορεί να καταχωρηθεί ως χρεωστούμενο.")
 
-    # Whichever side was typed, the row stores the GROSS figure.
-    gross = (finance.gross_from_net(body.amount, body.vat_rate)
-             if body.amount_basis == "net" else round(body.amount, 2))
-
-    # Sign convention: revenue/debt are positive, expense negative — the
-    # analytics read the sign, not the Type column.
-    signed = gross if (is_revenue or is_debt) else -gross
-    if credit:
-        # A Πιστωτικό reverses an earlier document, so it is booked negative
-        # WITHIN its own bucket: a credit note against a sale is less revenue,
-        # not an expense. sum_by_type sums each bucket signed, so this lands
-        # correctly without any special case downstream.
-        signed = -signed
-
-    # VAT is derived from the gross amount; debts carry only the rate (VAT is
-    # stamped on Εξόφληση).
-    if is_debt:
-        vat_amount = None
-    elif body.vat_amount is not None:
-        # The figure printed on the document wins over the derived one, but is
-        # re-oriented here: vat_for_write puts positive cents in both buckets
-        # and negative ones on a credit note, and a stored VAT that disagreed
-        # with its own row's sign would break the summation guarantee.
-        magnitude = round(abs(body.vat_amount), 2)
-        vat_amount = -magnitude if credit else magnitude
-    else:
-        vat_amount = finance.vat_for_write(signed, is_revenue, body.vat_rate)
+    # The net→gross conversion, the sign convention, the credit-note reversal
+    # and the VAT orientation all live in finance.book_amounts, which the bulk
+    # importer shares — see its docstring for why they must not be duplicated.
+    signed, vat_amount = finance.book_amounts(
+        body.amount, body.type, doc_type=body.doc_type,
+        vat_rate=body.vat_rate, vat_amount=body.vat_amount,
+        basis=body.amount_basis)
     try:
         with database.session_scope() as session:
             tenant = _resolve_user(session, user, write=True)
