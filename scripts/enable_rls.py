@@ -183,7 +183,24 @@ def apply():
     statements = _SQL.read_text(encoding="utf-8")
     engine = database.get_engine()
     with engine.begin() as conn:
-        conn.execute(text(statements))
+        # Straight to the driver cursor with NO parameter argument, which is
+        # load-bearing twice over.
+        #
+        # text() would parse the file for :bindparams a migration must never
+        # contain. And psycopg2 only skips its own %-interpolation when no
+        # parameters are passed AT ALL — an empty tuple is not the same thing,
+        # and would make it choke on the %I placeholders inside the format()
+        # calls below. (exec_driver_sql distils None into an empty dict, which
+        # is why it is not used here either.)
+        #
+        # begin() keeps the whole file in one transaction, so a failure part
+        # way through leaves no half-policied table behind — as this very
+        # script proved when it first failed here and rolled back cleanly.
+        cursor = conn.connection.cursor()
+        try:
+            cursor.execute(statements)
+        finally:
+            cursor.close()
     print(f"Applied {_SQL.name}.")
     print()
     return verify()
