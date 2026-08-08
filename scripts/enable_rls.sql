@@ -15,14 +15,46 @@
 -- user_id on every query — this is the second lock, not the only one.
 -- ---------------------------------------------------------------------------
 
--- --- Which tables, and which are deliberately left out ---------------------
--- users                 NO POLICY. Login looks a user up BY USERNAME, before
---                       any tenant is known; a policy here would make it
---                       impossible to authenticate at all.
--- password_reset_tokens NO POLICY, same reason: a reset link is resolved by
---                       its token hash alone, with nobody signed in.
+-- --- The authentication tables, which cannot be tenant-scoped --------------
+-- `users` and `password_reset_tokens` are read BEFORE any tenant exists:
+-- login looks a user up by username, and a reset link is resolved by its token
+-- hash with nobody signed in. A tenant policy on either makes it impossible to
+-- authenticate at all.
 --
--- Everything else is tenant data and gets the full treatment.
+-- They still need an EXPLICIT policy, and this is the part that bites. RLS is
+-- already ENABLED on both in this database (Supabase turns it on for tables
+-- created through its dashboard) with no policy attached — which denies every
+-- row to any role that does not bypass RLS. Today nothing notices, because the
+-- application connects as the owner. Point it at a properly restricted role
+-- without adding these two policies first and SELECT ... FROM users returns
+-- nothing: not a leak, a total authentication outage.
+--
+-- So the openness is written down rather than left implied. What protects
+-- these tables is the password check and the token hash, not RLS, and a
+-- policy saying so is more honest than an empty one that reads as protection.
+DO $$
+DECLARE
+    target text;
+BEGIN
+    FOREACH target IN ARRAY ARRAY['users', 'password_reset_tokens']
+    LOOP
+        IF NOT EXISTS (SELECT 1 FROM information_schema.tables
+                        WHERE table_schema = current_schema()
+                          AND table_name = target) THEN
+            CONTINUE;
+        END IF;
+        EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', target);
+        EXECUTE format('DROP POLICY IF EXISTS auth_table_open_policy ON %I', target);
+        EXECUTE format($p$
+            CREATE POLICY auth_table_open_policy ON %I
+                FOR ALL USING (true) WITH CHECK (true)
+        $p$, target);
+        RAISE NOTICE 'open policy on % (pre-authentication table)', target;
+    END LOOP;
+END $$;
+
+-- --- Tenant data ------------------------------------------------------------
+-- Everything below is partitioned by user_id and gets the full treatment.
 
 DO $$
 DECLARE

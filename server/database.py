@@ -32,6 +32,8 @@ one-shot backfill script, but 6543 is the right choice for a web service on
 Render's free tier, where connection count is the scarce resource.
 """
 
+import os
+
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.pool import NullPool
@@ -266,12 +268,28 @@ UPDATE transactions t
 """
 
 
+#: Whether the web process migrates its own schema at startup.
+#:
+#: On by default, which is what makes a fresh deployment work with no extra
+#: step. Turned OFF once the application connects as a restricted role
+#: (scripts/create_app_role.sql): ALTER TABLE requires ownership, so every
+#: statement below would raise for a role that deliberately does not own its
+#: tables — and a web process that can rewrite its own schema on restart is a
+#: much larger blast radius than one that cannot.
+MIGRATE_ON_BOOT = (os.getenv("DB_MIGRATE_ON_BOOT", "1").strip().lower()
+                   not in ("0", "false", "no", "off"))
+
+
 def init_db():
     """Create missing tables, then apply the additive column migrations.
 
     Safe to call on every boot: create_all only issues CREATE TABLE for tables
     that do not exist, and the ALTERs are IF NOT EXISTS.
     """
+    if not MIGRATE_ON_BOOT:
+        print("[INFO] DB_MIGRATE_ON_BOOT is off — skipping schema migration. "
+              "Run it as the table owner when you deploy.")
+        return
     engine = get_engine()
     SQLModel.metadata.create_all(engine)
 
