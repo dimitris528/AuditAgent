@@ -3,6 +3,7 @@ import type { ClientData } from "@/lib/types";
 import { money, moneyAbs } from "@/lib/format";
 import { clsx } from "@/lib/clsx";
 import { Badge } from "./ui/Badge";
+import { SelectCheckbox } from "./bulk/SelectCheckbox";
 import { TaxProgressBar } from "./TaxProgressBar";
 
 function Metric({
@@ -39,6 +40,8 @@ export function ClientCard({
   onOpen,
   daysOverdue,
   compact = false,
+  selected,
+  onToggleSelect,
 }: {
   client: ClientData;
   onOpen?: () => void;
@@ -46,6 +49,10 @@ export function ClientCard({
   daysOverdue?: number;
   /** Rendered in a narrow column — see the metrics grid below. */
   compact?: boolean;
+  /** Selection state. Both omitted on a card that cannot be selected — one
+   *  with no id has nothing to send to a bulk endpoint. */
+  selected?: boolean;
+  onToggleSelect?: () => void;
 }) {
   const m = client.metrics;
   const vatRefund = m.net_vat < 0;
@@ -57,6 +64,10 @@ export function ClientCard({
     <div
       className={clsx(
         "flex flex-col rounded-2xl border p-5 shadow-card transition duration-200 dark:shadow-card-dark",
+        // A ticked card is marked on its own, not only in the action bar: with
+        // a long list the bar sits far from whatever the eye is on.
+        selected &&
+          "ring-2 ring-indigo-500 ring-offset-1 dark:ring-offset-slate-950",
         // A closed client reads as a DRAFT of itself: dashed edge, cooler
         // surface. The figures stay at full contrast — they are still real
         // money, and this card is how someone checks what a client closed at.
@@ -81,6 +92,13 @@ export function ClientCard({
     >
       {/* Header */}
       <div className="mb-4 flex items-center gap-2.5">
+        {onToggleSelect ? (
+          <SelectCheckbox
+            checked={selected === true}
+            onChange={onToggleSelect}
+            label={`Επιλογή πελάτη ${client.name.trim() || "χωρίς όνομα"}`}
+          />
+        ) : null}
         <span
           className={clsx(
             "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg",

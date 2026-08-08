@@ -4,6 +4,7 @@
 // this module is safe to import from Client Components.)
 import { ApiError, DuplicateError } from "./errors";
 import type {
+  BulkResultPayload,
   ClientDetail,
   ClientDetailPayload,
   DebtPaymentRow,
@@ -205,6 +206,53 @@ export async function scanDocument(file: File): Promise<ScanResult> {
     body: form,
   });
   return unwrap(res, "Αποτυχία σάρωσης παραστατικού");
+}
+
+/**
+ * Bulk actions over a checkbox selection.
+ *
+ * Ids go out as-is — the backend coerces a numeric string, so the caller does
+ * not have to remember that transactions serialise theirs as strings while
+ * clients use numbers.
+ *
+ * A PARTIAL outcome resolves rather than throws: refusing to delete a client
+ * that still has transactions is the endpoint working correctly, and the
+ * payload's `blocked` list is the answer to show. Only a transport or auth
+ * failure throws.
+ */
+export async function bulkDeleteClients(
+  ids: (string | number)[],
+): Promise<BulkResultPayload> {
+  const res = await fetch(`/api/clients/bulk-delete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids }),
+  });
+  return unwrap(res, "Αποτυχία διαγραφής πελατών");
+}
+
+export async function bulkDeleteTransactions(
+  ids: (string | number)[],
+): Promise<BulkResultPayload> {
+  const res = await fetch(`/api/transactions/bulk-delete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids }),
+  });
+  return unwrap(res, "Αποτυχία διαγραφής κινήσεων");
+}
+
+/** `archived: false` restores — same endpoint, opposite direction. */
+export async function bulkArchiveClients(
+  ids: (string | number)[],
+  archived = true,
+): Promise<BulkResultPayload> {
+  const res = await fetch(`/api/clients/bulk-archive`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids, archived }),
+  });
+  return unwrap(res, "Αποτυχία αρχειοθέτησης");
 }
 
 /** What the file picker accepts, mirroring what server/imports.py can read. */

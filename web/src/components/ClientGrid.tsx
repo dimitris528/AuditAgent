@@ -1,11 +1,16 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Search, Users, X } from "lucide-react";
 import type { ClientData, DebtAlerts } from "@/lib/types";
+import { bulkArchiveClients, bulkDeleteClients } from "@/lib/api";
 import { searchHaystack, searchKey } from "@/lib/text";
+import { useSelection } from "@/lib/useSelection";
 import { clsx } from "@/lib/clsx";
 import { ClientCard } from "./ClientCard";
+import { BulkActionBar } from "./bulk/BulkActionBar";
+import { SelectCheckbox } from "./bulk/SelectCheckbox";
 import { ImportDataButton } from "./ImportDataModal";
 import { useClientDrawer } from "./ClientDrawerProvider";
 
@@ -41,6 +46,7 @@ export function ClientGrid({
   compact = false,
 }: Props) {
   const { openClient } = useClientDrawer();
+  const router = useRouter();
   const [query, setQuery] = useState("");
   const [scope, setScope] = useState<Scope>("active");
 
@@ -75,6 +81,29 @@ export function ClientGrid({
     return pool.filter((c) => searchHaystack([c.name, c.afm]).includes(needle));
   }, [pool, needle]);
 
+  // Selection runs over what is ON SCREEN. A client with no id (the legacy
+  // name-only path) has nothing to send to a bulk endpoint, so it is not
+  // selectable and "select all" cannot silently include it.
+  const selectableIds = useMemo(
+    () => visible.filter((c) => c.id).map((c) => String(c.id)),
+    [visible],
+  );
+  const selection = useSelection(selectableIds);
+
+  // The archive button flips direction with the filter: under Αρχειοθετημένοι
+  // the only sensible bulk action is putting them back, and offering
+  // "Αρχειοθέτηση" there would be a button that does nothing.
+  const restoring = scope === "archived";
+
+  async function refreshAfter<T extends { message: string }>(result: T): Promise<T> {
+    // Refetch rather than splice the row out locally: every KPI, chart and tax
+    // bar on this page is derived server-side from the client list, so an
+    // optimistic removal would leave the card gone and all the totals around it
+    // still counting it — a page that visibly disagrees with itself.
+    router.refresh();
+    return result;
+  }
+
   return (
     <section>
       {/* Title + search travel together, and in the rail they STICK to the top
@@ -89,6 +118,17 @@ export function ClientGrid({
         )}
       >
         <div className="mb-3 flex items-center gap-2">
+          {/* "Select all" for the grid, in its header — the counterpart of the
+              table's header checkbox. Hidden when nothing on screen can be
+              selected, rather than shown as a control that does nothing. */}
+          {selectableIds.length > 0 ? (
+            <SelectCheckbox
+              checked={selection.allVisible}
+              indeterminate={selection.someVisible}
+              onChange={selection.toggleAll}
+              label="Επιλογή όλων των εμφανιζόμενων πελατών"
+            />
+          ) : null}
           <Users className="h-4 w-4 text-slate-400 dark:text-slate-500" />
           <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
             {/* The tabs qualify the heading once they exist — a panel titled
@@ -191,10 +231,33 @@ export function ClientGrid({
               onOpen={
                 client.id ? () => openClient(Number(client.id)) : undefined
               }
+              selected={client.id ? selection.isSelected(String(client.id)) : false}
+              onToggleSelect={
+                client.id ? () => selection.toggle(String(client.id)) : undefined
+              }
             />
           ))}
         </div>
       )}
+
+      <BulkActionBar
+        scope="clients"
+        count={selection.count}
+        hiddenSelected={selection.hidden}
+        onClear={selection.clear}
+        onDelete={async () => {
+          const result = await bulkDeleteClients(selection.ids);
+          return refreshAfter({
+            message: result.message,
+            blocked: result.blocked,
+          });
+        }}
+        archiveLabel={restoring ? "Επαναφορά" : "Αρχειοθέτηση"}
+        onArchive={async () => {
+          const result = await bulkArchiveClients(selection.ids, !restoring);
+          return refreshAfter({ message: result.message });
+        }}
+      />
     </section>
   );
 }

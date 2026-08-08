@@ -243,6 +243,27 @@ class ClientCreate(BaseModel):
     notes: str | None = Field(default=None, max_length=2000)
 
 
+class BulkIds(BaseModel):
+    """The selection a bulk action applies to.
+
+    `int` rather than `str` even though transaction ids are serialised as
+    strings: pydantic coerces a numeric string, so both `[1, 2]` and
+    `["1", "2"]` are accepted, while "abc" is rejected at the edge instead of
+    becoming a silently-skipped row.
+
+    Capped so one request cannot ask for unbounded work. The UI selects from a
+    page of rows, so the ceiling is far above anything reachable by clicking.
+    """
+    ids: list[int] = Field(..., min_length=1, max_length=500)
+
+
+class BulkArchive(BulkIds):
+    # False restores. The endpoint is named for the common direction, but
+    # un-archiving is the same operation and splitting it into a second route
+    # would duplicate the whole body to flip one column.
+    archived: bool = True
+
+
 class ClientDuplicateCheck(BaseModel):
     name: str | None = Field(default=None, max_length=200)
     afm: str | None = Field(default=None, max_length=32)
@@ -940,6 +961,122 @@ def export_transactions(user: str = Depends(get_current_user),
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{name}"'},
     )
+
+
+# --------------------------------------------------------------------------
+# Bulk selection actions (delete / archive)
+# --------------------------------------------------------------------------
+# What the checkbox selection in the UI posts to. Every one of these reports
+# what it could NOT do alongside what it did: a bulk action that silently drops
+# half its input is worse than one that refuses, because the user is left
+# unable to tell which half landed.
+def _plural(count, singular, plural):
+    return f"{count} {singular if count == 1 else plural}"
+
+
+@app.post("/api/transactions/bulk-delete")
+def bulk_delete_transactions(body: BulkIds,
+                             user: str = Depends(get_current_user)):
+    """Delete the selected transactions.
+
+    Irreversible, and deliberately not softened with a "trash": these are book
+    entries, and a half-deleted one that still counts toward a total is worse
+    than none. The confirmation lives in the UI, where the count can be shown.
+    """
+    _require_db()
+    try:
+        with database.session_scope() as session:
+            tenant = _resolve_user(session, user, write=True)
+            deleted, missing = store.delete_transactions(session, tenant,
+                                                         body.ids)
+            return {
+                "ok": True,
+                "requested": len(body.ids),
+                "deleted": len(deleted),
+                "skipped": len(missing),
+                "deleted_ids": [str(i) for i in deleted],
+                "message": (f"Διαγράφηκαν {_plural(len(deleted), 'κίνηση', 'κινήσεις')}."
+                            if deleted else "Δεν διαγράφηκε καμία κίνηση."),
+            }
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+
+
+@app.post("/api/clients/bulk-delete")
+def bulk_delete_clients(body: BulkIds, user: str = Depends(get_current_user)):
+    """Delete the selected clients — only those with no transactions.
+
+    A client that still has rows is refused and reported in `blocked`, with its
+    name and row count. See store.delete_clients for why that is the behaviour
+    rather than a cascade: taking booked history out with a checkbox click, or
+    orphaning rows the totals still count, are both worse than saying no. The
+    answer for those clients is Αρχειοθέτηση, which is what `blocked` tells the
+    UI to offer.
+    """
+    _require_db()
+    try:
+        with database.session_scope() as session:
+            tenant = _resolve_user(session, user, write=True)
+            deleted, blocked, missing = store.delete_clients(session, tenant,
+                                                             body.ids)
+            return {
+                "ok": True,
+                "requested": len(body.ids),
+                "deleted": len(deleted),
+                "skipped": len(blocked) + len(missing),
+                "deleted_ids": [row["id"] for row in deleted],
+                "blocked": [
+                    {**row,
+                     "message": f"Ο πελάτης «{row['name']}» έχει "
+                                f"{_plural(row['transactions'], 'κίνηση', 'κινήσεις')} "
+                                "και δεν μπορεί να διαγραφεί. Αρχειοθετήστε τον."}
+                    for row in blocked
+                ],
+                "message": (f"Διαγράφηκαν {_plural(len(deleted), 'πελάτης', 'πελάτες')}."
+                            if deleted else "Δεν διαγράφηκε κανένας πελάτης."),
+            }
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+
+
+@app.post("/api/clients/bulk-archive")
+def bulk_archive_clients(body: BulkArchive,
+                         user: str = Depends(get_current_user)):
+    """Archive (or, with archived=false, restore) the selected clients.
+
+    The reversible counterpart to delete, and the answer for every client
+    bulk-delete refuses. An archived client keeps all its history, drops out of
+    the active lists and out of every total that sums them, and reappears under
+    the grid's Αρχειοθετημένοι filter.
+    """
+    _require_db()
+    try:
+        with database.session_scope() as session:
+            tenant = _resolve_user(session, user, write=True)
+            changed, unchanged, missing = store.set_clients_archived(
+                session, tenant, body.ids, archived=body.archived)
+            verb = "Αρχειοθετήθηκαν" if body.archived else "Επαναφέρθηκαν"
+            none = ("Δεν αρχειοθετήθηκε κανένας πελάτης." if body.archived
+                    else "Δεν επαναφέρθηκε κανένας πελάτης.")
+            return {
+                "ok": True,
+                "archived": body.archived,
+                "requested": len(body.ids),
+                "changed": len(changed),
+                "skipped": len(unchanged) + len(missing),
+                "already": len(unchanged),
+                "changed_ids": [row["id"] for row in changed],
+                "message": (f"{verb} {_plural(len(changed), 'πελάτης', 'πελάτες')}."
+                            if changed else none),
+            }
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
 
 
 # --------------------------------------------------------------------------

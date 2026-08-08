@@ -202,6 +202,29 @@ export interface TransactionRow {
 
 export type DebtStatus = "overdue" | "due_soon" | "current" | "unknown";
 
+/** A row a bulk action declined to touch, with the reason. */
+export interface BulkBlocked {
+  id: number;
+  name: string;
+  /** Transactions still attached — why the client cannot be deleted. */
+  transactions: number;
+  message: string;
+}
+
+/** server/main.py → the three bulk endpoints. `deleted`/`changed` count what
+ *  actually happened; `skipped` covers everything refused or not found. */
+export interface BulkResultPayload {
+  ok: boolean;
+  requested: number;
+  deleted?: number;
+  changed?: number;
+  skipped: number;
+  /** Clients already in the requested archive state. */
+  already?: number;
+  message: string;
+  blocked?: BulkBlocked[];
+}
+
 /** Which of the two importers a file is headed for. */
 export type ImportKind = "clients" | "transactions";
 

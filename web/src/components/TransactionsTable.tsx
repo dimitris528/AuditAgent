@@ -1,12 +1,17 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Receipt, Search, X } from "lucide-react";
 import type { TransactionRow } from "@/lib/types";
+import { bulkDeleteTransactions } from "@/lib/api";
 import { money, moneyAbs } from "@/lib/format";
 import { searchHaystack, searchKey } from "@/lib/text";
+import { useSelection } from "@/lib/useSelection";
 import { clsx } from "@/lib/clsx";
 import { Badge } from "./ui/Badge";
+import { BulkActionBar } from "./bulk/BulkActionBar";
+import { SelectCheckbox } from "./bulk/SelectCheckbox";
 import { ImportDataButton } from "./ImportDataModal";
 import { useClientDrawer } from "./ClientDrawerProvider";
 
@@ -76,6 +81,7 @@ export function TransactionsTable({
   clientIds: Record<string, number>;
 }) {
   const { openClient } = useClientDrawer();
+  const router = useRouter();
 
   const idFor = (name: string | null): number | undefined =>
     name ? clientIds[name.trim().toLowerCase()] : undefined;
@@ -92,6 +98,15 @@ export function TransactionsTable({
       return matches(t, needle);
     });
   }, [rows, needle, filter]);
+
+  // Selection follows the FILTER, not the whole book: ticking "select all"
+  // while "Χρεωστούμενα" is showing has to mean those debts, or the next click
+  // deletes revenue rows nobody looked at.
+  const selectableIds = useMemo(
+    () => visible.filter((t) => t.id).map((t) => t.id as string),
+    [visible],
+  );
+  const selection = useSelection(selectableIds);
 
   return (
     <section className="rounded-2xl border border-slate-200 bg-white shadow-card dark:border-slate-800 dark:bg-slate-900 dark:shadow-card-dark">
@@ -169,6 +184,16 @@ export function TransactionsTable({
             <table className="w-full text-left text-xs">
               <thead className="border-b border-slate-100 text-[11px] uppercase tracking-wide text-slate-400 dark:border-slate-800">
                 <tr>
+                  <th className="w-9 px-3 py-2 font-medium">
+                    {selectableIds.length > 0 ? (
+                      <SelectCheckbox
+                        checked={selection.allVisible}
+                        indeterminate={selection.someVisible}
+                        onChange={selection.toggleAll}
+                        label="Επιλογή όλων των εμφανιζόμενων κινήσεων"
+                      />
+                    ) : null}
+                  </th>
                   <th className="px-4 py-2 font-medium">Ημ/νία</th>
                   <th className="px-4 py-2 font-medium">Πελάτης</th>
                   <th className="px-4 py-2 font-medium">Παραστατικό</th>
@@ -186,8 +211,23 @@ export function TransactionsTable({
                     // rule down the left edge: on a dense table the tint alone
                     // is easy to lose track of when the eye is on the amount
                     // column, and the rule marks the row start.
-                    className="transition-colors hover:bg-indigo-50/70 hover:[box-shadow:inset_3px_0_0_0_#6366f1] dark:hover:bg-indigo-500/[0.07]"
+                    className={clsx(
+                      "transition-colors hover:bg-indigo-50/70 hover:[box-shadow:inset_3px_0_0_0_#6366f1] dark:hover:bg-indigo-500/[0.07]",
+                      // A ticked row keeps the same inset rule, permanently, so
+                      // the selection reads down the left edge of the table.
+                      t.id && selection.isSelected(t.id) &&
+                        "bg-indigo-50/60 [box-shadow:inset_3px_0_0_0_#6366f1] dark:bg-indigo-500/[0.09]",
+                    )}
                   >
+                    <td className="px-3 py-2.5">
+                      {t.id ? (
+                        <SelectCheckbox
+                          checked={selection.isSelected(t.id)}
+                          onChange={() => selection.toggle(t.id as string)}
+                          label={`Επιλογή κίνησης ${t.doc_number ?? t.client ?? ""} ${t.date ?? ""}`}
+                        />
+                      ) : null}
+                    </td>
                     <td className="whitespace-nowrap px-4 py-2.5 tabular-nums text-slate-500 dark:text-slate-400">
                       {t.date ?? "—"}
                     </td>
@@ -239,10 +279,22 @@ export function TransactionsTable({
             {visible.map((t) => (
               <li
                 key={t.id ?? `${t.client}-${t.date}-${t.amount}`}
-                className="p-4 transition-colors hover:bg-indigo-50/70 dark:hover:bg-indigo-500/[0.07]"
+                className={clsx(
+                  "p-4 transition-colors hover:bg-indigo-50/70 dark:hover:bg-indigo-500/[0.07]",
+                  t.id && selection.isSelected(t.id) &&
+                    "bg-indigo-50/60 dark:bg-indigo-500/[0.09]",
+                )}
               >
                 <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
+                  {t.id ? (
+                    <SelectCheckbox
+                      checked={selection.isSelected(t.id)}
+                      onChange={() => selection.toggle(t.id as string)}
+                      label={`Επιλογή κίνησης ${t.doc_number ?? t.client ?? ""} ${t.date ?? ""}`}
+                      className="mt-1"
+                    />
+                  ) : null}
+                  <div className="min-w-0 flex-1">
                     {idFor(t.client) ? (
                       <button
                         type="button"
@@ -296,6 +348,23 @@ export function TransactionsTable({
           </span>
         </div>
       ) : null}
+
+      {/* No archive action: a transaction has no archived state, so the button
+          is absent rather than rendered and disabled. */}
+      <BulkActionBar
+        scope="transactions"
+        count={selection.count}
+        hiddenSelected={selection.hidden}
+        onClear={selection.clear}
+        onDelete={async () => {
+          const result = await bulkDeleteTransactions(selection.ids);
+          // Refetched, not spliced: every KPI, chart and VAT figure above this
+          // table is derived server-side from these rows, so removing one
+          // locally would leave the totals around it still counting it.
+          router.refresh();
+          return { message: result.message };
+        }}
+      />
     </section>
   );
 }

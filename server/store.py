@@ -940,9 +940,196 @@ def delete_transaction(session, user, record_id):
     txn = get_transaction(session, user, record_id)
     if txn is None:
         return False
+    _release_transaction_links(session, user, {txn.id})
     session.delete(txn)
     session.commit()
     return True
+
+
+# --- Bulk selection actions -----------------------------------------------
+# Delete and archive over a set of ids, for the checkbox selection in the UI.
+#
+# Same two properties as the importer above: ONE transaction for the whole
+# batch, and one pass over the tenant's rows instead of a full scan per id.
+# Each function returns what it could not do alongside what it did — a bulk
+# action that silently drops half its input is worse than one that refuses,
+# because the user has no way to tell which half.
+
+
+def _release_transaction_links(session, user, ids):
+    """Detach everything pointing AT the transactions about to be deleted.
+
+    Three tables reference a transaction row, and Postgres will refuse the
+    DELETE for any one of them left dangling (SQLite quietly would not, which
+    is exactly how this would have passed the suite and failed in production):
+
+      * debt_payments.debt_id — the settlement log for a debt being deleted.
+        DELETED with it: the log records payments against a debt that is about
+        to stop existing, and an entry pointing at nothing is not history, it
+        is a broken row that every client balance would still sum.
+      * debt_payments.payment_txn_id — the revenue row a partial settlement
+        created. NULLED, not deleted: the payment still happened and the debt
+        it paid down may well survive, so the log keeps the entry and loses
+        only the link.
+      * transactions.debt_id — a settlement row pointing back at its debt.
+        Nulled for the same reason.
+    """
+    if not ids:
+        return
+    for payment in session.exec(
+        select(DebtPayment).where(DebtPayment.user_id == user.id)
+    ).all():
+        if payment.debt_id in ids:
+            session.delete(payment)
+        elif payment.payment_txn_id in ids:
+            payment.payment_txn_id = None
+            session.add(payment)
+    for txn in session.exec(
+        select(Transaction).where(Transaction.user_id == user.id)
+    ).all():
+        if txn.id not in ids and txn.debt_id in ids:
+            txn.debt_id = None
+            session.add(txn)
+    # Ordered before the rows themselves go, so the database never sees an
+    # instant where a foreign key points at a deleted primary key.
+    session.flush()
+
+
+def _as_ids(values):
+    """(usable int ids, unusable inputs) — ids arrive from JSON and a caller
+    may send anything."""
+    good, bad = [], []
+    for value in values or ():
+        try:
+            good.append(int(value))
+        except (TypeError, ValueError):
+            bad.append(value)
+    return good, bad
+
+
+def delete_transactions(session, user, ids):
+    """Delete many transactions. Returns (deleted ids, missing ids).
+
+    `missing` covers an unknown id and ANOTHER TENANT'S id indistinguishably —
+    the rows are loaded scoped to this user, so a guessed id simply is not
+    found.
+    """
+    wanted, missing = _as_ids(ids)
+    rows = {t.id: t for t in session.exec(
+        select(Transaction).where(Transaction.user_id == user.id)).all()}
+
+    targets = []
+    for pk in wanted:
+        row = rows.get(pk)
+        if row is None:
+            missing.append(pk)
+        else:
+            targets.append(row)
+    if not targets:
+        return [], missing
+
+    doomed = {t.id for t in targets}
+    _release_transaction_links(session, user, doomed)
+    for row in targets:
+        session.delete(row)
+    session.commit()
+    return sorted(doomed), missing
+
+
+def delete_clients(session, user, ids):
+    """Delete many clients. Returns (deleted, blocked, missing).
+
+    A client that still has transactions is BLOCKED rather than deleted, and
+    that is the central decision here. The alternatives are both worse: taking
+    the transactions with it destroys booked financial history on a checkbox
+    click, and leaving them behind orphans rows that finance.py still counts by
+    name — the totals would stay put while the card they belong to vanished,
+    which is the kind of discrepancy nobody finds until an audit.
+
+    So deletion is for clients created by mistake, and everything else gets
+    archived. `blocked` carries the name and the row count so the UI can say
+    which clients need archiving instead.
+    """
+    wanted, missing = _as_ids(ids)
+    clients = {c.id: c for c in session.exec(
+        select(Client).where(Client.user_id == user.id)).all()}
+
+    # Rows are attributed by FK when they have one and by name otherwise, the
+    # same rule get_client_transactions uses — a transaction predating
+    # client_id still belongs to its client, and still blocks the delete.
+    by_name = {}
+    for client in clients.values():
+        key = _key(client.name)
+        if key:
+            by_name.setdefault(key, client.id)
+
+    counts = {}
+    for txn in session.exec(
+        select(Transaction).where(Transaction.user_id == user.id)
+    ).all():
+        owner = (txn.client_id if txn.client_id in clients
+                 else by_name.get(_key(txn.client)))
+        if owner is not None:
+            counts[owner] = counts.get(owner, 0) + 1
+    # A settlement log entry references clients.id directly, so it blocks the
+    # delete on its own even in the odd case where its transaction has gone.
+    for payment in session.exec(
+        select(DebtPayment).where(DebtPayment.user_id == user.id)
+    ).all():
+        if payment.client_id in clients and payment.client_id not in counts:
+            counts[payment.client_id] = counts.get(payment.client_id, 0) + 1
+
+    deleted, blocked = [], []
+    for pk in wanted:
+        client = clients.get(pk)
+        if client is None:
+            missing.append(pk)
+            continue
+        used = counts.get(pk, 0)
+        if used:
+            blocked.append({"id": pk, "name": client.name, "transactions": used})
+            continue
+        deleted.append({"id": pk, "name": client.name})
+        session.delete(client)
+    if deleted:
+        session.commit()
+    return deleted, blocked, missing
+
+
+def set_clients_archived(session, user, ids, archived=True):
+    """Archive or restore many clients. Returns (changed, unchanged, missing).
+
+    `unchanged` is a client already in the requested state — reported rather
+    than counted as done, so selecting five clients of which two were already
+    archived says "3 archived, 2 already were" instead of a bare 5 that hides
+    what happened.
+
+    Archiving is the reversible counterpart to delete: nothing is destroyed,
+    the client leaves the active lists (and every total that sums them), and
+    the grid's own Αρχειοθετημένοι filter is where it reappears.
+    """
+    wanted, missing = _as_ids(ids)
+    status = STATUS_COMPLETED if archived else STATUS_ACTIVE
+    changed, unchanged = [], []
+
+    for pk in wanted:
+        client = session.get(Client, pk)
+        if client is None or client.user_id != user.id:
+            missing.append(pk)
+            continue
+        if client.status == status:
+            unchanged.append({"id": pk, "name": client.name})
+            continue
+        client.status = status
+        # Stamped on archive and cleared on restore, so a row never looks
+        # closed while being active — same rule update_client follows.
+        client.closed_date = date.today() if archived else None
+        session.add(client)
+        changed.append({"id": pk, "name": client.name})
+
+    if changed:
+        session.commit()
+    return changed, unchanged, missing
 
 
 # --- Invoices -------------------------------------------------------------
