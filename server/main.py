@@ -35,8 +35,8 @@ import auth
 import finance
 import passwords
 from config import DOCS_ENABLED, STRIPE_WEBHOOK_SECRET
-from server import (billing, database, deps, exports, imports, mailer, ocr,
-                    store, subscription)
+from server import (billing, database, deps, errors, exports, imports, mailer,
+                    ocr, store, subscription)
 from server.billing import router as billing_router
 from server.webhooks import router as webhooks_router
 
@@ -303,7 +303,7 @@ def _load(username):
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
-        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+        raise errors.db_error(exc)
 
 
 def _assert_can_write(username):
@@ -322,7 +322,7 @@ def _assert_can_write(username):
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
-        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+        raise errors.db_error(exc)
 
 
 def _serialize_txn(rec, paid_by_debt=None):
@@ -557,7 +557,7 @@ def register(body: RegisterRequest):
     except auth.AuthError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc))
     except SQLAlchemyError as exc:
-        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+        raise errors.db_error(exc)
 
 
 @app.post("/api/v1/auth/forgot-password")
@@ -597,7 +597,7 @@ def forgot_password(body: ForgotPasswordRequest):
                 return {**neutral, "reset_token": raw, "reset_url": link}
             return neutral
     except SQLAlchemyError as exc:
-        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+        raise errors.db_error(exc)
 
 
 @app.post("/api/v1/auth/reset-password")
@@ -633,7 +633,7 @@ def reset_password(body: ResetPasswordRequest):
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
-        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+        raise errors.db_error(exc)
 
 
 # --------------------------------------------------------------------------
@@ -673,7 +673,7 @@ def dashboard(user: str = Depends(get_current_user),
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
-        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+        raise errors.db_error(exc)
     payload = finance.build_dashboard(active, completed, scoped,
                                       trend_months=TREND_MONTHS,
                                       # Alerts run over the UNFILTERED book:
@@ -751,7 +751,7 @@ def list_clients(user: str = Depends(get_current_user),
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
-        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+        raise errors.db_error(exc)
 
 
 _DUPLICATE_MESSAGES = {
@@ -788,7 +788,7 @@ def create_client(body: ClientCreate, user: str = Depends(get_current_user)):
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
-        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+        raise errors.db_error(exc)
 
 
 @app.post("/api/v1/clients/check-duplicate")
@@ -809,7 +809,7 @@ def check_client_duplicate(body: ClientDuplicateCheck,
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
-        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+        raise errors.db_error(exc)
 
 
 @app.get("/api/v1/clients/{client_id}")
@@ -857,7 +857,7 @@ def get_client(client_id: int, user: str = Depends(get_current_user),
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
-        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+        raise errors.db_error(exc)
 
 
 @app.put("/api/v1/clients/{client_id}")
@@ -893,7 +893,7 @@ def update_client(client_id: int, body: ClientUpdate,
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
-        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+        raise errors.db_error(exc)
 
 
 @app.get("/api/v1/exports/transactions.csv")
@@ -942,8 +942,7 @@ def export_transactions(user: str = Depends(get_current_user),
         except HTTPException:
             raise
         except SQLAlchemyError as exc:
-            raise HTTPException(status_code=502,
-                                detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+            raise errors.db_error(exc)
 
     if client_name is not None:
         key = exports.client_key(client_name)
@@ -1001,7 +1000,7 @@ def bulk_delete_transactions(body: BulkIds,
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
-        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+        raise errors.db_error(exc)
 
 
 @app.post("/api/clients/bulk-delete")
@@ -1040,7 +1039,7 @@ def bulk_delete_clients(body: BulkIds, user: str = Depends(get_current_user)):
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
-        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+        raise errors.db_error(exc)
 
 
 @app.post("/api/clients/bulk-archive")
@@ -1076,7 +1075,7 @@ def bulk_archive_clients(body: BulkArchive,
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
-        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+        raise errors.db_error(exc)
 
 
 # --------------------------------------------------------------------------
@@ -1185,7 +1184,7 @@ async def import_clients(file: UploadFile = File(...),
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
-        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+        raise errors.db_error(exc)
 
 
 @app.post("/api/import/transactions")
@@ -1220,7 +1219,7 @@ async def import_transactions(file: UploadFile = File(...),
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
-        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+        raise errors.db_error(exc)
 
 
 @app.get("/api/import/templates/{kind}")
@@ -1327,7 +1326,7 @@ def create_transaction(body: TransactionCreate,
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
-        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+        raise errors.db_error(exc)
 
 
 @app.post("/api/v1/transactions/check-duplicate")
@@ -1349,7 +1348,7 @@ def check_transaction_duplicate(body: DuplicateCheck,
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
-        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+        raise errors.db_error(exc)
 
 
 def _settle(record_id, amount, vat_rate, when, note, user):
@@ -1379,7 +1378,7 @@ def _settle(record_id, amount, vat_rate, when, note, user):
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
-        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+        raise errors.db_error(exc)
 
 
 @app.post("/api/v1/transactions/{record_id}/settle")
@@ -1431,7 +1430,7 @@ def debt_payments(record_id: str, user: str = Depends(get_current_user)):
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
-        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+        raise errors.db_error(exc)
 
 
 # --------------------------------------------------------------------------
@@ -1487,7 +1486,7 @@ async def scan_document(file: UploadFile = File(...),
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
-        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+        raise errors.db_error(exc)
     return payload
 
 
@@ -1503,4 +1502,4 @@ def delete_transaction(record_id: str, user: str = Depends(get_current_user)):
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
-        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+        raise errors.db_error(exc)

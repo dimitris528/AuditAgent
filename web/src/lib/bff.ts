@@ -9,6 +9,34 @@ import { getToken } from "./session";
 import { BackendUnavailableError, backendFetch } from "./backend";
 
 /**
+ * Strip anything that reads as machinery rather than as a problem.
+ *
+ * The last line of defence, and deliberately blunt. server/errors.py already
+ * makes sure a database failure never returns its own text, but this function
+ * also sees messages nothing on our side wrote — a validation error naming a
+ * type, a proxy's HTML, a third-party client — and a user should never be
+ * shown a dict, a SQL statement or a stack frame whatever produced it.
+ *
+ * Replaced wholesale rather than patched: a half-scrubbed dump is still a dump,
+ * and the user is no better off reading half of one.
+ */
+const TECHNICAL =
+  /[{}]|\btraceback\b|\bfile "[^"]+", line \d+|\b(select|insert into|update|delete from|alter table)\b|\bpsycopg2\b|\bsqlalchemy\b|https?:\/\/|\b\w+error\b/i;
+
+export function sanitizeMessage(text: string, fallback: string): string {
+  if (!text) return fallback;
+  // SQLAlchemy appends the statement and the bound parameters in brackets;
+  // the parameters are a dict, which is where the braces come from.
+  const trimmed = text
+    .replace(/\[(SQL|parameters|Background on this error)[^\]]*\]?[\s\S]*/gi, "")
+    .split(/\s+/)
+    .join(" ")
+    .trim();
+  if (!trimmed || TECHNICAL.test(trimmed)) return fallback;
+  return trimmed;
+}
+
+/**
  * Flatten a FastAPI error body into one message.
  *
  * `detail` arrives in three shapes: a plain string (HTTPException), an array of
@@ -17,16 +45,16 @@ import { BackendUnavailableError, backendFetch } from "./backend";
  */
 export function errorMessage(data: unknown, fallback: string): string {
   const detail = (data as { detail?: unknown } | null)?.detail;
-  if (typeof detail === "string") return detail || fallback;
+  if (typeof detail === "string") return sanitizeMessage(detail, fallback);
   if (Array.isArray(detail)) {
     const joined = detail
       .map((d) => (d as { msg?: string })?.msg)
       .filter(Boolean)
       .join(" · ");
-    return joined || fallback;
+    return sanitizeMessage(joined, fallback);
   }
   const message = (detail as { message?: string } | null)?.message;
-  return message || fallback;
+  return sanitizeMessage(message ?? "", fallback);
 }
 
 /**

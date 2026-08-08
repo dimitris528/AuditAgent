@@ -50,6 +50,43 @@ class StoreError(RuntimeError):
     """Database failure the caller should surface as a 502."""
 
 
+class AmountError(ValueError):
+    """A figure that cannot be stored as money. Carries a Greek message."""
+
+
+def money(value, allow_none=True):
+    """A euro figure as a plain float, or None.
+
+    Every financial column goes through this on its way into the database, and
+    it exists because the values arriving here come from three places that each
+    have their own idea of a number: a JSON body (int, float, or a string that
+    looks like one), a spreadsheet cell (openpyxl returns int, float, Decimal
+    or datetime), and finance.py's own arithmetic. Postgres takes none of those
+    interchangeably — a Decimal mixed into float arithmetic raises, a str binds
+    as text and fails the numeric cast, and both surface as an opaque insert
+    error naming a column rather than a row.
+
+    NaN and infinity are rejected explicitly. Both are ordinary floats to
+    Python, both pass a `float()` call without complaint, and Postgres refuses
+    them at the column — so without this check they travel all the way to the
+    insert and take the whole batch down with them.
+    """
+    if value is None:
+        if allow_none:
+            return None
+        raise AmountError("Λείπει το ποσό.")
+    if isinstance(value, bool):
+        # bool is an int subclass, so True would quietly become 1.00 €.
+        raise AmountError("Μη έγκυρο ποσό.")
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        raise AmountError(f"Μη έγκυρο ποσό «{value}».")
+    if result != result or result in (float("inf"), float("-inf")):
+        raise AmountError("Μη έγκυρο ποσό.")
+    return round(result, 2)
+
+
 class SettlementError(ValueError):
     """A settlement that cannot be applied (wrong row type, already paid, or
     an amount larger than the balance). Carries a user-facing Greek message."""
@@ -546,10 +583,13 @@ def create_transaction(session, user, client, amount, description=None,
         # Denormalised from the client row, not from the caller's string, so
         # the two can never disagree.
         client=row.name,
-        amount=amount,
+        # Coerced here, at the one door every write goes through. `amount` is
+        # NOT NULL and non-optional in the model, so a None reaching this line
+        # is an insert failure naming a column — see money().
+        amount=money(amount, allow_none=False),
         type=type_,
-        vat_amount=vat_amount,
-        vat_rate=vat_rate,
+        vat_amount=money(vat_amount),
+        vat_rate=None if vat_rate is None else float(vat_rate),
         date=_coerce_date(txn_date),
         description=description,
         source=source,
@@ -768,6 +808,31 @@ def import_transactions(session, user, rows):
             vat_rate=row["vat_rate"], vat_amount=row.get("vat_amount"),
             basis=row.get("basis", "gross"))
 
+        # Checked per row, BEFORE the insert. A figure the database would
+        # refuse fails the whole batch at commit — one bad row taking four
+        # hundred good ones with it, and reporting itself as a column name.
+        # Here it costs that row alone and says which line to look at.
+        try:
+            signed = money(signed, allow_none=False)
+            vat_amount = money(vat_amount)
+        except AmountError:
+            skipped.append({
+                "row": row.get("row"),
+                "message": "Δεν ήταν δυνατή η ανάγνωση του ποσού σε αυτή τη "
+                           "γραμμή — η κίνηση δεν καταχωρήθηκε.",
+            })
+            continue
+        if signed == 0:
+            # A zero-value transaction is not a transaction. Reaching here
+            # means the amount column was misread rather than genuinely nil,
+            # and importing it would put a row worth nothing in the books.
+            skipped.append({
+                "row": row.get("row"),
+                "message": "Το ποσό της γραμμής είναι μηδενικό — η κίνηση δεν "
+                           "καταχωρήθηκε.",
+            })
+            continue
+
         session.add(Transaction(
             user_id=user.id,
             client_id=client.id,
@@ -777,7 +842,7 @@ def import_transactions(session, user, rows):
             amount=signed,
             type=row["type"],
             vat_amount=vat_amount,
-            vat_rate=row["vat_rate"],
+            vat_rate=float(row["vat_rate"]),
             date=row["date"],
             description=row.get("description"),
             source=IMPORT_SOURCE,

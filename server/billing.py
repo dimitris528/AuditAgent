@@ -72,7 +72,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.exc import SQLAlchemyError
 
 from config import APP_BASE_URL, STRIPE_PRICE_ID, STRIPE_SECRET_KEY
-from server import database, deps, store, subscription
+from server import database, deps, errors, store, subscription
 
 router = APIRouter(prefix="/api/v1/billing", tags=["billing"])
 
@@ -160,7 +160,7 @@ def billing_status(user: str = Depends(deps.get_current_user)):
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
-        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+        raise errors.db_error(exc)
 
 
 @router.post("/checkout")
@@ -191,7 +191,7 @@ def create_checkout_session(user: str = Depends(deps.get_current_user)):
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
-        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+        raise errors.db_error(exc)
 
     params = {
         "mode": "subscription",
@@ -310,7 +310,7 @@ def create_portal_session(user: str = Depends(deps.get_current_user)):
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
-        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+        raise errors.db_error(exc)
 
     try:
         # Per call, for the same reason as in the checkout above: the key is
@@ -388,7 +388,7 @@ def cancel_subscription(user: str = Depends(deps.get_current_user)):
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
-        raise HTTPException(status_code=502, detail=f"Σφάλμα βάσης δεδομένων: {exc}")
+        raise errors.db_error(exc)
 
     # No customer means no subscription was ever bought. Unlike the portal,
     # there is nothing useful to create here — cancelling nothing is a mistake

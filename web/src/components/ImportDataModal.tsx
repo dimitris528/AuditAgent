@@ -450,10 +450,23 @@ export function ImportDataModal({
               />
 
               {error ? (
-                <p className="flex items-start gap-1.5 text-xs text-rose-600 dark:text-rose-400">
-                  <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                  {error}
-                </p>
+                // Presented as a card, matching the zero-amounts warning above
+                // and the summary blocks: a failed upload is an ordinary state
+                // of this modal, not an exception poking through it.
+                <div
+                  role="alert"
+                  className="flex items-start gap-2.5 rounded-xl border border-rose-200 bg-rose-50 p-3 dark:border-rose-500/30 dark:bg-rose-500/10"
+                >
+                  <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-600 dark:text-rose-400" />
+                  <div className="min-w-0">
+                    <p className="text-xs font-semibold text-rose-800 dark:text-rose-200">
+                      Η εισαγωγή δεν ολοκληρώθηκε
+                    </p>
+                    <p className="mt-0.5 text-xs text-rose-700 dark:text-rose-300/90">
+                      {error}
+                    </p>
+                  </div>
+                </div>
               ) : (
                 <p className="flex items-start gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
                   <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
