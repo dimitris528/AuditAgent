@@ -89,6 +89,11 @@ _XLS_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]{2,}$")
 
+# Half a cent — the tolerance euro figures are compared with, so a VAT of
+# 240.001 against a gross of 240.00 does not read as an impossible row. Same
+# value store._CENT uses, for the same reason.
+_CENT = 0.005
+
 
 class ImportFileError(RuntimeError):
     """The upload cannot be read at all. Message is user-facing Greek."""
@@ -137,13 +142,24 @@ def _head(value):
     return f"{key}pct" if (pct and key) else key
 
 
-def _aliases(spec):
-    """{header key: field} from {field: (heading, ...)}, so the tables below
-    read in the direction they are written in."""
+def _aliases(primary, fallback=None):
+    """{header key: (field, rank)} from {field: (heading, ...)} tables.
+
+    Two ranks, because some headings are only meaningful in the absence of a
+    better one. "Αξία" is the case that forced this: in Greek bookkeeping it
+    usually means the NET value, but plenty of exports use it for the total, so
+    it is a last-resort match for the gross — a file carrying both "Αξία" and
+    "Σύνολο" must read the total from "Σύνολο" whichever comes first.
+
+    Before this existed _index took the first column that matched positionally,
+    so exactly that file read the net figure as the gross and understated every
+    row by its VAT.
+    """
     out = {}
-    for field_name, headings in spec.items():
-        for heading in headings:
-            out.setdefault(_head(heading), field_name)
+    for rank, spec in enumerate((primary, fallback or {})):
+        for field_name, headings in spec.items():
+            for heading in headings:
+                out.setdefault(_head(heading), (field_name, rank))
     return out
 
 
@@ -173,35 +189,50 @@ _TXN_COLUMNS = _aliases({
     "doc_number": ("Αρ. Παραστατικού", "Αριθμός Παραστατικού", "Αρ. Τιμολογίου",
                    "Doc Number", "Document Number", "Invoice Number",
                    "Invoice No"),
-    "amount": ("Συνολικό Ποσό", "Ποσό", "Σύνολο", "Αξία", "Total", "Amount",
-               "Gross", "Gross Amount"),
-    "net_amount": ("Καθαρή Αξία", "Καθαρό Ποσό", "Net", "Net Amount",
-                   "Net Value"),
-    # Ordered AFTER vat_amount would be wrong: _aliases keeps the FIRST field
-    # a heading is claimed by, and "Φ.Π.Α. %" only reaches vat_rate because
-    # _head gives it a distinct `pct` key.
-    "vat_rate": ("Συντ. Φ.Π.Α.", "Συντελεστής Φ.Π.Α.", "Φ.Π.Α. %", "ΦΠΑ%",
-                 "VAT Rate", "VAT %", "Rate"),
-    "vat_amount": ("Φ.Π.Α.", "ΦΠΑ", "Ποσό Φ.Π.Α.", "VAT", "VAT Amount", "Tax"),
+    # The GROSS (VAT-inclusive) total — what the row is stored as.
+    "amount": ("Συνολικό Ποσό", "Σύνολο", "Συνολική Αξία", "Ποσό", "Μεικτό",
+               "Μικτό", "Μεικτή Αξία", "Μικτή Αξία", "Τελικό Ποσό",
+               "Πληρωτέο", "Total", "Total Amount", "Gross", "Gross Amount",
+               "Amount"),
+    "net_amount": ("Καθαρή Αξία", "Καθαρό Ποσό", "Καθαρό", "Καθαρά",
+                   "Αξία Χωρίς Φ.Π.Α.", "Προ Φ.Π.Α.", "Net", "Net Amount",
+                   "Net Value", "Subtotal"),
+    # Listed BEFORE vat_amount on purpose. _aliases keeps the first field a
+    # heading is claimed by, and the two are told apart only by _head's `pct`
+    # suffix — "Φ.Π.Α." is euros, "Φ.Π.Α. %" is a rate.
+    "vat_rate": ("Συντ. Φ.Π.Α.", "Συντελεστής Φ.Π.Α.", "Συντελεστής",
+                 "Φ.Π.Α. %", "ΦΠΑ%", "VAT Rate", "VAT %", "Rate"),
+    "vat_amount": ("Φ.Π.Α.", "ΦΠΑ", "Ποσό Φ.Π.Α.", "Αξία Φ.Π.Α.", "VAT",
+                   "VAT Amount", "Tax", "Tax Amount"),
     "description": ("Περιγραφή", "Αιτιολογία", "Σχόλια", "Description",
                     "Notes", "Memo"),
     "due_date": ("Ημερομηνία Λήξης", "Λήξη", "Προθεσμία", "Due Date",
                  "Payment Due"),
+}, {
+    # Last resort only — see _aliases. A bare "Αξία" is genuinely ambiguous
+    # between the net and the total, so it fills the gross when the file offers
+    # nothing better and yields to any explicit total column when it does.
+    "amount": ("Αξία", "Value"),
 })
 
 
 def _index(headers, aliases):
     """{field: column index} for the headings this file actually has.
 
-    First occurrence wins: a sheet with two "Ποσό" columns uses the left one
-    rather than silently preferring whichever came last.
+    A better-ranked heading wins wherever it sits in the row; among equals the
+    leftmost wins, so a sheet with two "Ποσό" columns uses the first rather
+    than silently preferring whichever came last.
     """
-    found = {}
+    best = {}
     for position, heading in enumerate(headers):
-        field_name = aliases.get(_head(heading))
-        if field_name and field_name not in found:
-            found[field_name] = position
-    return found
+        match = aliases.get(_head(heading))
+        if match is None:
+            continue
+        field_name, rank = match
+        current = best.get(field_name)
+        if current is None or rank < current[0]:
+            best[field_name] = (rank, position)
+    return {field_name: position for field_name, (_, position) in best.items()}
 
 
 # --------------------------------------------------------------------------
@@ -315,6 +346,12 @@ def _cell(value):
 # --------------------------------------------------------------------------
 # Field parsing
 # --------------------------------------------------------------------------
+# A plausible leading thousands group: one to three digits. "1" in "1.000",
+# "12" in "12.500". Four or more digits before the separator is not a thousands
+# group, so "1234.567" keeps its decimal point.
+_THOUSANDS_LEAD = re.compile(r"^[1-9]\d{0,2}$")
+
+
 def number(value):
     """A euro figure from a cell, or None when there is nothing to read.
 
@@ -323,7 +360,25 @@ def number(value):
 
         "1.234,56" and "1,234.56"  → 1234.56   (last separator is the decimal)
         "1.234.567"                → 1234567.0 (repeated ⇒ thousands)
-        "1234,56"                  → 1234.56   (lone comma ⇒ Greek decimal)
+        "1234,56"                  → 1234.56   (lone comma ⇒ decimal)
+
+    A LONE separator followed by exactly three digits is a THOUSANDS separator,
+    not a decimal point:
+
+        "1.000" → 1000.0      "1.240" → 1240.0      "1,000" → 1000.0
+
+    This is the rule that matters most in practice and the one this function
+    originally got wrong: a Greek export writes a round thousand as "1.240",
+    and reading that as €1.24 understates the row by a factor of a thousand
+    while raising no error at all — the amount parses, it is simply wrong. Euro
+    amounts carry two decimal places, so three digits after the separator is
+    not a fraction. The lead has to look like a thousands group for the rule to
+    fire, which is what keeps "0,240" (a VAT rate, and "1234.567" (four leading
+    digits) reading as decimals.
+
+    The residual ambiguity is real and decided deliberately: "1.500" is read as
+    €1500, not €1.50. In a Greek book the former is overwhelmingly what is
+    meant, and €1.50 is written "1,50".
 
     Accounting exports also write a negative in parentheses, so "(310,00)" is
     -310.0. Currency symbols and spaces are dropped.
@@ -351,8 +406,16 @@ def number(value):
         # Repeated separators can only be thousands markers.
         cleaned = cleaned.replace(",", "").replace(".", "")
         decimal = "."
+    elif "," in cleaned or "." in cleaned:
+        separator = "," if "," in cleaned else "."
+        lead, _, group = cleaned.partition(separator)
+        if len(group) == 3 and _THOUSANDS_LEAD.match(lead):
+            cleaned = lead + group          # thousands — see the docstring
+            decimal = "."
+        else:
+            decimal = separator
     else:
-        decimal = "," if "," in cleaned else "."
+        decimal = "."
     cleaned = cleaned.replace(decimal, ".")
 
     try:
@@ -473,6 +536,73 @@ def vat_rate(value):
     if parsed > 1:
         parsed = parsed / 100
     return round(parsed, 4)
+
+
+# A rate derived from two euro figures never lands exactly on 0.24; snap it to
+# the statutory rate it is nearest, and only when it is genuinely close. Same
+# treatment server/ocr.py gives a rate inferred from a scanned invoice, and for
+# the same reason: the stored rate should say "24 %", not "23.9908 %".
+_RATE_TOLERANCE = 0.005
+
+
+def _snap_rate(rate):
+    if rate is None or not 0 <= rate <= 1:
+        return None
+    nearest = min(finance.VAT_RATES, key=lambda r: abs(r - rate))
+    return nearest if abs(nearest - rate) <= _RATE_TOLERANCE else round(rate, 4)
+
+
+def resolve_amounts(gross, net, vat, rate):
+    """Fill in whatever the row did not state. Returns (gross, net, vat, rate).
+
+    A real export gives some two of the three euro figures and often no rate at
+    all, so each is derived from the others rather than demanded:
+
+        net + VAT           → gross           gross − VAT → net
+        gross − net         → VAT             VAT / net   → rate
+
+    The RATE is derived before it is defaulted, and that ordering is the point:
+    a 13 % invoice stating €500 net and €65 VAT would otherwise be stored at
+    the standard rate, so the row would reconcile to the cent while describing
+    itself wrongly — and every later recalculation from that rate would be off.
+    The 24 % default (finance.DEFAULT_VAT_RATE) is the last resort, for a row
+    that states one figure and nothing else.
+
+    Every argument is a POSITIVE magnitude; direction belongs to the Type. All
+    four may be None, and a row that yields no euro figure at all is the
+    caller's error to report.
+    """
+    if gross is None and net is not None and vat is not None:
+        gross = round(net + vat, 2)
+    if net is None and gross is not None and vat is not None:
+        net = round(gross - vat, 2)
+    if vat is None and gross is not None and net is not None:
+        vat = round(gross - net, 2)
+
+    if rate is None and vat is not None:
+        # From the net where there is one — it is the base VAT is charged on,
+        # so the division is exact rather than a rearrangement.
+        if net:
+            rate = _snap_rate(vat / net)
+        elif gross and gross != vat:
+            rate = _snap_rate(vat / (gross - vat))
+    if rate is None:
+        # Only now, with no rate stated and none derivable, is the standard
+        # rate assumed — and the missing euro figures follow from it.
+        rate = finance.DEFAULT_VAT_RATE
+        if vat is None and gross is None and net is not None:
+            gross = finance.gross_from_net(net, rate)
+        if vat is None and gross is not None:
+            vat = abs(finance.vat_of(gross, rate))
+
+    # A second fill, because the derivations above can supply the figure an
+    # earlier one was missing: a row stating only its gross has no net until
+    # the VAT has been worked out from the rate.
+    if net is None and gross is not None and vat is not None:
+        net = round(gross - vat, 2)
+    if gross is None and net is not None and vat is not None:
+        gross = round(net + vat, 2)
+    return gross, net, vat, rate
 
 
 # --------------------------------------------------------------------------
@@ -619,25 +749,45 @@ def parse_transactions(data):
                 _issue(line, "Λείπει ο πελάτης (επωνυμία ή Α.Φ.Μ.)."))
             continue
 
-        gross = number(value("amount"))
-        net = number(value("net_amount"))
-        # Gross wins when both are present: it is the figure the row is stored
-        # as, so taking it directly avoids a needless net→gross round trip that
-        # could land a cent away from what the document says.
-        basis = "gross" if gross is not None else "net"
-        amount = gross if gross is not None else net
-        if amount is None:
+        stated_gross = number(value("amount"))
+        stated_net = number(value("net_amount"))
+        stated_vat = number(value("vat_amount"))
+        if stated_gross is None and stated_net is None:
             result.errors.append(_issue(line, "Λείπει το ποσό."))
             continue
-        if round(abs(amount), 2) == 0:
-            result.errors.append(_issue(line, "Το ποσό είναι μηδενικό."))
+
+        # Direction, for a row whose Type is missing, comes from the sign as
+        # WRITTEN — captured before the magnitudes are taken, because a legacy
+        # export routinely encodes an expense as a negative and nothing else.
+        signed_hint = stated_gross if stated_gross is not None else stated_net
+
+        # Everything downstream is a magnitude; the Type carries direction.
+        # Taken here so the derivations below cannot mix a signed gross with an
+        # unsigned VAT and produce a net larger than the total.
+        gross = abs(stated_gross) if stated_gross is not None else None
+        net = abs(stated_net) if stated_net is not None else None
+        vat = abs(stated_vat) if stated_vat is not None else None
+
+        # Guards on what the FILE said, before anything is derived from it.
+        # Both fire on a mis-mapped column — the failure mode that has to be
+        # loud, because the arithmetic downstream is perfectly happy to carry a
+        # wrong figure all the way into the book without complaining.
+        if gross is not None and vat is not None and vat >= gross + _CENT:
+            result.errors.append(_issue(
+                line, f"Το Φ.Π.Α. ({vat:.2f}) δεν μπορεί να ξεπερνά το "
+                      f"συνολικό ποσό ({gross:.2f}). Ελέγξτε τις στήλες."))
+            continue
+        if gross is not None and net is not None and net > gross + _CENT:
+            result.errors.append(_issue(
+                line, f"Η καθαρή αξία ({net:.2f}) δεν μπορεί να ξεπερνά το "
+                      f"συνολικό ποσό ({gross:.2f}). Ελέγξτε τις στήλες."))
             continue
 
         kind = txn_type(value("type"))
         if kind is None:
             # No usable Type: fall back to the amount's own sign, which is how
             # a great many legacy exports encode direction in the first place.
-            kind = "Έξοδο" if amount < 0 else "Έσοδο"
+            kind = "Έξοδο" if (signed_hint or 0) < 0 else "Έσοδο"
             written = cell("type")
             result.warnings.append(_issue(
                 line,
@@ -663,12 +813,20 @@ def parse_transactions(data):
             result.errors.append(
                 _issue(line, f"Μη έγκυρος συντελεστής Φ.Π.Α. «{cell('vat_rate')}»."))
             continue
-        if rate is None:
-            # The statutory standard rate, exactly as the transaction form
-            # defaults it. Stated in the template so an importer with no VAT
-            # column knows what it is agreeing to.
-            rate = finance.DEFAULT_VAT_RATE
-        vat = number(value("vat_amount"))
+
+        # Whatever the row left out is derived from what it gave, and the rate
+        # is derived before the standard 24 % is assumed — see resolve_amounts.
+        gross, net, vat, rate = resolve_amounts(gross, net, vat, rate)
+
+        # Gross wins whenever it is known, derived or not: it is the figure the
+        # row is STORED as, so passing it through avoids a net→gross round trip
+        # that could land a cent away from what the document says. A row that
+        # gave only a net value keeps the net basis, and book_amounts converts.
+        amount, basis = ((gross, "gross") if gross is not None
+                         else (net, "net"))
+        if amount is None or round(amount, 2) == 0:
+            result.errors.append(_issue(line, "Το ποσό είναι μηδενικό."))
+            continue
 
         due = date(value("due_date")) if kind == finance.DEBT_TYPE else None
 
@@ -681,10 +839,10 @@ def parse_transactions(data):
             "doc_type": document,
             "doc_number": cell("doc_number")[:64] or None,
             # Magnitude only — see the docstring.
-            "amount": round(abs(amount), 2),
+            "amount": round(amount, 2),
             "basis": basis,
             "vat_rate": rate,
-            "vat_amount": abs(vat) if vat is not None else None,
+            "vat_amount": vat,
             "description": cell("description")[:500] or None,
             "due_date": due,
         })

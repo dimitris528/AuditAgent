@@ -74,6 +74,36 @@ def test_amounts_survive_both_decimal_conventions(written, expected):
     assert imports.number(written) == expected
 
 
+@pytest.mark.parametrize("written,expected", [
+    ("1.000", 1000.0),
+    ("1.240", 1240.0),
+    ("12.500", 12500.0),
+    ("999.000", 999000.0),
+    ("1,000", 1000.0),             # the English side of the same rule
+])
+def test_a_lone_separator_before_three_digits_is_a_thousands_mark(written, expected):
+    """The regression this rule was written for.
+
+    A Greek export writes a round thousand as "1.240". Reading that as €1.24
+    understates the row by a factor of a thousand and raises NO error — the
+    amount parses, it is simply wrong, and it reaches the books that way. Euro
+    figures carry two decimal places, so three digits after the separator is
+    not a fraction.
+    """
+    assert imports.number(written) == expected
+
+
+@pytest.mark.parametrize("written,expected", [
+    ("0,240", 0.24),               # a VAT rate: the lead is 0, not a thousand
+    ("0.240", 0.24),
+    ("1234.567", 1234.567),        # four leading digits ⇒ not a thousands group
+    ("100,5", 100.5),
+    ("12,34", 12.34),
+])
+def test_the_thousands_rule_does_not_swallow_genuine_decimals(written, expected):
+    assert imports.number(written) == expected
+
+
 # --- Dates ----------------------------------------------------------------
 @pytest.mark.parametrize("written", [
     "2026-04-03", "03/04/2026", "03-04-2026", "3.4.2026", "03/04/26",
@@ -110,6 +140,116 @@ def test_debt_is_recognised_however_it_is_spelled(written):
 ])
 def test_vat_rates_are_read_as_fractions(written, expected):
     assert imports.vat_rate(written) == expected
+
+
+# --- Amount headings and the figures derived from them --------------------
+@pytest.mark.parametrize("heading", [
+    "Καθαρή Αξία", "Καθαρό Ποσό", "Καθαρό", "Καθαρά", "Προ Φ.Π.Α.",
+    "Net", "Net Amount", "Subtotal",
+])
+def test_every_net_heading_is_recognised(heading):
+    assert imports._TXN_COLUMNS[imports._head(heading)][0] == "net_amount"
+
+
+@pytest.mark.parametrize("heading", [
+    "Συνολικό Ποσό", "Σύνολο", "Μεικτό", "Μικτό", "Μεικτή Αξία", "Ποσό",
+    "Πληρωτέο", "Gross", "Total", "Amount",
+])
+def test_every_gross_heading_is_recognised(heading):
+    assert imports._TXN_COLUMNS[imports._head(heading)][0] == "amount"
+
+
+@pytest.mark.parametrize("heading", ["ΦΠΑ", "Φ.Π.Α.", "Ποσό Φ.Π.Α.", "VAT",
+                                     "VAT Amount", "Tax"])
+def test_every_vat_heading_is_recognised(heading):
+    assert imports._TXN_COLUMNS[imports._head(heading)][0] == "vat_amount"
+
+
+def test_a_bare_axia_yields_to_an_explicit_total_column():
+    """"Αξία" usually means the NET value in Greek bookkeeping but is used for
+    the total often enough to keep as a last resort. A file carrying both must
+    take its total from the explicit column — reading the net figure as the
+    gross understates the row by its VAT, silently."""
+    parsed = imports.parse_transactions(csv_bytes([
+        ("Ημερομηνία", "Πελάτης", "Είδος Κίνησης", "Αξία", "Φ.Π.Α.", "Σύνολο"),
+        ("2026-01-15", "Νησίδα Café", "Έσοδο", "1.000,00", "240,00", "1.240,00"),
+    ]))
+    assert parsed.errors == []
+    assert parsed.rows[0]["amount"] == 1240.00
+
+
+def test_axia_still_supplies_the_total_when_nothing_better_exists():
+    parsed = imports.parse_transactions(csv_bytes([
+        ("Ημερομηνία", "Πελάτης", "Είδος Κίνησης", "Αξία"),
+        ("2026-01-15", "Νησίδα Café", "Έσοδο", "1.240,00"),
+    ]))
+    assert parsed.rows[0]["amount"] == 1240.00
+
+
+@pytest.mark.parametrize("gross,net,vat,rate,expected", [
+    # net + VAT → gross, and the rate follows from the two figures.
+    (None, 500.0, 65.0, None, (565.0, 500.0, 65.0, 0.13)),
+    # gross − VAT → net.
+    (1240.0, None, 240.0, None, (1240.0, 1000.0, 240.0, 0.24)),
+    # gross − net → VAT.
+    (1060.0, 1000.0, None, None, (1060.0, 1000.0, 60.0, 0.06)),
+    # Only a gross: the standard rate is assumed and the VAT derived from it.
+    (1240.0, None, None, None, (1240.0, 1000.0, 240.0, 0.24)),
+    # An explicit rate always wins over a derivable one.
+    (1240.0, None, 240.0, 0.13, (1240.0, 1000.0, 240.0, 0.13)),
+])
+def test_a_row_derives_whatever_it_did_not_state(gross, net, vat, rate, expected):
+    assert imports.resolve_amounts(gross, net, vat, rate) == expected
+
+
+def test_a_reduced_rate_invoice_is_not_stamped_with_the_standard_rate():
+    """€500 net and €65 VAT is 13 %. Defaulting to 24 % would leave the row
+    reconciling to the cent while describing itself wrongly, and every later
+    recalculation from that rate would be off."""
+    parsed = imports.parse_transactions(csv_bytes([
+        ("Ημερομηνία", "Πελάτης", "Είδος Κίνησης", "Καθαρό", "ΦΠΑ"),
+        ("2025-12-02", "Αφοί Γεωργίου Ο.Ε.", "Έσοδο", "500,00", "65,00"),
+    ]))
+    row = parsed.rows[0]
+    assert (row["amount"], row["vat_amount"], row["vat_rate"]) == (565.0, 65.0, 0.13)
+
+
+def test_a_vat_larger_than_the_total_is_refused_rather_than_booked():
+    """The signature of a mis-mapped column. It has to be LOUD: the arithmetic
+    downstream will happily carry a wrong figure all the way into the book."""
+    parsed = imports.parse_transactions(csv_bytes([
+        ("Ημερομηνία", "Πελάτης", "Είδος Κίνησης", "Σύνολο", "ΦΠΑ"),
+        ("2026-01-15", "Νησίδα Café", "Έσοδο", "240,00", "1240,00"),
+    ]))
+    assert parsed.rows == []
+    assert "Ελέγξτε τις στήλες" in parsed.errors[0]["message"]
+
+
+def test_a_net_larger_than_the_total_is_refused():
+    parsed = imports.parse_transactions(csv_bytes([
+        ("Ημερομηνία", "Πελάτης", "Είδος Κίνησης", "Καθαρό", "Σύνολο"),
+        ("2026-01-15", "Νησίδα Café", "Έσοδο", "1240,00", "1000,00"),
+    ]))
+    assert parsed.rows == []
+    assert "Ελέγξτε τις στήλες" in parsed.errors[0]["message"]
+
+
+def test_greek_thousands_and_greek_headings_read_correctly_end_to_end():
+    """The exact file that was reported: "Καθαρό / ΦΠΑ / Σύνολο" headings with
+    round thousands written "1.240". Both halves failed at once — the heading
+    went unmatched and the amount came back a thousandth of its value."""
+    parsed = imports.parse_transactions(csv_bytes([
+        ("Ημερομηνία", "Πελάτης", "Α.Φ.Μ.", "Είδος Κίνησης", "Καθαρό", "ΦΠΑ",
+         "Σύνολο"),
+        ("15/01/2026", "Νησίδα Café", "094127562", "Έσοδο", "1.000", "240",
+         "1.240"),
+        ("20/01/2026", "Οδός Τεχνική", "800123456", "Έξοδο", "2.500", "600",
+         "3.100"),
+    ]))
+    assert parsed.errors == []
+    assert [(r["amount"], r["vat_amount"]) for r in parsed.rows] == [
+        (1240.0, 240.0), (3100.0, 600.0),
+    ]
 
 
 def test_the_vat_amount_column_is_not_confused_with_the_rate_column():
