@@ -218,6 +218,70 @@ def test_the_tenant_survives_a_commit(api):
     assert all(value == 4242 for value in seen)
 
 
+class _StubSession:
+    """Just enough Session to see what tenancy.bind_session emits."""
+
+    def __init__(self, dialect):
+        import types
+
+        self.executed = []
+        self._bind = types.SimpleNamespace(
+            dialect=types.SimpleNamespace(name=dialect))
+
+    def get_bind(self):
+        return self._bind
+
+    def execute(self, statement, params=None):
+        self.executed.append((str(statement), params))
+
+
+def test_the_tenant_is_pushed_into_the_transaction_already_open():
+    """The bug this exists for returned 200 with an EMPTY book.
+
+    A request resolves its tenant by looking the user up, and that lookup is
+    itself a query — so the transaction is already open by the time the tenant
+    is known, and the after_begin listener has come and gone with nothing to
+    set. Every later statement in that transaction then ran unstamped, matched
+    no policy, and returned nothing: no error anywhere, just a dashboard that
+    had quietly lost its data.
+    """
+    session = _StubSession("postgresql")
+    tenancy.bind_session(session, tenant_id=77)
+    assert len(session.executed) == 1
+    sql, params = session.executed[0]
+    assert "set_config" in sql
+    assert params == {"name": tenancy.SETTING, "value": "77"}
+
+
+def test_binding_is_a_no_op_off_postgres():
+    """SQLite has neither set_config nor RLS; raising there would fail the
+    whole suite for a production-only feature."""
+    session = _StubSession("sqlite")
+    tenancy.bind_session(session, tenant_id=77)
+    assert session.executed == []
+
+
+def test_binding_is_a_no_op_with_no_tenant():
+    session = _StubSession("postgresql")
+    tenancy.bind_session(session)
+    assert session.executed == []
+
+
+def test_resolving_a_user_binds_the_session_it_was_given(api, monkeypatch):
+    """The ordering requirement, pinned. resolve_user_state must hand the LIVE
+    session to bind_session — setting only the ContextVar leaves the
+    transaction already in flight unstamped."""
+    from server import database, deps
+
+    seen = []
+    monkeypatch.setattr(tenancy, "bind_session",
+                        lambda session, tenant_id=None: seen.append(session))
+
+    with database.session_scope() as session:
+        deps.resolve_user_state(session, "tester")
+        assert seen == [session], "the open transaction was never stamped"
+
+
 def test_no_tenant_is_declared_outside_a_request():
     """The default has to be "nobody". Under RLS that means no rows, which is
     the correct way for a background job with no tenant to fail."""

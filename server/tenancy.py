@@ -84,6 +84,38 @@ def current_tenant():
     return _current_tenant.get()
 
 
+def bind_session(session, tenant_id=None):
+    """Apply the tenant to the transaction ALREADY in progress.
+
+    The listener below stamps transactions as they BEGIN, which is not enough
+    on its own, and the gap is the kind that only shows up against a database
+    with the policies actually on.
+
+    A request resolves its tenant by looking the user up — and that lookup is
+    itself a query, so it opens the transaction. `after_begin` therefore fires
+    while the tenant is still None and sets nothing, and every later statement
+    in that same transaction runs unstamped. With RLS enforcing, those
+    statements match no policy and the endpoint answers 200 with an empty
+    book: not an error anywhere, just a dashboard that has quietly lost its
+    data.
+
+    So the tenant is pushed into the live transaction here, the moment it is
+    known. The listener still matters for every transaction after it — store.py
+    commits several times inside one session — and the two together cover the
+    whole request.
+    """
+    tenant = _current_tenant.get() if tenant_id is None else int(tenant_id)
+    if tenant is None:
+        return
+    bind = session.get_bind()
+    if bind is None or bind.dialect.name != "postgresql":
+        return
+    session.execute(
+        text("SELECT set_config(:name, :value, true)"),
+        {"name": SETTING, "value": str(tenant)},
+    )
+
+
 def reset(token):
     """Restore the value from before set_current_tenant. Failing to restore is
     not a leak — the next request sets its own — but a task that outlives its
