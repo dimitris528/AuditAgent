@@ -141,6 +141,22 @@ def authenticate(identifier, password):
         raise AuthError(f"Ο έλεγχος ταυτότητας απέτυχε προσωρινά: {exc}", status=503)
 
 
+def public_user(row):
+    """The shape authenticate() returns, built from a User row already in hand.
+
+    Exists so the second leg of a 2FA login can mint a session without
+    re-checking the password: by that point the credential has been verified
+    once and the challenge token is the proof. Same shape either way, so
+    server/main.py has one payload builder rather than two that can drift.
+    """
+    return {
+        "username": row.username,
+        "email": row.email,
+        "subscription": subscription.resolve(row.subscription_status,
+                                             row.trial_ends_at).to_dict(),
+    }
+
+
 def create_access_token(username, extra=None):
     """Mint a signed HS256 access token whose `sub` is the tenant key.
 

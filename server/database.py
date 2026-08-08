@@ -186,6 +186,22 @@ _ADDITIVE_MIGRATIONS = (
     # Pending cancellation: the date Stripe will end a subscription the tenant
     # has asked to cancel. NULL for everyone who has not asked.
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_cancel_at TIMESTAMPTZ",
+    # Two-factor authentication. The secret is staged at enrolment and the flag
+    # only flips once a code has verified, so a half-finished setup cannot lock
+    # anyone out — see store.set_mfa_secret. Defaulted FALSE rather than NULL:
+    # a null here would be read as "unknown" by anything doing a boolean test,
+    # and the safe reading of unknown is "no second factor configured", which
+    # is what every existing row genuinely is.
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_secret VARCHAR(64)",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+    # trusted_devices needs nothing here: create_all() issues CREATE TABLE for
+    # a table that does not exist yet. The indexes are listed because a
+    # database that somehow had the table without them would do a sequential
+    # scan per login, and the lookup is by token_hash and nothing else.
+    "CREATE INDEX IF NOT EXISTS ix_trusted_devices_token_hash "
+    "ON trusted_devices (token_hash)",
+    "CREATE INDEX IF NOT EXISTS ix_trusted_devices_user_id "
+    "ON trusted_devices (user_id)",
     # password_reset_tokens needs nothing here — create_all() issues CREATE
     # TABLE for a table that does not exist yet. The index is listed because a
     # database that somehow has the table WITHOUT it would do a sequential scan

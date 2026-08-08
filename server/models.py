@@ -93,8 +93,58 @@ class User(SQLModel, table=True):
     # both ways, including cancellations made in Stripe's own portal).
     subscription_cancel_at: Optional[dt.datetime] = Field(default=None,
                                                           sa_column=_tstz())
+    # --- Two-factor authentication ---------------------------------------
+    # The TOTP shared secret (base32), and whether the second factor is
+    # actually in force. TWO columns rather than one nullable secret: enrolment
+    # hands out a secret and shows a QR code BEFORE the user has proved they
+    # can read it, and treating "has a secret" as "2FA is on" would lock out
+    # anyone who closed the tab mid-setup. `mfa_enabled` flips only once a
+    # code minted from the secret has been verified.
+    mfa_secret: Optional[str] = Field(default=None, max_length=64)
+    mfa_enabled: bool = Field(default=False)
     created_at: dt.datetime = Field(default_factory=_utcnow,
                                     sa_column=_tstz(nullable=False))
+
+
+class TrustedDevice(SQLModel, table=True):
+    """A browser the user has told us to stop challenging for 30 days.
+
+    Stored HASHED, exactly like a password reset token and for the same
+    reason: this table is a list of live 2FA bypasses, so anyone who reads the
+    database — a backup, a log, an errant SELECT — must not come away able to
+    use what they find. The plaintext exists only in the cookie on the user's
+    machine.
+
+    A row per device rather than a claim inside the session cookie, because a
+    bypass has to be REVOCABLE: signing out everywhere, or losing a laptop,
+    has to be able to end it, and a self-contained signed token cannot be
+    withdrawn before it expires.
+    """
+
+    __tablename__ = "trusted_devices"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    # sha256 of the token in the cookie. Indexed because lookup is BY this
+    # value and there is nothing else to find the row by.
+    token_hash: str = Field(index=True, unique=True, max_length=64)
+    # Shown on the "your devices" list so a user can tell which is which.
+    # Truncated user-agent, not fingerprinting: enough to recognise, not
+    # enough to identify.
+    label: Optional[str] = Field(default=None, max_length=200)
+    expires_at: dt.datetime = Field(sa_column=_tstz(nullable=False))
+    last_used_at: Optional[dt.datetime] = Field(default=None, sa_column=_tstz())
+    created_at: dt.datetime = Field(default_factory=_utcnow,
+                                    sa_column=_tstz(nullable=False))
+
+    def to_detail(self):
+        return {
+            "id": self.id,
+            "label": self.label,
+            "expires_at": _iso_z(self.expires_at),
+            "last_used_at": _iso_z(self.last_used_at),
+            "created_at": _iso_z(self.created_at),
+        }
 
 
 class PasswordResetToken(SQLModel, table=True):

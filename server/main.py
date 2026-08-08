@@ -26,8 +26,8 @@ import os
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from fastapi import (Depends, FastAPI, File, Form, HTTPException, Response,
-                     UploadFile)
+from fastapi import (Depends, FastAPI, File, Form, HTTPException, Request,
+                     Response, UploadFile)
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import text as _text
@@ -38,7 +38,7 @@ import finance
 import passwords
 from config import DOCS_ENABLED, STRIPE_WEBHOOK_SECRET
 from server import (billing, database, deps, errors, exports, imports, mailer,
-                    ocr, store, subscription)
+                    mfa, middleware, ocr, store, subscription, tenancy)
 from server.billing import router as billing_router
 from server.webhooks import router as webhooks_router
 
@@ -78,6 +78,21 @@ app = FastAPI(
     redoc_url="/redoc" if DOCS_ENABLED else None,
     openapi_url="/openapi.json" if DOCS_ENABLED else None,
 )
+
+# --------------------------------------------------------------------------
+# Middleware
+# --------------------------------------------------------------------------
+# Starlette runs these in REVERSE registration order, so the last one added is
+# the outermost. Rate limiting therefore goes on LAST and runs FIRST: turning a
+# flood away before it costs a signature verification is the entire point, and
+# the auth gate behind it never sees the requests that were shed.
+#
+# CORS is added after both (further down), so it stays outermost of all and a
+# 401 or 429 still comes back with the headers a browser needs to read it —
+# otherwise a rejected cross-origin request surfaces as an opaque network
+# error rather than as the status we sent.
+app.add_middleware(middleware.AuthGateMiddleware)
+app.add_middleware(middleware.RateLimitMiddleware)
 
 # Stripe billing webhook (POST /api/v1/webhooks/stripe). Public by design —
 # it authenticates via Stripe's payload signature, not a bearer token.
@@ -167,6 +182,18 @@ class RegisterRequest(BaseModel):
     username: str = Field(..., min_length=3, max_length=120)
     email: EmailStr
     password: str = Field(..., min_length=8, max_length=200)
+
+
+class MfaVerify(BaseModel):
+    """Leg two of login: the challenge from leg one plus the code."""
+    challenge: str = Field(..., min_length=16, max_length=2048)
+    code: str = Field(..., min_length=6, max_length=10)
+    # "Εμπιστοσύνη σε αυτή τη συσκευή για 30 ημέρες".
+    trust_device: bool = False
+
+
+class MfaCode(BaseModel):
+    code: str = Field(..., min_length=6, max_length=10)
 
 
 class ForgotPasswordRequest(BaseModel):
@@ -472,22 +499,230 @@ def meta():
 # --------------------------------------------------------------------------
 # Auth endpoints
 # --------------------------------------------------------------------------
+def _session_payload(user):
+    return {
+        "access_token": auth.create_access_token(user["username"]),
+        "token_type": "bearer",
+        "username": user["username"],
+        "subscription": user.get("subscription"),
+        "expires_hours": auth.JWT_EXPIRE_HOURS,
+    }
+
+
 @app.post("/api/auth/login")
-def login(body: LoginRequest):
+def login(body: LoginRequest, request: Request):
+    """Leg one: the password.
+
+    Answers with a SESSION when the account has no second factor or is being
+    used from a device the user has told us to trust. Otherwise it answers with
+    a CHALLENGE — a short-lived token saying only that the password was
+    correct — and the session is minted at /api/v1/auth/mfa/verify once the
+    code has been checked. A stolen password on its own therefore never yields
+    anything that can read a book.
+    """
     try:
         user = auth.authenticate(body.username, body.password)
     except auth.AuthError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc))
     if not user:
         raise HTTPException(status_code=401, detail="Λάθος όνομα χρήστη ή κωδικός.")
-    token = auth.create_access_token(user["username"])
+
+    if not database.is_configured():
+        return _session_payload(user)
+
+    try:
+        with database.session_scope() as session:
+            row = store.get_user_by_username(session, user["username"])
+            if row is None or not row.mfa_enabled:
+                return _session_payload(user)
+            # A trusted device skips the PROMPT, never the password: the
+            # credential above has already been verified by this point.
+            cookie = request.cookies.get(mfa.DEVICE_COOKIE)
+            if store.find_trusted_device(session, row, cookie) is not None:
+                return {**_session_payload(user), "device_trusted": True}
+    except SQLAlchemyError as exc:
+        raise errors.db_error(exc)
+
     return {
-        "access_token": token,
-        "token_type": "bearer",
-        "username": user["username"],
-        "subscription": user.get("subscription"),
-        "expires_hours": auth.JWT_EXPIRE_HOURS,
+        "mfa_required": True,
+        "challenge": mfa.issue_challenge(user["username"]),
+        "expires_minutes": mfa.CHALLENGE_MINUTES,
+        "trust_days": mfa.TRUST_DAYS,
     }
+
+
+@app.post("/api/v1/auth/mfa/verify")
+def verify_mfa(body: MfaVerify, request: Request, response: Response):
+    """Leg two: the code, and optionally "trust this device for 30 days".
+
+    Public by design — it carries the challenge from leg one, which is proof
+    the password was already given. Rate-limited into the `auth` bucket, so it
+    is no more brute-forceable than the password step.
+    """
+    _require_db()
+    try:
+        username = mfa.verify_challenge(body.challenge)
+    except mfa.MfaError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+
+    try:
+        with database.session_scope() as session:
+            row = store.get_user_by_username(session, username)
+            if row is None:
+                raise HTTPException(status_code=401,
+                                    detail="Ο λογαριασμός δεν βρέθηκε.")
+            if not row.mfa_enabled:
+                # 2FA was turned off between the two legs. The password was
+                # already proved, so this is a session rather than an error.
+                return _session_payload(auth.public_user(row))
+            if not mfa.verify_code(row.mfa_secret, body.code):
+                raise HTTPException(status_code=401,
+                                    detail="Ο κωδικός επαλήθευσης δεν είναι σωστός.")
+
+            payload = _session_payload(auth.public_user(row))
+            if body.trust_device:
+                token = mfa.new_device_token()
+                # X-Device-Agent is the BROWSER's user-agent, forwarded by the
+                # Next route handler. The `user-agent` on this request is that
+                # hop's own, which would label every device "node" and make
+                # the list useless for telling one from another.
+                store.trust_device(
+                    session, row, token, mfa.trust_expiry(),
+                    label=mfa.device_label(
+                        request.headers.get("x-device-agent")
+                        or request.headers.get("user-agent")))
+                # Set on the API response, and mirrored onto the browser by
+                # the Next route handler that proxies this call.
+                response.set_cookie(
+                    mfa.DEVICE_COOKIE, token,
+                    **mfa.cookie_kwargs(secure=request.url.scheme == "https"))
+                payload["device_trusted"] = True
+                payload["device_token"] = token
+            return payload
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise errors.db_error(exc)
+
+
+@app.get("/api/v1/auth/mfa")
+def mfa_status(user: str = Depends(get_current_user)):
+    """Whether 2FA is on, and which devices are currently trusted."""
+    _require_db()
+    try:
+        with database.session_scope() as session:
+            tenant = _resolve_user(session, user)
+            return {
+                "available": mfa.is_available(),
+                "enabled": bool(tenant.mfa_enabled),
+                "pending": bool(tenant.mfa_secret and not tenant.mfa_enabled),
+                "trust_days": mfa.TRUST_DAYS,
+                "devices": [d.to_detail()
+                            for d in store.list_trusted_devices(session, tenant)],
+            }
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise errors.db_error(exc)
+
+
+@app.post("/api/v1/auth/mfa/setup")
+def setup_mfa(user: str = Depends(get_current_user)):
+    """Mint a TOTP secret and return the otpauth URI to scan.
+
+    Turns NOTHING on. The secret is staged until a code proves the user can
+    actually read it (below), so abandoning this screen leaves the account
+    exactly as it was rather than locked behind a factor nobody enrolled.
+    """
+    _require_db()
+    if not mfa.is_available():
+        raise HTTPException(
+            status_code=503,
+            detail="Η ταυτοποίηση δύο παραγόντων δεν είναι διαθέσιμη σε αυτόν "
+                   "τον διακομιστή.")
+    try:
+        with database.session_scope() as session:
+            tenant = _resolve_user(session, user)
+            if tenant.mfa_enabled:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Η ταυτοποίηση δύο παραγόντων είναι ήδη ενεργή.")
+            secret = mfa.new_secret()
+            store.set_mfa_secret(session, tenant, secret)
+            return {
+                "secret": secret,
+                "otpauth_url": mfa.provisioning_uri(secret, tenant.email),
+                "issuer": mfa.ISSUER,
+            }
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise errors.db_error(exc)
+
+
+@app.post("/api/v1/auth/mfa/enable")
+def enable_mfa(body: MfaCode, user: str = Depends(get_current_user)):
+    """Turn 2FA on, once a code minted from the staged secret verifies."""
+    _require_db()
+    try:
+        with database.session_scope() as session:
+            tenant = _resolve_user(session, user)
+            if not tenant.mfa_secret:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Ξεκινήστε πρώτα τη ρύθμιση της ταυτοποίησης δύο "
+                           "παραγόντων.")
+            if not mfa.verify_code(tenant.mfa_secret, body.code):
+                raise HTTPException(
+                    status_code=401,
+                    detail="Ο κωδικός επαλήθευσης δεν είναι σωστός.")
+            store.set_mfa_enabled(session, tenant, True)
+            return {"ok": True, "enabled": True}
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise errors.db_error(exc)
+
+
+@app.post("/api/v1/auth/mfa/disable")
+def disable_mfa(body: MfaCode, user: str = Depends(get_current_user)):
+    """Turn 2FA off. Requires a current code — holding a live session is not
+    enough to remove the factor protecting it, or a borrowed laptop would be."""
+    _require_db()
+    try:
+        with database.session_scope() as session:
+            tenant = _resolve_user(session, user)
+            if not tenant.mfa_enabled:
+                return {"ok": True, "enabled": False}
+            if not mfa.verify_code(tenant.mfa_secret, body.code):
+                raise HTTPException(
+                    status_code=401,
+                    detail="Ο κωδικός επαλήθευσης δεν είναι σωστός.")
+            # Clears the secret AND every trusted device — see set_mfa_enabled.
+            store.set_mfa_enabled(session, tenant, False)
+            return {"ok": True, "enabled": False}
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise errors.db_error(exc)
+
+
+@app.delete("/api/v1/auth/mfa/devices")
+def revoke_devices(device_id: int | None = None,
+                   user: str = Depends(get_current_user)):
+    """Stop trusting one device, or all of them — what a user reaches for
+    after losing a laptop."""
+    _require_db()
+    try:
+        with database.session_scope() as session:
+            tenant = _resolve_user(session, user)
+            removed = store.revoke_trusted_devices(session, tenant,
+                                                   device_id=device_id)
+            return {"ok": True, "revoked": removed}
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise errors.db_error(exc)
 
 
 @app.get("/api/auth/me")

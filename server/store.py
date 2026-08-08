@@ -23,7 +23,7 @@ from sqlmodel import select
 # instead of making every caller pre-compute cents it cannot know (the amount
 # left owing is only readable once the row has been loaded).
 import finance
-from server import subscription
+from server import mfa, subscription
 from server.models import (
     STATUS_ACTIVE,
     STATUS_COMPLETED,
@@ -32,6 +32,7 @@ from server.models import (
     Invoice,
     PasswordResetToken,
     Transaction,
+    TrustedDevice,
     User,
 )
 from server.text import afm_key, doc_key, name_key
@@ -228,6 +229,120 @@ def update_password(session, user, password_hash):
     session.commit()
     session.refresh(user)
     return user
+
+
+# --- Two-factor authentication --------------------------------------------
+def set_mfa_secret(session, user, secret):
+    """Stage a TOTP secret WITHOUT turning the second factor on.
+
+    Two steps on purpose: enrolment shows a QR code before the user has proved
+    they can read it, and treating "has a secret" as "2FA is on" would lock out
+    anyone who closed the tab halfway through.
+    """
+    user.mfa_secret = secret
+    user.mfa_enabled = False
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    return user
+
+
+def set_mfa_enabled(session, user, enabled):
+    """Turn the second factor on (after a code has verified) or off.
+
+    Switching OFF clears the secret and every trusted device with it. A device
+    trusted under the old secret must not silently keep its bypass if 2FA is
+    turned back on later — that would be a live bypass nobody remembers
+    granting.
+    """
+    user.mfa_enabled = bool(enabled)
+    if not enabled:
+        user.mfa_secret = None
+        _forget_devices(session, user)
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    return user
+
+
+def _forget_devices(session, user):
+    for row in session.exec(
+        select(TrustedDevice).where(TrustedDevice.user_id == user.id)
+    ).all():
+        session.delete(row)
+
+
+def trust_device(session, user, raw_token, expires_at, label=None):
+    """Record a device allowed to skip the 2FA prompt until `expires_at`."""
+    session.add(TrustedDevice(
+        user_id=user.id,
+        token_hash=mfa.hash_device_token(raw_token),
+        label=label,
+        expires_at=expires_at,
+    ))
+    session.commit()
+
+
+def find_trusted_device(session, user, raw_token, now=None):
+    """The live trust row for this token AND this user, or None.
+
+    Scoped to the user, which is the check that matters: a token is only ever
+    evidence about the account it was issued for. Presenting one account's
+    device cookie while logging into another proves nothing, and is treated as
+    no cookie at all.
+
+    Expired rows are deleted as they are met rather than merely ignored —
+    housekeeping that costs nothing here and keeps a list of dead bypasses
+    from accumulating.
+    """
+    if not raw_token:
+        return None
+    now = now or utcnow()
+    row = session.exec(
+        select(TrustedDevice).where(
+            TrustedDevice.token_hash == mfa.hash_device_token(raw_token)
+        )
+    ).first()
+    if row is None:
+        return None
+    if _as_utc(row.expires_at) <= now:
+        session.delete(row)
+        session.commit()
+        return None
+    if row.user_id != user.id:
+        return None
+    row.last_used_at = now
+    session.add(row)
+    session.commit()
+    return row
+
+
+def list_trusted_devices(session, user):
+    return session.exec(
+        select(TrustedDevice)
+        .where(TrustedDevice.user_id == user.id)
+        .order_by(TrustedDevice.created_at.desc())
+    ).all()
+
+
+def revoke_trusted_devices(session, user, device_id=None):
+    """Drop one device, or every one. Returns how many went.
+
+    The "all" form is what a user reaches for after losing a laptop, and it is
+    the reason these are database rows rather than self-contained signed
+    tokens: a signed token stays valid until it expires no matter what its
+    owner does about it.
+    """
+    rows = list_trusted_devices(session, user)
+    removed = 0
+    for row in rows:
+        if device_id is not None and row.id != int(device_id):
+            continue
+        session.delete(row)
+        removed += 1
+    if removed:
+        session.commit()
+    return removed
 
 
 # --- Password reset -------------------------------------------------------

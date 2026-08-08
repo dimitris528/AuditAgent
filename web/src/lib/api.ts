@@ -327,10 +327,25 @@ export function importTemplateUrl(kind: ImportKind): string {
   return `/api/import/templates/${kind}`;
 }
 
+/**
+ * The outcome of a password. A correct one does not always end in a session:
+ * an account with a second factor, signing in from a browser it has not been
+ * told to trust, gets a CHALLENGE instead and continues at verifyMfa.
+ */
+export interface LoginResult {
+  ok: boolean;
+  username?: string;
+  mfa_required?: boolean;
+  /** Says only "this password was correct" — carries no session and opens
+   *  nothing. Short-lived; see server/mfa.py. */
+  challenge?: string;
+  trust_days?: number;
+}
+
 export async function login(
   username: string,
   password: string,
-): Promise<{ ok: boolean; username?: string }> {
+): Promise<LoginResult> {
   const res = await fetch(`/api/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -339,6 +354,29 @@ export async function login(
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new ApiError(data?.error || `Login failed (${res.status})`, res.status);
+  }
+  return data;
+}
+
+/**
+ * Leg two: the six-digit code, and optionally "trust this device for 30 days".
+ *
+ * `trustDevice` sets an httpOnly cookie that skips the PROMPT on later logins
+ * from this browser — never the password, which is always required.
+ */
+export async function verifyMfa(
+  challenge: string,
+  code: string,
+  trustDevice: boolean,
+): Promise<{ ok: boolean; username?: string }> {
+  const res = await fetch(`/api/auth/mfa-verify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ challenge, code, trust_device: trustDevice }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new ApiError(data?.error || "Η επαλήθευση απέτυχε.", res.status);
   }
   return data;
 }

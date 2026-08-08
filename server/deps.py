@@ -29,7 +29,7 @@ from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 import auth
-from server import database, store
+from server import database, store, tenancy
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -84,10 +84,20 @@ def resolve_user_state(session, username, write=False):
     Raises 401 when the token outlived the account — a token must never resolve
     to nothing and be treated as harmless — and 402 when `write` is set and the
     subscription has lapsed.
+
+    Also the single place the DATABASE-level tenant is declared. Every
+    endpoint reaches its data through here, so stamping the tenant at this
+    point means the Row Level Security policies (scripts/enable_rls.sql) are
+    fed by the same resolution that decides tenancy in Python — one source of
+    truth, checked twice.
     """
     user = store.get_user_by_username(session, username)
     if user is None:
         raise HTTPException(status_code=401, detail="Ο λογαριασμός δεν βρέθηκε.")
+    # Set BEFORE any tenant-scoped query runs. From here on a query that
+    # forgets its user_id filter returns nothing instead of somebody else's
+    # rows — see server/tenancy.py.
+    tenancy.set_current_tenant(user.id)
     state = store.refresh_subscription(session, user)
     if write and not state.allows_writes:
         raise HTTPException(status_code=402, detail=paywall_detail(state))

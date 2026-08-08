@@ -34,6 +34,11 @@ os.environ.pop("STRIPE_SECRET_KEY", None)
 os.environ.pop("STRIPE_PRICE_ID", None)
 # Pinned rather than inherited: the trial assertions count days.
 os.environ["TRIAL_DAYS"] = "14"
+# The rate limiter is OFF in tests. The suite fires hundreds of requests a
+# second from one "client", which is exactly what the limiter exists to stop —
+# leaving it on would make the suite flaky rather than safe. It has its own
+# tests (test_security.py) that switch it on deliberately.
+os.environ["RATE_LIMIT_ENABLED"] = "0"
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -41,11 +46,12 @@ from sqlmodel import delete  # noqa: E402
 
 from server import database  # noqa: E402
 from server.main import app  # noqa: E402
-from server.models import Client, DebtPayment, Invoice, Transaction, User  # noqa: E402
+from server.models import (Client, DebtPayment, Invoice,  # noqa: E402
+                          Transaction, TrustedDevice, User)
 
-# Children first: transactions reference clients and users, and debt_payments
-# references all three.
-_TABLES = (DebtPayment, Invoice, Transaction, Client, User)
+# Children first: transactions reference clients and users, debt_payments
+# references all three, and trusted_devices references users.
+_TABLES = (DebtPayment, Invoice, Transaction, Client, TrustedDevice, User)
 
 
 @pytest.fixture(scope="session", autouse=True)
