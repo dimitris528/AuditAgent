@@ -17,10 +17,18 @@ import {
 import {
   IMPORT_ACCEPT,
   IMPORT_MAX_BYTES,
-  importData,
+  analyzeImport,
   importTemplateUrl,
+  processImport,
 } from "@/lib/api";
-import type { ImportIssue, ImportKind, ImportSummary } from "@/lib/types";
+import type {
+  ImportAnalysis,
+  ImportIssue,
+  ImportKind,
+  ImportMapping,
+  ImportSummary,
+} from "@/lib/types";
+import { ColumnMapping, missingRequirements } from "./ColumnMapping";
 import { clsx } from "@/lib/clsx";
 
 /**
@@ -268,6 +276,12 @@ export function ImportDataModal({
   const [error, setError] = useState("");
   const [dragging, setDragging] = useState(false);
   const [summary, setSummary] = useState<ImportSummary | null>(null);
+  // The middle step. The FILE is held here rather than a server-side handle:
+  // nothing is stored between analyze and process, so there is no staging area
+  // to expire or clean up, and the file is already in the browser either way.
+  const [analysis, setAnalysis] = useState<ImportAnalysis | null>(null);
+  const [file, setFile] = useState<File | null>(null);
+  const [mapping, setMapping] = useState<ImportMapping>({});
   // Gates the portal below. document.body does not exist during SSR, and the
   // effect only runs on the client — so the first paint renders nothing and the
   // modal appears immediately after hydration.
@@ -287,17 +301,39 @@ export function ImportDataModal({
     };
   }, [onClose]);
 
-  async function send(file: File) {
+  /** Step one: read the file's shape and open the mapping screen. */
+  async function inspect(chosen: File) {
     setError("");
-    if (file.size > IMPORT_MAX_BYTES) {
+    if (chosen.size > IMPORT_MAX_BYTES) {
       setError(
-        `Το αρχείο ξεπερνά τα ${bytes(IMPORT_MAX_BYTES)} (${bytes(file.size)}).`,
+        `Το αρχείο ξεπερνά τα ${bytes(IMPORT_MAX_BYTES)} (${bytes(chosen.size)}).`,
       );
       return;
     }
     setBusy(true);
     try {
-      const result = await importData(kind, file);
+      const result = await analyzeImport(kind, chosen);
+      setFile(chosen);
+      setAnalysis(result);
+      // The server's detection is the STARTING point, not the answer — every
+      // one of these is a dropdown the user can correct on the next screen.
+      setMapping(result.mapping);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Αποτυχία ανάγνωσης του αρχείου.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Step two: import with the mapping the user confirmed. */
+  async function run() {
+    if (!file || !analysis) return;
+    setError("");
+    setBusy(true);
+    try {
+      const result = await processImport(kind, file, mapping);
       setSummary(result);
       // Refreshed immediately rather than on close, so the grid behind the
       // modal already shows the imported rows when it is dismissed.
@@ -311,19 +347,29 @@ export function ImportDataModal({
     }
   }
 
+  function restart() {
+    setSummary(null);
+    setAnalysis(null);
+    setFile(null);
+    setMapping({});
+    setError("");
+  }
+
   function pick(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
+    const chosen = e.target.files?.[0];
     // Reset so re-picking the SAME file (after fixing it) fires change again.
     e.target.value = "";
-    if (file) void send(file);
+    if (chosen) void inspect(chosen);
   }
 
   function drop(e: React.DragEvent) {
     e.preventDefault();
     setDragging(false);
-    const file = e.dataTransfer.files?.[0];
-    if (file && !busy) void send(file);
+    const chosen = e.dataTransfer.files?.[0];
+    if (chosen && !busy) void inspect(chosen);
   }
+
+  const blocked = analysis ? missingRequirements(analysis, mapping) : [];
 
   if (!mounted) return null;
 
@@ -360,7 +406,11 @@ export function ImportDataModal({
                 {copy.title}
               </h2>
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                Εισαγωγή Δεδομένων (CSV / Excel)
+                {summary
+                  ? "Αποτέλεσμα εισαγωγής"
+                  : analysis
+                    ? `Βήμα 2 από 2 · Αντιστοίχιση στηλών${file ? ` · ${file.name}` : ""}`
+                    : "Βήμα 1 από 2 · Επιλογή αρχείου (CSV / Excel)"}
               </p>
             </div>
           </div>
@@ -377,6 +427,30 @@ export function ImportDataModal({
         <div className="flex-1 overflow-y-auto p-5">
           {summary ? (
             <Summary kind={kind} summary={summary} />
+          ) : analysis ? (
+            <div className="space-y-4">
+              <ColumnMapping
+                analysis={analysis}
+                mapping={mapping}
+                onChange={setMapping}
+              />
+              {error ? (
+                <div
+                  role="alert"
+                  className="flex items-start gap-2.5 rounded-xl border border-rose-200 bg-rose-50 p-3 dark:border-rose-500/30 dark:bg-rose-500/10"
+                >
+                  <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-600 dark:text-rose-400" />
+                  <div className="min-w-0">
+                    <p className="text-xs font-semibold text-rose-800 dark:text-rose-200">
+                      Η εισαγωγή δεν ολοκληρώθηκε
+                    </p>
+                    <p className="mt-0.5 text-xs text-rose-700 dark:text-rose-300/90">
+                      {error}
+                    </p>
+                  </div>
+                </div>
+              ) : null}
+            </div>
           ) : (
             <div className="space-y-4">
               {/* The template comes FIRST: someone who has never seen the
@@ -419,7 +493,7 @@ export function ImportDataModal({
                 {busy ? (
                   <div className="flex flex-col items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
                     <Loader2 className="h-6 w-6 animate-spin text-indigo-500" />
-                    Ανάγνωση και έλεγχος αρχείου…
+                    Ανάγνωση στηλών…
                   </div>
                 ) : (
                   <>
@@ -480,26 +554,50 @@ export function ImportDataModal({
         </div>
 
         <div className="flex items-center justify-end gap-2 border-t border-slate-200 p-4 dark:border-slate-800">
-          {summary ? (
+          {summary || analysis ? (
             <button
               type="button"
-              onClick={() => {
-                setSummary(null);
-                setError("");
-              }}
-              className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+              onClick={restart}
+              disabled={busy}
+              className="mr-auto rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50 disabled:opacity-60 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
             >
-              Νέα εισαγωγή
+              {summary ? "Νέα εισαγωγή" : "Άλλο αρχείο"}
             </button>
           ) : null}
           <button
             type="button"
             onClick={onClose}
             disabled={busy}
-            className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-700 disabled:opacity-60 dark:bg-white dark:text-slate-900 dark:hover:bg-slate-200"
+            className={clsx(
+              "rounded-lg px-4 py-2 text-sm font-semibold transition disabled:opacity-60",
+              // The import button becomes the primary action on the mapping
+              // step, so Close steps back to a secondary style there rather
+              // than competing with it.
+              analysis && !summary
+                ? "border border-slate-300 text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                : "bg-slate-900 text-white hover:bg-slate-700 dark:bg-white dark:text-slate-900 dark:hover:bg-slate-200",
+            )}
           >
             {summary ? "Κλείσιμο" : "Άκυρο"}
           </button>
+          {analysis && !summary ? (
+            <button
+              type="button"
+              onClick={() => void run()}
+              // Disabled while a required field has nothing mapped to it. The
+              // mapping panel names which, so this is a stop rather than a
+              // dead end.
+              disabled={busy || blocked.length > 0}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-indigo-500 disabled:opacity-60"
+            >
+              {busy ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Upload className="h-4 w-4" />
+              )}
+              Εισαγωγή {analysis.rows > 0 ? `${analysis.rows} γραμμών` : ""}
+            </button>
+          ) : null}
         </div>
       </div>
     </div>,

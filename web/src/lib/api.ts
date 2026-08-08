@@ -10,7 +10,9 @@ import type {
   DebtPaymentRow,
   DuplicateClient,
   DuplicateTransaction,
+  ImportAnalysis,
   ImportKind,
+  ImportMapping,
   ImportSummary,
   ScanResult,
   SettlementResult,
@@ -278,6 +280,44 @@ export async function importData(
   const form = new FormData();
   form.append("file", file, file.name || "import.csv");
   const res = await fetch(`/api/import/${kind}`, { method: "POST", body: form });
+  return unwrap(res, "Αποτυχία εισαγωγής δεδομένων");
+}
+
+/**
+ * Step one of a mapped import: read the file's shape without writing anything.
+ *
+ * Returns the headers, a few real rows and the server's own best guess at the
+ * mapping — pre-selected on the screen that follows, and every guess
+ * overridable there.
+ */
+export async function analyzeImport(
+  kind: ImportKind,
+  file: File,
+): Promise<ImportAnalysis> {
+  const form = new FormData();
+  form.append("file", file, file.name || "import.csv");
+  form.append("kind", kind);
+  const res = await fetch(`/api/import/analyze`, { method: "POST", body: form });
+  return unwrap(res, "Αποτυχία ανάγνωσης του αρχείου");
+}
+
+/**
+ * Step two: import using the mapping the user confirmed.
+ *
+ * The FILE is sent again rather than a server-side handle. Nothing is stored
+ * between the two calls, so there is no staging area to expire or clean up —
+ * and the file is already sitting in the browser either way.
+ */
+export async function processImport(
+  kind: ImportKind,
+  file: File,
+  mapping: ImportMapping,
+): Promise<ImportSummary> {
+  const form = new FormData();
+  form.append("file", file, file.name || "import.csv");
+  form.append("kind", kind);
+  form.append("mapping", JSON.stringify(mapping));
+  const res = await fetch(`/api/import/process`, { method: "POST", body: form });
   return unwrap(res, "Αποτυχία εισαγωγής δεδομένων");
 }
 

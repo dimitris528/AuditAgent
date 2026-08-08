@@ -128,6 +128,62 @@ export async function proxyJson(
 }
 
 /**
+ * Proxy a multipart upload to the backend.
+ *
+ * Separate from proxyJson because the body is a FormData, not JSON: it is
+ * re-assembled with req.formData() and posted on with a FRESH boundary. undici
+ * sets the Content-Type (boundary included) from the FormData itself, so it
+ * must NOT be copied from the incoming request — a copied header would name
+ * the boundary of the request we already consumed.
+ *
+ * Never retried. A FormData body is spent by the first attempt, so a second
+ * try posts an empty upload — and one that did replay would risk importing the
+ * same file twice.
+ */
+export async function proxyUpload(
+  req: Request,
+  path: string,
+  options: { fallback: string; timeoutMs?: number },
+): Promise<NextResponse> {
+  const token = await getToken();
+  if (!token) {
+    return NextResponse.json({ error: "Απαιτείται σύνδεση." }, { status: 401 });
+  }
+
+  let form: FormData;
+  try {
+    form = await req.formData();
+  } catch {
+    return NextResponse.json({ error: "Μη έγκυρο αρχείο." }, { status: 400 });
+  }
+  if (!(form.get("file") instanceof File)) {
+    return NextResponse.json({ error: "Δεν στάλθηκε αρχείο." }, { status: 400 });
+  }
+
+  let res: Response;
+  try {
+    res = await backendFetch(path, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+      retries: 0,
+      timeoutMs: options.timeoutMs ?? 90_000,
+    });
+  } catch (err) {
+    return backendUnavailable(err);
+  }
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    return NextResponse.json(
+      { error: errorMessage(data, options.fallback) },
+      { status: res.status },
+    );
+  }
+  return NextResponse.json(data);
+}
+
+/**
  * Proxy a FILE download from the backend.
  *
  * Separate from proxyJson because the response is not JSON and must not be

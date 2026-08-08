@@ -21,11 +21,13 @@ database, so the fallback was unreachable code pretending to be a feature.
 """
 
 import datetime as _dt
+import json
 import os
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from fastapi import Depends, FastAPI, File, HTTPException, Response, UploadFile
+from fastapi import (Depends, FastAPI, File, Form, HTTPException, Response,
+                     UploadFile)
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import text as _text
@@ -1214,6 +1216,98 @@ async def import_transactions(file: UploadFile = File(...),
             return _import_summary(
                 imports.TRANSACTIONS, file.filename, parsed,
                 len(created), skipped,
+                clients_created=len(new_clients),
+                total_amount=sum(row["amount"] for row in created))
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise errors.db_error(exc)
+
+
+def _import_kind(kind):
+    if kind not in imports.KINDS:
+        raise HTTPException(status_code=404,
+                            detail=f"Άγνωστος τύπος εισαγωγής «{kind}».")
+    return kind
+
+
+@app.post("/api/import/analyze")
+async def analyze_import(file: UploadFile = File(...),
+                         kind: str = Form(...),
+                         user: str = Depends(get_current_user)):
+    """Step one of a mapped import: read the file's shape, write nothing.
+
+    Returns the headers, a few real rows and the mapping this server would have
+    chosen on its own — every guess pre-selected and every one overridable on
+    the screen that follows. That is what makes a file with unrecognisable
+    column names importable rather than merely diagnosable.
+
+    Deliberately stateless: nothing is stored between this call and
+    /api/import/process, and the browser posts the same file twice. The
+    alternative is a server-side staging area with an id, an expiry and a
+    cleanup job — three new ways to fail for a file that is already sitting in
+    the user's browser.
+    """
+    _require_db()
+    _assert_can_write(user)
+    _import_kind(kind)
+    data = await _read_upload(file)
+    try:
+        return imports.analyze(data, kind)
+    except imports.ImportFileError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+
+
+@app.post("/api/import/process")
+async def process_import(file: UploadFile = File(...),
+                         kind: str = Form(...),
+                         mapping: str = Form("{}"),
+                         user: str = Depends(get_current_user)):
+    """Step two: import the file using the column mapping the user confirmed.
+
+    `mapping` is JSON — {field key: column index} — carried as a form field
+    because the file makes this a multipart request. It is AUTHORITATIVE:
+    auto-detection and the positional fallback are both skipped, since the
+    user has just said where everything is.
+
+    Anything they left unmapped is derived rather than demanded. A file with
+    only a total gets its net and its VAT computed at the standard rate; one
+    with a net and a VAT gets its total, and the rate worked out from the two —
+    see imports.resolve_amounts.
+    """
+    _require_db()
+    _assert_can_write(user)
+    _import_kind(kind)
+    data = await _read_upload(file)
+
+    try:
+        chosen = json.loads(mapping or "{}")
+    except ValueError:
+        raise HTTPException(status_code=422,
+                            detail="Η αντιστοίχιση στηλών δεν είναι έγκυρη.")
+    if not isinstance(chosen, dict):
+        raise HTTPException(status_code=422,
+                            detail="Η αντιστοίχιση στηλών δεν είναι έγκυρη.")
+
+    try:
+        parsed = (imports.parse_clients(data, mapping=chosen)
+                  if kind == imports.CLIENTS
+                  else imports.parse_transactions(data, mapping=chosen))
+    except imports.ImportFileError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+
+    try:
+        with database.session_scope() as session:
+            tenant = _resolve_user(session, user, write=True)
+            if kind == imports.CLIENTS:
+                created, skipped = store.import_clients(session, tenant,
+                                                        parsed.rows)
+                return _import_summary(kind, file.filename, parsed,
+                                       len(created), skipped)
+            created, skipped, new_clients = store.import_transactions(
+                session, tenant, parsed.rows)
+            return _import_summary(
+                kind, file.filename, parsed, len(created), skipped,
                 clients_created=len(new_clients),
                 total_amount=sum(row["amount"] for row in created))
     except HTTPException:

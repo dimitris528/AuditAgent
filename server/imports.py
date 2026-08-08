@@ -184,6 +184,12 @@ _TXN_COLUMNS = _aliases({
             "Counterparty AFM"),
     "type": ("Είδος Κίνησης", "Είδος", "Τύπος Κίνησης", "Κίνηση", "Type",
              "Transaction Type", "Entry Type"),
+    # Payment state. NOT the same thing as Είδος Κίνησης and cannot replace it
+    # — "Εξοφλημένο" does not say whether money came in or went out — but
+    # "Εκκρεμεί" does say the row is a Χρεωστούμενο, which is the half a
+    # legacy export most often carries instead of a type column.
+    "status": ("Κατάσταση", "Κατάσταση Πληρωμής", "Status", "Payment Status",
+               "Παρακολούθηση"),
     "doc_type": ("Τύπος Παραστατικού", "Παραστατικό", "Είδος Παραστατικού",
                  "Document Type", "Doc Type"),
     "doc_number": ("Αρ. Παραστατικού", "Αριθμός Παραστατικού", "Αρ. Τιμολογίου",
@@ -406,6 +412,22 @@ def _cell(value):
 # group, so "1234.567" keeps its decimal point.
 _THOUSANDS_LEAD = re.compile(r"^[1-9]\d{0,2}$")
 
+# Currency marks, written before the figure as often as after it, and in words
+# as often as in symbols.
+_CURRENCY = re.compile(r"€|\$|£|¥|EUR|USD|GBP|ΕΥΡΩ|ΔΡΧ", re.IGNORECASE)
+
+# Every space-like character a spreadsheet puts inside a number. The plain one
+# is the least of them: Excel's thousands separator in several locales is a
+# NO-BREAK SPACE (U+00A0), and a NARROW NO-BREAK SPACE (U+202F) is what a
+# French or Swiss export writes. All three are invisible, none of them is
+# " ", and a value that still contains one parses as nothing at all.
+_ANY_SPACE = re.compile(r"[\s    ⁠]")
+
+# Unicode dashes that mean "minus". U+2212 is what a spreadsheet writes when
+# it formats a negative properly, and it is not the ASCII hyphen that every
+# parser looks for.
+_MINUS_SIGNS = {ord(ch): "-" for ch in "−‒–—―"}
+
 
 def number(value):
     """A euro figure from a cell, or None when there is nothing to read.
@@ -435,8 +457,15 @@ def number(value):
     €1500, not €1.50. In a Greek book the former is overwhelmingly what is
     meant, and €1.50 is written "1,50".
 
-    Accounting exports also write a negative in parentheses, so "(310,00)" is
-    -310.0. Currency symbols and spaces are dropped.
+    Everything that is not a digit or a separator is stripped first: currency
+    symbols and codes (€, $, EUR, USD), every space-like character including
+    the INVISIBLE ones a spreadsheet uses as a thousands separator (U+00A0,
+    U+202F), and the Unicode minus signs that are not the ASCII hyphen every
+    parser looks for.
+
+    Negatives are written three ways and all three are read: a leading sign, a
+    TRAILING one ("310,00-", which is what a great many accounting packages
+    export), and parentheses ("(310,00)").
     """
     if value is None or isinstance(value, bool):
         return None
@@ -446,11 +475,12 @@ def number(value):
     text = str(value).strip()
     if not text:
         return None
-    negative = text.startswith("(") and text.endswith(")")
-    cleaned = re.sub(r"[^0-9,.\-]", "", text)
-    if cleaned.startswith("-"):
-        negative = True
-    cleaned = cleaned.replace("-", "")
+    text = text.translate(_MINUS_SIGNS)
+    text = _CURRENCY.sub("", text)
+    text = _ANY_SPACE.sub("", text)
+    negative = ((text.startswith("(") and text.endswith(")"))
+                or text.startswith("-") or text.endswith("-"))
+    cleaned = re.sub(r"[^0-9,.]", "", text)
     if not cleaned:
         return None
 
@@ -575,6 +605,33 @@ def doc_type(value):
     book has no equivalent for."""
     key = name_key(_cell(value))
     return _DOC_TYPES.get(key) if key else None
+
+
+# Payment states, in the two directions that carry information. Only the
+# OUTSTANDING half can decide a Type on its own: an unpaid row is a
+# Χρεωστούμενο, while a settled one says nothing about whether the money came
+# in or went out, so it defers to the amount's sign.
+_STATUS_OUTSTANDING = frozenset(name_key(word) for word in (
+    "Εκκρεμεί", "Εκκρεμές", "Ανεξόφλητο", "Ανεξόφλητα", "Απλήρωτο", "Οφειλή",
+    "Σε εκκρεμότητα", "Ληξιπρόθεσμο", "Unpaid", "Pending", "Open",
+    "Outstanding", "Due", "Overdue",
+))
+_STATUS_SETTLED = frozenset(name_key(word) for word in (
+    "Εξοφλημένο", "Εξοφλήθηκε", "Πληρωμένο", "Πληρώθηκε", "Τακτοποιημένο",
+    "Paid", "Settled", "Closed", "Complete", "Completed",
+))
+
+
+def payment_status(value):
+    """"outstanding", "settled", or None for a cell that says neither."""
+    key = name_key(_cell(value))
+    if not key:
+        return None
+    if key in _STATUS_OUTSTANDING:
+        return "outstanding"
+    if key in _STATUS_SETTLED:
+        return "settled"
+    return None
 
 
 def vat_rate(value):
@@ -758,6 +815,141 @@ def resolve_amounts(gross, net, vat, rate):
 # --------------------------------------------------------------------------
 # Clients
 # --------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# The mapping contract
+# --------------------------------------------------------------------------
+# What the mapping screen offers, in the order it offers it. Defined HERE
+# rather than in the modal so the labels a user maps against and the fields the
+# parser reads cannot drift: the UI renders this list, posts back the field
+# keys in it, and every key is one this module actually consumes.
+#
+# `group` marks an either/or. A transaction needs SOME way to name its client
+# and SOME figure to book, but either column of each pair will do — demanding
+# both would reject a file that carries an ΑΦΜ and no name, which is common,
+# or a net value and no total, which is commoner still.
+FIELDS = {
+    CLIENTS: (
+        {"key": "name", "label": "Επωνυμία", "required": True,
+         "hint": "Η επωνυμία του πελάτη"},
+        {"key": "afm", "label": "Α.Φ.Μ.", "required": False,
+         "hint": "Ο αριθμός φορολογικού μητρώου"},
+        {"key": "phone", "label": "Τηλέφωνο", "required": False,
+         "hint": "Αποθηκεύεται στο πεδίο επικοινωνίας"},
+        {"key": "email", "label": "Email", "required": False,
+         "hint": "Αποθηκεύεται στο πεδίο επικοινωνίας"},
+        {"key": "notes", "label": "Σημειώσεις", "required": False, "hint": ""},
+    ),
+    TRANSACTIONS: (
+        {"key": "date", "label": "Ημερομηνία", "required": True,
+         "hint": "ΗΗ/ΜΜ/ΕΕΕΕ ή ΕΕΕΕ-ΜΜ-ΗΗ"},
+        {"key": "client", "label": "Όνομα / Επωνυμία", "required": False,
+         "group": "client", "hint": "Ο πελάτης της κίνησης"},
+        {"key": "afm", "label": "Α.Φ.Μ.", "required": False,
+         "group": "client", "hint": "Εναλλακτικά του ονόματος"},
+        {"key": "amount", "label": "Συνολικό Ποσό / Μεικτό", "required": False,
+         "group": "amount", "hint": "Με Φ.Π.Α."},
+        {"key": "net_amount", "label": "Καθαρό Ποσό", "required": False,
+         "group": "amount", "hint": "Χωρίς Φ.Π.Α."},
+        {"key": "vat_amount", "label": "Φ.Π.Α.", "required": False,
+         "hint": "Υπολογίζεται αν λείπει"},
+        {"key": "vat_rate", "label": "Συντ. Φ.Π.Α.", "required": False,
+         "hint": "π.χ. 24% — προεπιλογή 24%"},
+        {"key": "type", "label": "Είδος Κίνησης", "required": False,
+         "hint": "Έσοδο / Έξοδο / Χρεωστούμενο"},
+        {"key": "status", "label": "Κατάσταση", "required": False,
+         "hint": "Εκκρεμεί / Εξοφλημένο"},
+        {"key": "doc_type", "label": "Τύπος Παραστατικού", "required": False,
+         "hint": ""},
+        {"key": "doc_number", "label": "Αρ. Παραστατικού", "required": False,
+         "hint": "Χρησιμοποιείται για τον έλεγχο διπλοεγγραφών"},
+        {"key": "description", "label": "Περιγραφή", "required": False,
+         "hint": ""},
+        {"key": "due_date", "label": "Ημ. Λήξης", "required": False,
+         "hint": "Μόνο για χρεωστούμενα"},
+    ),
+}
+
+#: Data rows returned with an analysis, so the mapping screen can show what a
+#: column actually CONTAINS. Three, because one is not enough to tell a date
+#: column from a column that happens to start with a date.
+SAMPLE_ROWS = 3
+
+
+def _field_keys(kind):
+    return {field["key"] for field in FIELDS[kind]}
+
+
+def apply_mapping(mapping, kind, width):
+    """A caller's {field: column index} as a validated column index.
+
+    Unknown field names and out-of-range indices are DROPPED rather than
+    rejected: the mapping comes from a form the user filled in against a file
+    they have since possibly changed, and losing one dropdown is a better
+    outcome than refusing the upload. What cannot be dropped — a required
+    field with nothing mapped to it — is caught by the caller, which can say
+    which field it was.
+    """
+    known = _field_keys(kind)
+    columns = {}
+    for field, position in (mapping or {}).items():
+        if field not in known or position is None or position == "":
+            continue
+        try:
+            index = int(position)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= index < width:
+            columns[field] = index
+    return columns
+
+
+def analyze(data, kind):
+    """What the mapping screen needs: the file's headers, a few real rows, and
+    the mapping this module would have chosen on its own.
+
+    Writes nothing and decides nothing. The auto-detection is offered as a
+    STARTING POINT — every guess it makes is pre-selected and every one of them
+    is overridable, which is the whole point of the step: a file whose columns
+    this module cannot recognise is no longer a file it cannot import.
+
+    The header row is chosen exactly as the import will choose it, so the
+    indices returned here address the same columns the import will read.
+    """
+    if kind not in KINDS:
+        raise ImportFileError(f"Άγνωστος τύπος εισαγωγής «{kind}».", status=404)
+    aliases = _CLIENT_COLUMNS if kind == CLIENTS else _TXN_COLUMNS
+    header, body = _table(data, aliases)
+    detected = _index(header, aliases)
+
+    if kind == TRANSACTIONS and not {"amount", "net_amount", "vat_amount"} & set(detected):
+        # Offer the positional guess too — pre-selected, and visible in a
+        # dropdown the user can correct, which is a far safer place for it
+        # than silently inside an import.
+        guess = find_amount_column(header, body, set(detected.values()))
+        if guess is not None:
+            detected["amount"] = guess[0]
+
+    rows = [row for row in body if any(_cell(value) for value in row)]
+    width = max([len(header)] + [len(row) for row in rows[:SAMPLE_ROWS]])
+    return {
+        "kind": kind,
+        # Blank headings still need a name in the dropdown, or the user is
+        # choosing between several identical empty options.
+        "headers": [
+            _cell(header[i]) if i < len(header) and _cell(header[i])
+            else f"Στήλη {i + 1}"
+            for i in range(width)
+        ],
+        "sample": [
+            [_cell(row[i]) if i < len(row) else "" for i in range(width)]
+            for row in rows[:SAMPLE_ROWS]
+        ],
+        "mapping": detected,
+        "fields": list(FIELDS[kind]),
+        "rows": len(rows),
+    }
+
+
 def _missing_columns(kind, required):
     return ImportFileError(
         "Δεν βρέθηκαν οι απαιτούμενες στήλες στο αρχείο. Απαιτούνται: "
@@ -766,8 +958,13 @@ def _missing_columns(kind, required):
     )
 
 
-def parse_clients(data):
+def parse_clients(data, mapping=None):
     """Read a client list. Returns a ParsedFile of {name, afm, contact, notes}.
+
+    `mapping` is the user's own {field: column index} from the mapping screen.
+    When given it is AUTHORITATIVE and detection is skipped entirely — the
+    point of that screen is to override what this module guessed, so quietly
+    re-adding a guess for a field the user left blank would defeat it.
 
     Only the name is structurally required — an ΑΦΜ is genuinely absent for
     private individuals, and refusing those rows would reject exactly the
@@ -779,7 +976,8 @@ def parse_clients(data):
     splitting it is a change to the client editor rather than to this importer.
     """
     header, body = _table(data, _CLIENT_COLUMNS)
-    columns = _index(header, _CLIENT_COLUMNS)
+    columns = (_index(header, _CLIENT_COLUMNS) if mapping is None
+               else apply_mapping(mapping, CLIENTS, len(header)))
     if "name" not in columns:
         raise _missing_columns("πελάτες", ("Επωνυμία", "Α.Φ.Μ.", "Τηλέφωνο",
                                            "Email"))
@@ -843,8 +1041,12 @@ def parse_clients(data):
 # --------------------------------------------------------------------------
 # Transactions
 # --------------------------------------------------------------------------
-def parse_transactions(data):
+def parse_transactions(data, mapping=None):
     """Read historic transactions. Returns a ParsedFile of rows ready to book.
+
+    `mapping` is the user's own {field: column index} from the mapping screen,
+    and when given it is AUTHORITATIVE — detection and the positional fallback
+    are both skipped, because the user has just told us where everything is.
 
     Each row carries the POSITIVE magnitude plus its Type; the sign convention
     and the VAT orientation are applied once, later, by finance.book_amounts —
@@ -854,7 +1056,9 @@ def parse_transactions(data):
     is only a fallback.
     """
     header, body = _table(data, _TXN_COLUMNS)
-    columns = _index(header, _TXN_COLUMNS)
+    explicit = mapping is not None
+    columns = (_index(header, _TXN_COLUMNS) if not explicit
+               else apply_mapping(mapping, TRANSACTIONS, len(header)))
     if "date" not in columns:
         raise _missing_columns("κινήσεις", ("Ημερομηνία", "Πελάτης",
                                             "Είδος Κίνησης", "Συνολικό Ποσό"))
@@ -867,9 +1071,18 @@ def parse_transactions(data):
     # Positional fallback. Only when NONE of the three money columns was
     # recognised by name — a file naming any one of them is telling us where
     # its figures are, and guessing alongside that would be second-guessing
-    # the user rather than helping them.
+    # the user rather than helping them. Skipped entirely for an explicit
+    # mapping, for the same reason twice over.
+    if explicit and not {"amount", "net_amount"} & set(columns):
+        # Said at FILE level rather than once per row. The mapping screen
+        # blocks this already, so reaching here means the mapping was posted
+        # against a file that has since changed shape — and "map a total or a
+        # net column" is a far more useful answer than four hundred identical
+        # "λείπει το ποσό" lines.
+        raise _missing_columns("κινήσεις", ("Συνολικό Ποσό", "Καθαρό Ποσό"))
+
     guessed = None
-    if not {"amount", "net_amount", "vat_amount"} & set(columns):
+    if not explicit and not {"amount", "net_amount", "vat_amount"} & set(columns):
         guessed = find_amount_column(header, body, set(columns.values()))
         if guessed is None:
             raise _missing_columns("κινήσεις", ("Ημερομηνία", "Πελάτης",
@@ -952,6 +1165,12 @@ def parse_transactions(data):
             continue
 
         kind = txn_type(value("type"))
+        if kind is None and payment_status(value("status")) == "outstanding":
+            # A file with no Είδος Κίνησης but a Κατάσταση of "Εκκρεμεί" is
+            # telling us this row is unpaid, which is exactly what a
+            # Χρεωστούμενο is. Not a guess, so no warning. The settled state
+            # says nothing about direction and deliberately does not land here.
+            kind = finance.DEBT_TYPE
         if kind is None:
             # No usable Type: fall back to the amount's own sign, which is how
             # a great many legacy exports encode direction in the first place.

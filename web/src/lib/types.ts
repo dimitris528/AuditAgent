@@ -228,6 +228,37 @@ export interface BulkResultPayload {
 /** Which of the two importers a file is headed for. */
 export type ImportKind = "clients" | "transactions";
 
+/** One row of the mapping screen — an app field waiting for a file column. */
+export interface ImportField {
+  key: string;
+  label: string;
+  required: boolean;
+  hint: string;
+  /** An either/or set: at least one field sharing a group must be mapped.
+   *  A transaction needs SOME way to name its client and SOME figure to book,
+   *  but either column of each pair will do. */
+  group?: string;
+}
+
+/** {field key: column index}. Index rather than heading, because a file may
+ *  legitimately carry the same heading twice. */
+export type ImportMapping = Record<string, number>;
+
+/** server/imports.py → analyze(). Step one of a mapped import: the file's
+ *  shape, and the mapping the server would have chosen on its own. */
+export interface ImportAnalysis {
+  kind: ImportKind;
+  /** Every column, in order. Blank headings are named "Στήλη N" so the
+   *  dropdown is not a list of identical empty options. */
+  headers: string[];
+  /** The first few real rows, so a column can be identified by what it
+   *  CONTAINS rather than only by what it is called. */
+  sample: string[][];
+  mapping: ImportMapping;
+  fields: ImportField[];
+  rows: number;
+}
+
 /** One row the importer had something to say about. `row` is the number the
  *  user sees in Excel's own gutter, so "line 12" means line 12. */
 export interface ImportIssue {
