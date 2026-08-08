@@ -108,6 +108,30 @@ def qr_payload(secret, account):
     return quote(provisioning_uri(secret, account), safe="")
 
 
+def qr_svg(secret, account, scale=5):
+    """The provisioning URI as an inline SVG, or None if segno is absent.
+
+    Rendered HERE, on the server, and this is a security decision rather than
+    an implementation detail. The obvious alternative — pointing an <img> at a
+    public QR-generating service — puts the TOTP shared secret in a third
+    party's URL, their access logs, and any cache between here and there. The
+    secret is the whole factor; it does not leave this process.
+
+    SVG rather than PNG so it stays sharp at any size and needs no encoding
+    round trip, and inline (no XML declaration) so it can be dropped straight
+    into the page. Black on white regardless of theme: a scanner wants
+    contrast, and a QR code rendered in a dark theme's palette is one nobody's
+    phone can read.
+    """
+    try:
+        import segno
+    except ImportError:  # pragma: no cover - optional at runtime
+        return None
+    code = segno.make(provisioning_uri(secret, account), error="m")
+    return code.svg_inline(scale=scale, border=2, dark="#000000",
+                           light="#ffffff")
+
+
 def verify_code(secret, code):
     """True when `code` is a live TOTP for `secret`.
 

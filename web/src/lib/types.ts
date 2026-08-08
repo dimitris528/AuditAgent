@@ -202,6 +202,38 @@ export interface TransactionRow {
 
 export type DebtStatus = "overdue" | "due_soon" | "current" | "unknown";
 
+/** A browser the user has told us to stop challenging. */
+export interface TrustedDevice {
+  id: number;
+  /** The browser's user-agent, trimmed — enough to recognise, not a
+   *  fingerprint. */
+  label: string | null;
+  expires_at: string | null;
+  last_used_at: string | null;
+  created_at: string | null;
+}
+
+/** server/main.py → GET /api/v1/auth/mfa. */
+export interface MfaStatus {
+  /** False when the server has no TOTP support installed — the setup flow is
+   *  then hidden rather than offered as a screen that cannot finish. */
+  available: boolean;
+  enabled: boolean;
+  /** A secret was minted but never confirmed with a code. */
+  pending: boolean;
+  trust_days: number;
+  devices: TrustedDevice[];
+}
+
+/** What the enrolment screen needs. The QR is an inline SVG rendered by the
+ *  server — the secret never reaches a third-party QR service. */
+export interface MfaSetup {
+  secret: string;
+  otpauth_url: string;
+  qr_svg: string | null;
+  issuer: string;
+}
+
 /** A row a bulk action declined to touch, with the reason. */
 export interface BulkBlocked {
   id: number;

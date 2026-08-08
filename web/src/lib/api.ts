@@ -14,6 +14,8 @@ import type {
   ImportKind,
   ImportMapping,
   ImportSummary,
+  MfaSetup,
+  MfaStatus,
   ScanResult,
   SettlementResult,
 } from "./types";
@@ -208,6 +210,48 @@ export async function scanDocument(file: File): Promise<ScanResult> {
     body: form,
   });
   return unwrap(res, "Αποτυχία σάρωσης παραστατικού");
+}
+
+// --- Security settings ----------------------------------------------------
+export async function getMfaStatus(): Promise<MfaStatus> {
+  const res = await fetch(`/api/security/mfa`, { cache: "no-store" });
+  return unwrap(res, "Αποτυχία φόρτωσης ρυθμίσεων ασφαλείας");
+}
+
+/** Mint a secret and return the QR to scan. Turns NOTHING on — the factor
+ *  only takes effect once a code from it verifies. */
+export async function startMfaSetup(): Promise<MfaSetup> {
+  const res = await fetch(`/api/security/mfa/setup`, { method: "POST" });
+  return unwrap(res, "Αποτυχία έναρξης ρύθμισης");
+}
+
+export async function enableMfa(code: string): Promise<{ ok: boolean }> {
+  const res = await fetch(`/api/security/mfa/enable`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code }),
+  });
+  return unwrap(res, "Αποτυχία ενεργοποίησης");
+}
+
+/** Removing the factor takes the password back — see server MfaDisable for
+ *  why that rather than a code. */
+export async function disableMfa(password: string): Promise<{ ok: boolean }> {
+  const res = await fetch(`/api/security/mfa/disable`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password }),
+  });
+  return unwrap(res, "Αποτυχία απενεργοποίησης");
+}
+
+/** Omit `deviceId` to revoke every trusted device at once. */
+export async function revokeTrustedDevices(
+  deviceId?: number,
+): Promise<{ ok: boolean; revoked: number }> {
+  const qs = deviceId === undefined ? "" : `?device_id=${deviceId}`;
+  const res = await fetch(`/api/security/devices${qs}`, { method: "DELETE" });
+  return unwrap(res, "Αποτυχία ανάκλησης συσκευής");
 }
 
 /**

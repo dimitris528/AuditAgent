@@ -24,6 +24,12 @@ PyJWT==2.10.1              # JWT bearer auth (auth.py — `import jwt`)
 pyotp==2.9.0              # TOTP second factor (server/mfa.py). Native RFC 6238
                           # rather than Supabase MFA: this app mints its own
                           # tokens and never touches Supabase Auth.
+segno==1.6.1               # the enrolment QR, rendered SERVER-side. Pointing an
+                           # <img> at a public QR service would put the TOTP
+                           # secret in a third party's URL and access logs.
+redis==5.2.1               # shared rate-limit counters (server/middleware.py).
+                           # OPTIONAL: without REDIS_URL the limiter keeps its
+                           # window in memory, per process.
 stripe==15.4.0             # billing webhook signature check (server/webhooks.py)
 python-dotenv==1.1.1       # .env loading (config.py)
 email-validator==2.3.0     # pydantic EmailStr on the registration endpoint

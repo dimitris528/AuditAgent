@@ -546,6 +546,129 @@ def test_one_accounts_device_token_does_nothing_for_another(api, other):
         assert store.find_trusted_device(session, theirs, token) is not None
 
 
+# --- The settings screen's endpoints --------------------------------------
+@pytestmark_mfa
+def test_setup_returns_a_qr_rendered_by_this_server(api):
+    """Rendered here rather than by an <img> pointed at a public QR service,
+    which would put the TOTP secret in a third party's URL and access logs."""
+    setup = api.post("/api/v1/auth/mfa/setup").json()
+    assert setup["otpauth_url"].startswith("otpauth://totp/")
+    assert setup["secret"] in setup["otpauth_url"]
+    assert setup["qr_svg"] and setup["qr_svg"].lstrip().startswith("<svg")
+    # The secret is IN the QR, which is the point — and the QR came from us.
+    assert "http" not in setup["qr_svg"][:200].replace("http://www.w3.org", "")
+
+
+@pytestmark_mfa
+def test_setup_is_refused_once_the_factor_is_already_on(api):
+    secret = api.post("/api/v1/auth/mfa/setup").json()["secret"]
+    api.post("/api/v1/auth/mfa/enable", json={"code": _totp(secret)})
+    assert api.post("/api/v1/auth/mfa/setup").status_code == 409
+
+
+@pytestmark_mfa
+def test_enable_is_refused_before_a_secret_has_been_staged(api):
+    assert api.post("/api/v1/auth/mfa/enable",
+                    json={"code": "000000"}).status_code == 409
+
+
+@pytestmark_mfa
+def test_the_status_endpoint_reports_what_the_screen_renders(api):
+    before = api.get("/api/v1/auth/mfa").json()
+    assert before == {"available": True, "enabled": False, "pending": False,
+                      "trust_days": mfa.TRUST_DAYS, "devices": []}
+
+    secret = api.post("/api/v1/auth/mfa/setup").json()["secret"]
+    assert api.get("/api/v1/auth/mfa").json()["pending"] is True
+
+    api.post("/api/v1/auth/mfa/enable", json={"code": _totp(secret)})
+    after = api.get("/api/v1/auth/mfa").json()
+    assert (after["enabled"], after["pending"]) == (True, False)
+
+
+@pytestmark_mfa
+def test_the_password_removes_the_factor(api):
+    """The primary proof, and the one that keeps a lost phone from bricking
+    the account: this build has no backup codes, so a code-only disable would
+    mean 2FA could never be removed by anybody."""
+    secret = api.post("/api/v1/auth/mfa/setup").json()["secret"]
+    api.post("/api/v1/auth/mfa/enable", json={"code": _totp(secret)})
+
+    res = api.post("/api/v1/auth/mfa/disable",
+                   json={"password": "correct-horse-battery"})
+    assert res.status_code == 200, res.text
+    assert api.get("/api/v1/auth/mfa").json()["enabled"] is False
+
+
+@pytestmark_mfa
+def test_a_wrong_password_does_not_remove_the_factor(api):
+    secret = api.post("/api/v1/auth/mfa/setup").json()["secret"]
+    api.post("/api/v1/auth/mfa/enable", json={"code": _totp(secret)})
+
+    res = api.post("/api/v1/auth/mfa/disable", json={"password": "not-it"})
+    assert res.status_code == 401
+    assert api.get("/api/v1/auth/mfa").json()["enabled"] is True
+
+
+@pytestmark_mfa
+def test_disable_needs_some_proof_at_all(api):
+    """A live session on a borrowed laptop must not be enough on its own."""
+    secret = api.post("/api/v1/auth/mfa/setup").json()["secret"]
+    api.post("/api/v1/auth/mfa/enable", json={"code": _totp(secret)})
+    assert api.post("/api/v1/auth/mfa/disable", json={}).status_code == 422
+
+
+@pytestmark_mfa
+def test_the_disable_error_does_not_say_which_proof_was_wrong(api):
+    """One message for both, so the response cannot be used to work out which
+    of the two was the one worth guessing at."""
+    secret = api.post("/api/v1/auth/mfa/setup").json()["secret"]
+    api.post("/api/v1/auth/mfa/enable", json={"code": _totp(secret)})
+
+    by_password = api.post("/api/v1/auth/mfa/disable",
+                           json={"password": "wrong"}).json()["detail"]
+    by_code = api.post("/api/v1/auth/mfa/disable",
+                       json={"code": "000000"}).json()["detail"]
+    assert by_password == by_code
+
+
+@pytestmark_mfa
+def test_revoking_one_device_leaves_the_others(api):
+    from server import database
+
+    with database.session_scope() as session:
+        row = store.get_user_by_username(session, "tester")
+        first, second = mfa.new_device_token(), mfa.new_device_token()
+        store.trust_device(session, row, first, mfa.trust_expiry(), label="ένα")
+        store.trust_device(session, row, second, mfa.trust_expiry(), label="δύο")
+
+    devices = api.get("/api/v1/auth/mfa").json()["devices"]
+    assert len(devices) == 2
+
+    res = api.delete(f"/api/v1/auth/mfa/devices?device_id={devices[0]['id']}")
+    assert res.json()["revoked"] == 1
+    remaining = api.get("/api/v1/auth/mfa").json()["devices"]
+    assert [d["id"] for d in remaining] == [devices[1]["id"]]
+
+
+@pytestmark_mfa
+def test_one_tenant_cannot_revoke_anothers_device(api, other):
+    from server import database
+
+    with database.session_scope() as session:
+        theirs = store.get_user_by_username(session, "outsider")
+        store.trust_device(session, theirs, mfa.new_device_token(),
+                           mfa.trust_expiry(), label="δικό τους")
+        device_id = store.list_trusted_devices(session, theirs)[0].id
+
+    assert api.delete(
+        f"/api/v1/auth/mfa/devices?device_id={device_id}").json()["revoked"] == 0
+
+    with database.session_scope() as session:
+        theirs = store.get_user_by_username(session, "outsider")
+        assert len(store.list_trusted_devices(session, theirs)) == 1
+
+
 @pytestmark_mfa
 def test_a_device_is_labelled_with_the_browser_not_the_proxy(api):
     """Found by running it: the backend sees the Next route handler's own

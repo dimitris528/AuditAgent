@@ -196,6 +196,24 @@ class MfaCode(BaseModel):
     code: str = Field(..., min_length=6, max_length=10)
 
 
+class MfaDisable(BaseModel):
+    """Removing the second factor takes the FIRST one back.
+
+    Password rather than a current code, and the change is deliberate. A code
+    proves possession of the authenticator, which sounds stronger — until the
+    phone is lost, at which point the account can never have 2FA removed by
+    anybody and is bricked, because this build has no backup codes. The
+    password is the credential the user can always recover through the reset
+    flow, so requiring it closes that trap while still meaning a live session
+    on a borrowed laptop is not enough on its own.
+
+    `code` stays accepted as an alternative for anyone who would rather prove
+    it that way.
+    """
+    password: str | None = Field(default=None, max_length=200)
+    code: str | None = Field(default=None, max_length=10)
+
+
 class ForgotPasswordRequest(BaseModel):
     email: EmailStr
 
@@ -652,6 +670,9 @@ def setup_mfa(user: str = Depends(get_current_user)):
             return {
                 "secret": secret,
                 "otpauth_url": mfa.provisioning_uri(secret, tenant.email),
+                # Rendered server-side — the secret never reaches a third-party
+                # QR service. See mfa.qr_svg.
+                "qr_svg": mfa.qr_svg(secret, tenant.email),
                 "issuer": mfa.ISSUER,
             }
     except HTTPException:
@@ -685,19 +706,37 @@ def enable_mfa(body: MfaCode, user: str = Depends(get_current_user)):
 
 
 @app.post("/api/v1/auth/mfa/disable")
-def disable_mfa(body: MfaCode, user: str = Depends(get_current_user)):
-    """Turn 2FA off. Requires a current code — holding a live session is not
-    enough to remove the factor protecting it, or a borrowed laptop would be."""
+def disable_mfa(body: MfaDisable, user: str = Depends(get_current_user)):
+    """Turn 2FA off, on proof of the password (or a current code).
+
+    Holding a live session is not enough to remove the factor protecting it,
+    or a borrowed laptop would be. See MfaDisable for why the password is the
+    primary proof rather than a code.
+    """
     _require_db()
+    if not body.password and not body.code:
+        raise HTTPException(
+            status_code=422,
+            detail="Απαιτείται ο κωδικός πρόσβασης για την απενεργοποίηση.")
     try:
         with database.session_scope() as session:
             tenant = _resolve_user(session, user)
             if not tenant.mfa_enabled:
                 return {"ok": True, "enabled": False}
-            if not mfa.verify_code(tenant.mfa_secret, body.code):
+
+            proved = False
+            if body.password:
+                proved = passwords.verify_password(tenant.password_hash,
+                                                   body.password)
+            if not proved and body.code:
+                proved = mfa.verify_code(tenant.mfa_secret, body.code)
+            if not proved:
+                # One message for both, so the response cannot be used to
+                # confirm which of the two was the correct one to send.
                 raise HTTPException(
                     status_code=401,
-                    detail="Ο κωδικός επαλήθευσης δεν είναι σωστός.")
+                    detail="Ο κωδικός πρόσβασης δεν είναι σωστός.")
+
             # Clears the secret AND every trusted device — see set_mfa_enabled.
             store.set_mfa_enabled(session, tenant, False)
             return {"ok": True, "enabled": False}

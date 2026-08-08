@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { CreditCard, LayoutDashboard, PieChart } from "lucide-react";
+import { CreditCard, LayoutDashboard, PieChart, ShieldCheck } from "lucide-react";
 import { clsx } from "@/lib/clsx";
 
 /**
@@ -22,6 +22,10 @@ const ITEMS = [
   { href: "/", label: "Πίνακας Ελέγχου", icon: LayoutDashboard },
   { href: "/summary", label: "Σύνοψη", icon: PieChart },
   { href: "/billing", label: "Συνδρομή", icon: CreditCard },
+  // Same reasoning as Συνδρομή: one destination, one entry point, in the row
+  // rather than tucked inside a menu. 2FA is not a setting people go looking
+  // for unless they can see it exists.
+  { href: "/settings/security", label: "Ασφάλεια", icon: ShieldCheck },
 ] as const;
 
 export function MainNav() {

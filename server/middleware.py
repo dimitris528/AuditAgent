@@ -9,8 +9,8 @@ is not a hostile request — it is a new route added six months from now that
 ships without its guard and is silently public until someone notices.
 """
 
-import fnmatch
 import os
+import secrets
 import time
 from collections import deque
 
@@ -150,40 +150,31 @@ def bucket_for(path):
     return best
 
 
-class RateLimitMiddleware(BaseHTTPMiddleware):
-    """A sliding window per (client, bucket), held in memory.
+#: Where the counters live. Set REDIS_URL and every instance shares one
+#: window; leave it unset and each process keeps its own.
+REDIS_URL = (os.getenv("REDIS_URL") or "").strip()
 
-    Worth being explicit about the limits of this, because a rate limiter that
-    is trusted further than it works is worse than none:
 
-      * it is PER PROCESS. Two web workers mean two windows and twice the
-        effective limit. Correct enforcement across instances needs shared
-        state (Redis), and this is the version that works with no new
-        infrastructure — which is the difference between having it and not.
-      * the client is identified by IP, taken from X-Forwarded-For where a
-        proxy set one. Behind a NAT that groups people together; the limits
-        above are set high enough that ordinary shared egress is unaffected.
+class MemoryWindow:
+    """A sliding window per key, in this process and no further.
 
-    What it does reliably is stop one host hammering login or replaying an
-    import a thousand times, which is the threat it is here for.
+    The fallback, and an honest one: two web workers mean two windows and twice
+    the effective limit, which is the whole reason the Redis backend below
+    exists. It still does the thing it is mainly here for — stopping one host
+    hammering login from one process — and it needs no infrastructure at all,
+    which is the difference between having a limiter on a small deployment and
+    not having one.
     """
 
-    def __init__(self, app):
-        super().__init__(app)
-        # {(client, bucket): deque[timestamp]}. Trimmed on every touch, so it
-        # cannot grow without bound for a caller that stops calling.
+    name = "memory"
+
+    def __init__(self):
+        # {key: deque[timestamp]}. Trimmed on every touch, so it cannot grow
+        # without bound for a caller that stops calling.
         self._hits = {}
 
-    @staticmethod
-    def client_key(request):
-        forwarded = request.headers.get("x-forwarded-for", "")
-        if forwarded:
-            # The left-most entry is the original client; everything after it
-            # was appended by proxies.
-            return forwarded.split(",")[0].strip()
-        return request.client.host if request.client else "unknown"
-
-    def _allow(self, key, limit, window, now):
+    async def hit(self, key, limit, window):
+        now = time.monotonic()
         seen = self._hits.setdefault(key, deque())
         cutoff = now - window
         while seen and seen[0] <= cutoff:
@@ -191,9 +182,135 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if len(seen) >= limit:
             return False, int(seen[0] + window - now) + 1
         seen.append(now)
-        if not seen:
-            self._hits.pop(key, None)
         return True, 0
+
+
+class RedisWindow:
+    """The same sliding window, in Redis, shared by every instance.
+
+    A sorted set per key: drop what has aged out, count what is left, add this
+    request. Run in one pipeline, so the four commands make a single round
+    trip. The window is genuinely sliding rather than a fixed bucket, which
+    matters at the edges — a fixed window lets twice the limit through across
+    a boundary, and a login limiter that can be doubled by waiting for the
+    minute to tick is not much of a limiter.
+
+    Small races remain (two instances can both read a count of limit-1 and
+    both admit a request). Left alone deliberately: closing them needs a Lua
+    script and a watch loop to shave one request off a limit of ten, and the
+    cost of that complexity is worse than the overrun.
+
+    Falls back to memory on ANY Redis failure — see `_fail_open`. A limiter
+    that 500s when its store blips has turned a defence into an outage.
+    """
+
+    name = "redis"
+
+    def __init__(self, url):
+        self.url = url
+        self._client = None
+        self._fallback = MemoryWindow()
+        self.degraded = False
+
+    def _connect(self):
+        if self._client is None:
+            import redis.asyncio as redis  # imported late: optional dependency
+
+            # decode_responses off: the members written are timestamps and are
+            # never read back as text.
+            self._client = redis.from_url(self.url, socket_timeout=1,
+                                          socket_connect_timeout=1)
+        return self._client
+
+    async def hit(self, key, limit, window):
+        import time as _time
+
+        now = _time.time()          # wall clock: shared across instances,
+                                    # unlike monotonic(), which is per process
+        redis_key = f"ratelimit:{key}"
+        try:
+            client = self._connect()
+            pipe = client.pipeline(transaction=True)
+            pipe.zremrangebyscore(redis_key, 0, now - window)
+            pipe.zcard(redis_key)
+            # A random member, not the timestamp: two requests in the same
+            # microsecond would otherwise be one member and one of them would
+            # not be counted.
+            pipe.zadd(redis_key, {f"{now}:{secrets.token_hex(4)}": now})
+            pipe.expire(redis_key, int(window) + 1)
+            _, used, _, _ = await pipe.execute()
+        except Exception as exc:
+            return await self._fail_open(key, limit, window, exc)
+
+        self.degraded = False
+        if used >= limit:
+            return False, int(window)
+        return True, 0
+
+    async def _fail_open(self, key, limit, window, exc):
+        """Redis is unreachable. Meter in memory and carry on.
+
+        Logged once per outage rather than per request: a Redis that is down
+        is down for every request, and a line each would bury everything else
+        in the log at exactly the moment somebody is reading it.
+        """
+        if not self.degraded:
+            self.degraded = True
+            print(f"[WARN] Rate limiter falling back to in-memory counters: "
+                  f"{type(exc).__name__}: {exc}")
+        # Drop the client so the next request reconnects rather than reusing a
+        # socket that has already failed.
+        self._client = None
+        return await self._fallback.hit(key, limit, window)
+
+
+def make_backend(url=None):
+    """The counter store: Redis when a URL is configured, memory otherwise."""
+    url = REDIS_URL if url is None else url
+    return RedisWindow(url) if url else MemoryWindow()
+
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    """Meters requests per (identity, bucket).
+
+    Identity is the AUTHENTICATED USER where there is one and the IP
+    otherwise, and the split matters in both directions. Metering an
+    authenticated caller by IP punishes everyone behind one office NAT for the
+    heaviest user among them; metering login by user id is impossible, because
+    a brute-force attempt has no user id yet — that is precisely what it is
+    trying to find. So each request is metered by whichever it actually has.
+
+    The token is read but NOT verified here: this runs before the auth gate,
+    and a forged token is only a grouping key. The worst it buys is being
+    metered as somebody else, which is not an escalation — and an invalid
+    token gets turned away by the gate a few lines later anyway.
+    """
+
+    def __init__(self, app, backend=None):
+        super().__init__(app)
+        self.backend = backend or make_backend()
+
+    @staticmethod
+    def client_ip(request):
+        forwarded = request.headers.get("x-forwarded-for", "")
+        if forwarded:
+            # The left-most entry is the original client; everything after it
+            # was appended by proxies.
+            return forwarded.split(",")[0].strip()
+        return request.client.host if request.client else "unknown"
+
+    @classmethod
+    def identity(cls, request):
+        header = request.headers.get("authorization") or ""
+        scheme, _, token = header.partition(" ")
+        if scheme.lower() == "bearer" and token.strip():
+            try:
+                sub = auth.decode_token(token.strip()).get("sub")
+                if sub:
+                    return f"u:{sub}"
+            except Exception:
+                pass
+        return f"ip:{cls.client_ip(request)}"
 
     async def dispatch(self, request, call_next):
         if not ENABLED or request.method == "OPTIONS":
@@ -206,12 +323,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         limit, window = LIMITS[bucket]
-        key = (self.client_key(request), bucket)
-        allowed, retry_after = self._allow(key, limit, window, time.monotonic())
+        key = f"{bucket}:{self.identity(request)}"
+        allowed, retry_after = await self.backend.hit(key, limit, window)
         if not allowed:
             return JSONResponse(
                 {"detail": "Πάρα πολλές αιτήσεις. Δοκιμάστε ξανά σε λίγο."},
                 status_code=429,
-                headers={"Retry-After": str(retry_after)},
+                headers={"Retry-After": str(max(1, retry_after))},
             )
         return await call_next(request)
