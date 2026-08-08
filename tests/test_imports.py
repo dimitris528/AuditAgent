@@ -144,23 +144,28 @@ def test_vat_rates_are_read_as_fractions(written, expected):
 
 # --- Amount headings and the figures derived from them --------------------
 @pytest.mark.parametrize("heading", [
-    "Καθαρή Αξία", "Καθαρό Ποσό", "Καθαρό", "Καθαρά", "Προ Φ.Π.Α.",
-    "Net", "Net Amount", "Subtotal",
+    "Καθαρό", "Καθαρή Αξία", "Καθαρό Ποσό", "Καθαρή", "Καθαρά", "Net",
+    "Net Amount", "Subtotal", "Πριν ΦΠΑ", "Πριν Φ.Π.Α.", "Προ Φ.Π.Α.",
+    # Case, accents, trailing punctuation and stray spacing all fold away.
+    "ΚΑΘΑΡΗ ΑΞΙΑ", "καθαρη αξια:", "  Net Amount  ",
 ])
 def test_every_net_heading_is_recognised(heading):
     assert imports._TXN_COLUMNS[imports._head(heading)][0] == "net_amount"
 
 
 @pytest.mark.parametrize("heading", [
-    "Συνολικό Ποσό", "Σύνολο", "Μεικτό", "Μικτό", "Μεικτή Αξία", "Ποσό",
-    "Πληρωτέο", "Gross", "Total", "Amount",
+    "Σύνολο", "Συνολικό Ποσό", "Μεικτό", "Μικτό", "Πληρωτέο", "Gross",
+    "Total", "Total Amount", "Ποσό", "Αξία", "Μεικτή Αξία",
+    "ΣΥΝΟΛΙΚΟ ΠΟΣΟ", "σύνολο.", " Total ",
 ])
 def test_every_gross_heading_is_recognised(heading):
     assert imports._TXN_COLUMNS[imports._head(heading)][0] == "amount"
 
 
-@pytest.mark.parametrize("heading", ["ΦΠΑ", "Φ.Π.Α.", "Ποσό Φ.Π.Α.", "VAT",
-                                     "VAT Amount", "Tax"])
+@pytest.mark.parametrize("heading", [
+    "ΦΠΑ", "Φ.Π.Α.", "VAT", "Φόρος", "Tax", "Ποσό Φ.Π.Α.", "VAT Amount",
+    "φπα", "Φ.Π.Α. ", "φόρος",
+])
 def test_every_vat_heading_is_recognised(heading):
     assert imports._TXN_COLUMNS[imports._head(heading)][0] == "vat_amount"
 
@@ -297,6 +302,120 @@ def test_an_xlsx_workbook_reads_the_same_as_the_csv():
     assert row["amount"] == 1240.0
     assert row["vat_rate"] == 0.24
     assert row["doc_type"] == finance.DOC_SALES_INVOICE
+
+
+def test_the_header_is_found_under_a_title_row():
+    """A real export leads with a title and a blank line. Taking the first
+    non-empty row means scoring "ΚΙΝΗΣΕΙΣ 2026" as the header — nothing
+    matches, and the file is refused for having a title."""
+    parsed = imports.parse_transactions(xlsx_bytes([
+        ("ΚΙΝΗΣΕΙΣ 2026", "", "", ""),
+        ("", "", "", ""),
+        ("Ημερομηνία", "Πελάτης", "Είδος Κίνησης", "Σύνολο"),
+        (dt.date(2026, 1, 15), "Νησίδα Café", "Έσοδο", 1240.0),
+    ]))
+    assert parsed.errors == []
+    assert parsed.rows[0]["amount"] == 1240.0
+
+
+def test_the_data_sheet_is_found_behind_a_cover_sheet():
+    """Sheet 0 is routinely a cover or parameters tab. Reading it
+    unconditionally refuses a perfectly good workbook."""
+    from openpyxl import Workbook
+
+    book = Workbook()
+    cover = book.active
+    cover.title = "Έκθεση"
+    cover.append(["Ημερομηνία έκδοσης", dt.date(2026, 1, 1)])
+
+    sheet = book.create_sheet("Κινήσεις")
+    sheet.append(["Ημερομηνία", "Πελάτης", "Είδος Κίνησης", "Σύνολο"])
+    sheet.append([dt.date(2026, 1, 15), "Νησίδα Café", "Έσοδο", 1240.0])
+
+    buffer = io.BytesIO()
+    book.save(buffer)
+
+    parsed = imports.parse_transactions(buffer.getvalue())
+    assert parsed.errors == []
+    assert parsed.rows[0]["amount"] == 1240.0
+
+
+# --- The positional fallback ----------------------------------------------
+def test_an_unnamed_money_column_is_found_by_position():
+    """Last resort, for a file whose amount heading matches nothing at all.
+    Better than refusing the upload — but only with the warning below."""
+    parsed = imports.parse_transactions(xlsx_bytes([
+        ("Ημερομηνία", "Πελάτης", "Είδος Κίνησης", "Στήλη Δ"),
+        (dt.date(2026, 1, 15), "Νησίδα Café", "Έσοδο", 1240.0),
+    ]))
+    assert parsed.errors == []
+    assert parsed.rows[0]["amount"] == 1240.0
+    assert parsed.rows[0]["vat_rate"] == finance.DEFAULT_VAT_RATE
+
+
+def test_a_guessed_amount_column_is_always_announced():
+    """Reading an unnamed column as money is a guess about somebody's books.
+    The one thing worse than guessing wrong is guessing wrong quietly."""
+    parsed = imports.parse_transactions(xlsx_bytes([
+        ("Ημερομηνία", "Πελάτης", "Είδος Κίνησης", "Στήλη Δ"),
+        (dt.date(2026, 1, 15), "Νησίδα Café", "Έσοδο", 1240.0),
+    ]))
+    assert len(parsed.warnings) == 1
+    assert "Στήλη Δ" in parsed.warnings[0]["message"]
+
+
+def test_the_fallback_does_not_fire_when_any_money_column_is_named():
+    """A file naming even one of the three is telling us where its figures
+    are; guessing alongside that is second-guessing the user."""
+    parsed = imports.parse_transactions(xlsx_bytes([
+        ("Ημερομηνία", "Πελάτης", "Είδος Κίνησης", "Άσχετο", "Σύνολο"),
+        (dt.date(2026, 1, 15), "Νησίδα Café", "Έσοδο", 999.0, 1240.0),
+    ]))
+    assert parsed.warnings == []
+    assert parsed.rows[0]["amount"] == 1240.0
+
+
+@pytest.mark.parametrize("heading,identifier", [
+    ("ΑΦΜ κωδικός", 94127562),      # caught by the heading
+    ("Στοιχείο", 123456789),        # caught by the shape: 9 whole digits
+])
+def test_the_fallback_never_reads_an_identifier_as_money(heading, identifier):
+    """Without both guards a column of ΑΦΜ numbers becomes a €94 million
+    transaction — wrong in a way the warning does not undo."""
+    parsed = imports.parse_transactions(xlsx_bytes([
+        ("Ημερομηνία", "Πελάτης", heading, "Είδος Κίνησης", "Ποσά"),
+        (dt.date(2026, 1, 15), "Νησίδα Café", identifier, "Έσοδο", 1240.0),
+    ]))
+    assert parsed.rows[0]["amount"] == 1240.0
+
+
+@pytest.mark.parametrize("heading", [
+    "Τηλέφωνο", "ΑΦΜ κωδικός", "Αριθμός Παραστατικού", "Έτος", "ΕΤΟΣ",
+    "Ποσοστό",
+])
+def test_identifier_headings_are_matched_word_by_word(heading):
+    """Two traps in one guard, both silent.
+
+    Substring matching puts "τηλ" (phone) inside "στήλη" (column), so a column
+    headed "Στήλη Δ" was read as a phone number and the only money column in
+    the file was refused. And a token typed with a final sigma never matches
+    anything, because casefold folds ς onto σ — "Έτος" normalises to "ετοσ".
+    """
+    assert imports._named_like_identifier(heading) is True
+
+
+@pytest.mark.parametrize("heading", ["Στήλη Δ", "Σύνολο", "Καθαρή", "Ποσό",
+                                     "Value1", "Αξία"])
+def test_amount_headings_are_not_mistaken_for_identifiers(heading):
+    assert imports._named_like_identifier(heading) is False
+
+
+def test_a_file_with_no_numeric_column_at_all_is_still_refused():
+    with pytest.raises(imports.ImportFileError):
+        imports.parse_transactions(xlsx_bytes([
+            ("Ημερομηνία", "Πελάτης", "Είδος Κίνησης", "Σχόλιο"),
+            (dt.date(2026, 1, 15), "Νησίδα Café", "Έσοδο", "χωρίς ποσό"),
+        ]))
 
 
 def test_headers_are_matched_through_their_aliases():

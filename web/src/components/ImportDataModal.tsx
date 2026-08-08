@@ -141,8 +141,29 @@ function Summary({ kind, summary }: { kind: ImportKind; summary: ImportSummary }
   const copy = COPY[kind];
   const nothing = summary.imported === 0;
 
+  // Rows landed, and every one of them is worth nothing. That is not a
+  // plausible book — it is a file whose amount column was never found, and
+  // without saying so the import looks like a clean success right up until the
+  // dashboard shows zeros and the user has no idea which of the two lied.
+  const noAmounts =
+    kind === "transactions" &&
+    summary.imported > 0 &&
+    summary.total_amount === 0;
+
   return (
     <div className="space-y-4">
+      {noAmounts ? (
+        <div
+          role="alert"
+          className="flex items-start gap-2.5 rounded-xl border border-amber-300 bg-amber-50 p-3 dark:border-amber-500/40 dark:bg-amber-500/10"
+        >
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+          <p className="text-xs font-medium text-amber-800 dark:text-amber-200">
+            Προσοχή: Δεν εντοπίστηκαν στήλες ποσών. Βεβαιωθείτε ότι το αρχείο
+            περιλαμβάνει επικεφαλίδα «Σύνολο» ή «Καθαρό».
+          </p>
+        </div>
+      ) : null}
       <div
         className={clsx(
           "flex items-start gap-3 rounded-xl p-4",

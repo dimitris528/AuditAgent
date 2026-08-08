@@ -192,18 +192,19 @@ _TXN_COLUMNS = _aliases({
     # The GROSS (VAT-inclusive) total — what the row is stored as.
     "amount": ("Συνολικό Ποσό", "Σύνολο", "Συνολική Αξία", "Ποσό", "Μεικτό",
                "Μικτό", "Μεικτή Αξία", "Μικτή Αξία", "Τελικό Ποσό",
-               "Πληρωτέο", "Total", "Total Amount", "Gross", "Gross Amount",
-               "Amount"),
-    "net_amount": ("Καθαρή Αξία", "Καθαρό Ποσό", "Καθαρό", "Καθαρά",
-                   "Αξία Χωρίς Φ.Π.Α.", "Προ Φ.Π.Α.", "Net", "Net Amount",
-                   "Net Value", "Subtotal"),
+               "Πληρωτέο", "Πληρωτέο Ποσό", "Total", "Total Amount", "Gross",
+               "Gross Amount", "Grand Total", "Amount"),
+    "net_amount": ("Καθαρή Αξία", "Καθαρό Ποσό", "Καθαρό", "Καθαρή", "Καθαρά",
+                   "Αξία Χωρίς Φ.Π.Α.", "Χωρίς Φ.Π.Α.", "Προ Φ.Π.Α.",
+                   "Πριν Φ.Π.Α.", "Net", "Net Amount", "Net Value",
+                   "Subtotal", "Sub Total"),
     # Listed BEFORE vat_amount on purpose. _aliases keeps the first field a
     # heading is claimed by, and the two are told apart only by _head's `pct`
     # suffix — "Φ.Π.Α." is euros, "Φ.Π.Α. %" is a rate.
     "vat_rate": ("Συντ. Φ.Π.Α.", "Συντελεστής Φ.Π.Α.", "Συντελεστής",
                  "Φ.Π.Α. %", "ΦΠΑ%", "VAT Rate", "VAT %", "Rate"),
-    "vat_amount": ("Φ.Π.Α.", "ΦΠΑ", "Ποσό Φ.Π.Α.", "Αξία Φ.Π.Α.", "VAT",
-                   "VAT Amount", "Tax", "Tax Amount"),
+    "vat_amount": ("Φ.Π.Α.", "ΦΠΑ", "Ποσό Φ.Π.Α.", "Αξία Φ.Π.Α.", "Φόρος",
+                   "VAT", "VAT Amount", "Tax", "Tax Amount"),
     "description": ("Περιγραφή", "Αιτιολογία", "Σχόλια", "Description",
                     "Notes", "Memo"),
     "due_date": ("Ημερομηνία Λήξης", "Λήξη", "Προθεσμία", "Due Date",
@@ -274,10 +275,24 @@ def _read_csv(data):
         raise ImportFileError("Το αρχείο είναι κενό.")
     first = text.splitlines()[0]
     reader = csv.reader(io.StringIO(text), delimiter=_delimiter(first))
-    return [row for row in reader]
+    return [[row for row in reader]]
+
+
+# How many worksheets are considered, and how far down each one the header is
+# looked for. Both are bounds on work rather than judgements about real files:
+# the header is in the first handful of rows or it is not a header, and a
+# workbook with a dozen tabs has already made its point.
+MAX_SHEETS = 12
+_HEADER_SEARCH_ROWS = 12
 
 
 def _read_xlsx(data):
+    """Every worksheet as a list of row lists.
+
+    ALL of them, not just the first: an export routinely leads with a cover or
+    parameters tab, and reading sheet 0 unconditionally means refusing a
+    perfectly good workbook because page one says "Έκθεση".
+    """
     try:
         from openpyxl import load_workbook
     except ImportError:  # pragma: no cover - openpyxl is a hard requirement
@@ -292,26 +307,56 @@ def _read_xlsx(data):
     except Exception as exc:
         raise ImportFileError(f"Το αρχείο Excel δεν μπόρεσε να διαβαστεί ({exc}).")
     try:
-        sheet = book.worksheets[0] if book.worksheets else None
-        if sheet is None:
+        if not book.worksheets:
             raise ImportFileError("Το αρχείο Excel δεν περιέχει φύλλα εργασίας.")
-        # Capped one row past the limit so "too many rows" is still detectable
-        # without materialising a runaway sheet.
-        rows = []
-        for values in sheet.iter_rows(values_only=True):
-            rows.append(list(values))
-            if len(rows) > MAX_ROWS + 1:
-                break
-        return rows
+        sheets = []
+        for sheet in book.worksheets[:MAX_SHEETS]:
+            rows = []
+            for values in sheet.iter_rows(values_only=True):
+                rows.append(list(values))
+                # Capped one row past the limit so "too many rows" is still
+                # detectable without materialising a runaway sheet.
+                if len(rows) > MAX_ROWS + 1:
+                    break
+            sheets.append(rows)
+        return sheets
     finally:
         book.close()
 
 
-def _table(data):
+def _score_header(rows, aliases):
+    """(index of the likeliest header row, how many fields it matched).
+
+    The header is the row that RECOGNISES the most columns, not the first row
+    with anything in it. Real exports lead with a title, a date stamp and a
+    blank line, and taking the first non-empty row means scoring "ΚΙΝΗΣΕΙΣ
+    2026" as the header — zero columns matched, and a file refused for having
+    a title.
+
+    Ties go to the earliest row, so a data row that happens to echo a heading
+    cannot outrank the heading above it.
+    """
+    best_at, best_score = None, 0
+    for index, row in enumerate(rows[:_HEADER_SEARCH_ROWS]):
+        if not any(_cell(value) for value in row):
+            continue
+        score = len(_index(row, aliases))
+        if score > best_score:
+            best_at, best_score = index, score
+    return best_at, best_score
+
+
+def _table(data, aliases):
     """(header row, data rows) from CSV or XLSX bytes.
 
-    Leading blank lines are skipped: an export that starts with a title row and
-    a gap is common enough, and the first row with content is the header.
+    Picks the sheet AND the header row by how many known columns each one
+    recognises, so a workbook whose data sits behind a cover tab, or under a
+    title and a blank line, reads the same as a clean one.
+
+    Falls back to the first non-empty row of the first sheet when nothing
+    matches anywhere — that path exists so the caller still raises its own
+    "these columns are required" error, which names what is missing, rather
+    than a vaguer one from here.
     """
     if not data:
         raise ImportFileError("Δεν στάλθηκε αρχείο.")
@@ -323,11 +368,21 @@ def _table(data):
         raise ImportFileError(
             "Τα παλιά αρχεία .xls δεν υποστηρίζονται. Αποθηκεύστε το ως .xlsx "
             "ή ως CSV και δοκιμάστε ξανά.")
-    rows = _read_xlsx(data) if data.startswith(_XLSX_MAGIC) else _read_csv(data)
+    sheets = _read_xlsx(data) if data.startswith(_XLSX_MAGIC) else _read_csv(data)
 
-    for position, row in enumerate(rows):
-        if any(_cell(value) for value in row):
-            return row, rows[position + 1:]
+    best = None
+    for rows in sheets:
+        at, score = _score_header(rows, aliases)
+        if at is not None and (best is None or score > best[0]):
+            best = (score, rows, at)
+    if best is not None:
+        _score, rows, at = best
+        return rows[at], rows[at + 1:]
+
+    for rows in sheets:
+        for position, row in enumerate(rows):
+            if any(_cell(value) for value in row):
+                return row, rows[position + 1:]
     raise ImportFileError("Το αρχείο δεν περιέχει δεδομένα.")
 
 
@@ -552,6 +607,101 @@ def _snap_rate(rate):
     return nearest if abs(nearest - rate) <= _RATE_TOLERANCE else round(rate, 4)
 
 
+# How many data rows the positional fallback inspects before deciding a column
+# holds money. Enough to be sure, few enough that a 5000-row file does not pay
+# for the guess twice over.
+_SNIFF_ROWS = 25
+
+# An identifier typed as a NUMBER is the thing most likely to be mistaken for
+# money by anything that just looks for numeric values — a Greek ΑΦΜ is nine
+# digits, a phone number ten. Both are whole numbers with no cents, and a
+# transaction of ten million euro is not the case this product optimises for,
+# so "eight or more digits and no fractional part" separates the two cleanly.
+_IDENTIFIER_DIGITS = 8
+
+# Headings that say "this column is an identifier" even when the alias table
+# did not match them exactly — "ΑΦΜ κωδικός" is nobody's total. Listed as word
+# PREFIXES so Greek inflection ("κωδικός", "κωδικοί") is covered without an
+# entry each.
+#
+# Put through name_key here rather than trusted as typed, so both sides of the
+# comparison are normalised identically. Written literally, "έτος" would never
+# match anything: casefold maps the final sigma ς onto σ, so the heading
+# normalises to "ετοσ" while the token stayed "ετος" — the exact trap
+# server/text.py documents, and invisible on inspection.
+_IDENTIFIER_WORDS = tuple(name_key(word) for word in (
+    "αφμ", "afm", "τιν", "tin", "vatnumber", "κωδικ", "code", "τηλ", "phone",
+    "mobile", "αριθμ", "number", "έτος", "year", "ποσοστ", "percent",
+))
+
+
+def _looks_like_identifier(values):
+    return bool(values) and all(
+        float(v).is_integer() and len(str(int(abs(v)))) >= _IDENTIFIER_DIGITS
+        for v in values)
+
+
+def _named_like_identifier(heading):
+    """True when a heading names an identifier rather than an amount.
+
+    Matched word by word, NOT as a substring of the whole heading. The
+    substring form is wrong in a way that is easy to miss and hard to explain
+    afterwards: "τηλ" (phone) sits inside "στήλη" (column), so a column headed
+    "Στήλη Δ" was classified as a phone number and the fallback then refused
+    the only money column in the file.
+    """
+    words = name_key(heading).split()
+    return any(word.startswith(token)
+               for word in words for token in _IDENTIFIER_WORDS)
+
+
+def find_amount_column(header, body, taken):
+    """(index, heading) of the column that most likely holds the total, or None.
+
+    The last resort, used only when NO amount, net or VAT column could be
+    identified by name. Everything past that point is a guess, so the guess is
+    made as narrow as the evidence allows and is always reported to the user
+    (parse_transactions raises a warning naming the column it chose).
+
+    A column qualifies when every non-empty value in the sample parses as a
+    number. Columns already claimed by another field are excluded — the date
+    and the ΑΦΜ would otherwise be the first two numeric columns in a typical
+    sheet — and anything that still looks like an identifier is skipped, BY
+    HEADING and by shape. Without those two guards a column headed "ΑΦΜ
+    κωδικός", which the alias table does not match, reads as a €94 million
+    transaction: wrong, and wrong in a way the warning does not undo.
+
+    The LEFTMOST survivor wins: spreadsheets put identity on the left and money
+    on the right, so the first numeric column after the identifying ones is the
+    total far more often than not.
+    """
+    width = max((len(row) for row in body[:_SNIFF_ROWS]), default=0)
+    width = max(width, len(header))
+    for position in range(width):
+        if position in taken:
+            continue
+        heading = _cell(header[position]) if position < len(header) else ""
+        if _named_like_identifier(heading):
+            continue
+        values = []
+        for row in body[:_SNIFF_ROWS]:
+            raw = row[position] if position < len(row) else None
+            if not _cell(raw):
+                continue
+            parsed = number(raw)
+            if parsed is None:
+                values = []
+                break
+            values.append(parsed)
+        # Every non-empty cell had to parse, at least one had to be non-zero,
+        # and a column of long whole numbers is an identifier, not money.
+        if (not values or all(v == 0 for v in values)
+                or _looks_like_identifier(values)):
+            continue
+        return position, heading
+    return None
+
+
 def resolve_amounts(gross, net, vat, rate):
     """Fill in whatever the row did not state. Returns (gross, net, vat, rate).
 
@@ -628,7 +778,7 @@ def parse_clients(data):
     the statement letterhead and the export all read `contact` today, and
     splitting it is a change to the client editor rather than to this importer.
     """
-    header, body = _table(data)
+    header, body = _table(data, _CLIENT_COLUMNS)
     columns = _index(header, _CLIENT_COLUMNS)
     if "name" not in columns:
         raise _missing_columns("πελάτες", ("Επωνυμία", "Α.Φ.Μ.", "Τηλέφωνο",
@@ -703,7 +853,7 @@ def parse_transactions(data):
     because the direction is taken from Είδος Κίνησης and the amount's own sign
     is only a fallback.
     """
-    header, body = _table(data)
+    header, body = _table(data, _TXN_COLUMNS)
     columns = _index(header, _TXN_COLUMNS)
     if "date" not in columns:
         raise _missing_columns("κινήσεις", ("Ημερομηνία", "Πελάτης",
@@ -711,11 +861,29 @@ def parse_transactions(data):
     if "client" not in columns and "afm" not in columns:
         raise _missing_columns("κινήσεις", ("Ημερομηνία", "Πελάτης",
                                             "Είδος Κίνησης", "Συνολικό Ποσό"))
-    if "amount" not in columns and "net_amount" not in columns:
-        raise _missing_columns("κινήσεις", ("Ημερομηνία", "Πελάτης",
-                                            "Είδος Κίνησης", "Συνολικό Ποσό"))
 
     result = ParsedFile()
+
+    # Positional fallback. Only when NONE of the three money columns was
+    # recognised by name — a file naming any one of them is telling us where
+    # its figures are, and guessing alongside that would be second-guessing
+    # the user rather than helping them.
+    guessed = None
+    if not {"amount", "net_amount", "vat_amount"} & set(columns):
+        guessed = find_amount_column(header, body, set(columns.values()))
+        if guessed is None:
+            raise _missing_columns("κινήσεις", ("Ημερομηνία", "Πελάτης",
+                                                "Είδος Κίνησης", "Συνολικό Ποσό"))
+        position, heading = guessed
+        columns["amount"] = position
+        # Announced, never silent. Reading an unnamed column as money is a
+        # guess about somebody's books, and the one thing worse than guessing
+        # wrong is guessing wrong quietly.
+        result.warnings.append(_issue(
+            1,
+            f"Δεν εντοπίστηκαν στήλες ποσών από την επικεφαλίδα — "
+            f"χρησιμοποιήθηκε η στήλη «{heading or position + 1}» ως συνολικό "
+            "ποσό, με Φ.Π.Α. 24 %. Ελέγξτε τα ποσά."))
     for offset, raw in enumerate(body):
         line = offset + 2
         if len(result.rows) + len(result.errors) >= MAX_ROWS:

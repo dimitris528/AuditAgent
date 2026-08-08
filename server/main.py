@@ -1123,7 +1123,7 @@ def _import_message(kind, imported):
 
 
 def _import_summary(kind, filename, parsed, imported, skipped,
-                    clients_created=0):
+                    clients_created=0, total_amount=0.0):
     """What the upload modal renders.
 
     The four counts always add up — total == imported + skipped + failed — so
@@ -1143,6 +1143,11 @@ def _import_summary(kind, filename, parsed, imported, skipped,
         # Transactions only: clients that had to be created to hold the rows,
         # which is the one side effect of this import worth announcing.
         "clients_created": clients_created,
+        # The gross value actually booked. Reported so the UI can say something
+        # when rows import at zero — the signature of a file whose amount
+        # column was never found, which otherwise looks like a clean success
+        # right up until the dashboard shows nothing.
+        "total_amount": round(total_amount, 2),
         "message": _import_message(kind, imported),
         "errors": parsed.errors[:imports.MAX_ISSUES],
         "warnings": parsed.warnings[:imports.MAX_ISSUES],
@@ -1207,9 +1212,11 @@ async def import_transactions(file: UploadFile = File(...),
             tenant = _resolve_user(session, user, write=True)
             created, skipped, new_clients = store.import_transactions(
                 session, tenant, parsed.rows)
-            return _import_summary(imports.TRANSACTIONS, file.filename, parsed,
-                                   len(created), skipped,
-                                   clients_created=len(new_clients))
+            return _import_summary(
+                imports.TRANSACTIONS, file.filename, parsed,
+                len(created), skipped,
+                clients_created=len(new_clients),
+                total_amount=sum(row["amount"] for row in created))
     except HTTPException:
         raise
     except SQLAlchemyError as exc:

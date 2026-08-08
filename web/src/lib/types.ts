@@ -255,6 +255,9 @@ export interface ImportSummary {
   failed: number;
   /** Transactions only — clients created to hold the imported rows. */
   clients_created: number;
+  /** Gross value actually booked. Zero across an otherwise successful import
+   *  is the signature of a file whose amount column was never found. */
+  total_amount: number;
   /** Ready-to-show Greek, e.g. "Εισήχθησαν 42 πελάτες επιτυχώς!" */
   message: string;
   errors: ImportIssue[];
