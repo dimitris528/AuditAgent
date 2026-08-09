@@ -69,7 +69,27 @@ services:
       # Where Stripe returns the BROWSER after checkout — the public URL of the
       # accounting-web service, not this one. Set it in the dashboard once that
       # service's URL is known (fromService cannot be used for a URL here).
+      # Also the host of the password-reset link in the email, so it must be
+      # set for that flow to produce a usable link.
       - key: APP_BASE_URL
+        sync: false
+      # Password-reset email. Render BLOCKS outbound SMTP on the free and
+      # starter plans — every port, 25/465/587/2525 — and a blocked port hangs
+      # rather than refusing, so SMTP fails as a TimeoutError after the full
+      # timeout with nothing at the provider end to look at. No SMTP setting
+      # fixes that.
+      #
+      # So mail goes over HTTPS instead: set RESEND_API_KEY (re_...) and
+      # server/mailer.py POSTs to api.resend.com on 443, which is not blocked.
+      # The SMTP_* variables are the fallback for a host that does allow it and
+      # are simply ignored while a key is set.
+      - key: RESEND_API_KEY
+        sync: false
+      # The From address. MUST be on a domain verified in the Resend dashboard
+      # — an unverified one is refused with a 403 naming the domain. Only
+      # onboarding@resend.dev works unverified, and only to your own account
+      # address.
+      - key: MAIL_FROM
         sync: false
       # Days of free access granted at registration.
       - key: TRIAL_DAYS
