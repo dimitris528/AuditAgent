@@ -878,12 +878,27 @@ def forgot_password(body: ForgotPasswordRequest):
         with database.session_scope() as session:
             user = store.get_user_by_email(session, body.email)
             if user is None:
+                # Logged to STDOUT only. The response below is identical either
+                # way — that is the property this endpoint exists to keep — but
+                # the log is not the caller's, and without this line the
+                # commonest cause of "no reset email arrived" produces no
+                # evidence whatsoever: the address simply matches no account
+                # (a typo, a different address than the one registered, a
+                # changed email), the mailer is never called, and the mailer
+                # gets blamed for a send nobody asked it to make.
+                mailer.log("INFO", f"password reset requested for "
+                                   f"{body.email!r}, which matches no account "
+                                   f"— nothing sent.")
                 # Same shape, same work, same answer.
                 return neutral
             raw = store.create_reset_token(session, user)
             store.purge_expired_reset_tokens(session)
             link = mailer.reset_link(raw)
-            mailer.send_password_reset(user.email, link)
+            if not mailer.send_password_reset(user.email, link):
+                # The mailer has already said why, in detail. This line is the
+                # one that ties that failure to the request that caused it.
+                mailer.log("ERROR", f"password reset for {user.email!r} was "
+                                    f"NOT delivered — see the lines above.")
             if mailer.EXPOSE_RESET_TOKEN:
                 # Development only — mailer refuses to set this in production.
                 return {**neutral, "reset_token": raw, "reset_url": link}

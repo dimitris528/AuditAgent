@@ -213,6 +213,137 @@ def test_a_mail_failure_never_breaks_the_endpoint(api, monkeypatch):
     assert api.post(FORGOT, json={"email": KNOWN}).status_code == 200
 
 
+# --- Diagnostics ----------------------------------------------------------
+# A send that fails here fails invisibly by design: the endpoint answers the
+# same 200 whatever happens. The log is therefore the ONLY place a failure can
+# ever appear, which makes these assertions about the log assertions about
+# whether the feature is operable at all.
+def test_a_failed_send_logs_the_servers_own_words(api, monkeypatch, capsys):
+    """The reason "no email arrived" is so hard to chase: the exception type
+    alone does not say which setting is wrong. The provider's status code and
+    response line do, and they are what an operator can act on."""
+    def refuse(*_args, **_kwargs):
+        raise mailer.smtplib.SMTPAuthenticationError(
+            535, b"5.7.8 Authentication failed: invalid API key")
+
+    monkeypatch.setattr(mailer, "is_configured", lambda: True)
+    monkeypatch.setattr(mailer.smtplib, "SMTP", refuse)
+    assert mailer.send_password_reset("x@example.com", "https://x/y") is False
+
+    out = capsys.readouterr().out
+    assert "SMTPAuthenticationError" in out
+    assert "535" in out
+    assert "invalid API key" in out          # the server's own text
+    assert "stage 'connect'" in out          # where it died
+    assert "Traceback (most recent call last)" in out
+
+
+def test_the_stage_of_the_failure_is_named(api, monkeypatch, capsys):
+    """'Failed at login' and 'failed at connect' send you to entirely
+    different settings, and the exception does not always distinguish them."""
+    class _SMTP:
+        def __init__(self, *_a, **_kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *_a): return False
+        def starttls(self, context=None): pass
+        def login(self, *_a):
+            raise mailer.smtplib.SMTPAuthenticationError(535, b"nope")
+        def send_message(self, _m): return {}
+
+    monkeypatch.setattr(mailer, "is_configured", lambda: True)
+    # Without a user there is nothing to authenticate WITH, and the login step
+    # is skipped entirely — which is itself a failure mode worth knowing about.
+    monkeypatch.setattr(mailer, "SMTP_USER", "resend")
+    monkeypatch.setattr(mailer.smtplib, "SMTP", _SMTP)
+    assert mailer.send_password_reset("x@example.com", "https://x/y") is False
+    assert "stage 'login'" in capsys.readouterr().out
+
+
+def test_a_partly_refused_send_is_not_reported_as_success(api, monkeypatch, capsys):
+    """send_message RETURNS refused recipients when at least one was accepted
+    and only RAISES when they all were. Read as success, the one address that
+    did not get the mail is exactly the one being complained about."""
+    class _SMTP:
+        def __init__(self, *_a, **_kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *_a): return False
+        def starttls(self, context=None): pass
+        def login(self, *_a): pass
+        def send_message(self, _m):
+            return {"x@example.com": (550, b"Domain not verified")}
+
+    monkeypatch.setattr(mailer, "is_configured", lambda: True)
+    monkeypatch.setattr(mailer.smtplib, "SMTP", _SMTP)
+    assert mailer.send_password_reset("x@example.com", "https://x/y") is False
+    out = capsys.readouterr().out
+    assert "REFUSED" in out
+    assert "Domain not verified" in out
+
+
+def test_the_credentials_never_reach_the_log(api, monkeypatch, capsys):
+    """The configuration dump exists to answer "is the key even set" without
+    becoming a way to read it out of a log."""
+    monkeypatch.setattr(mailer, "is_configured", lambda: True)
+    monkeypatch.setattr(mailer, "SMTP_PASSWORD", "re_supersecret_key_value")
+    monkeypatch.setattr(mailer.smtplib, "SMTP",
+                        lambda *_a, **_kw: (_ for _ in ()).throw(OSError("x")))
+    mailer.send_password_reset("x@example.com", "https://x/y")
+
+    out = capsys.readouterr().out
+    assert "re_supersecret_key_value" not in out
+    assert "chars" in out          # it does say the length
+
+
+def test_an_unlogged_address_still_logs_that_nothing_was_sent(api, capsys):
+    """The commonest cause of "no reset email arrived" — the address matches
+    no account — used to produce no evidence at all, so the mailer was blamed
+    for a send it was never asked to make."""
+    api.post(FORGOT, json={"email": UNKNOWN})
+    out = capsys.readouterr().out
+    assert "matches no account" in out
+    assert UNKNOWN in out
+
+
+def test_the_diagnostics_are_logged_without_reopening_the_oracle(api, capsys):
+    """The property the whole endpoint is built around, restated against the
+    new logging: the LOG may distinguish a known address from an unknown one —
+    that is what makes a failure diagnosable — and the RESPONSE may not."""
+    known = api.post(FORGOT, json={"email": KNOWN})
+    known_log = capsys.readouterr().out
+    unknown = api.post(FORGOT, json={"email": UNKNOWN})
+    unknown_log = capsys.readouterr().out
+
+    assert known.status_code == unknown.status_code
+    assert known.json() == unknown.json()          # the caller learns nothing
+    assert known_log != unknown_log                # the operator learns which
+    assert "matches no account" in unknown_log
+    assert "matches no account" not in known_log
+
+
+def test_a_log_line_survives_an_address_the_console_cannot_encode(monkeypatch):
+    """Greek email addresses are ordinary here, and a cp1252 stdout raises on
+    them. Unhandled that would escape the mailer and answer 500 for a real
+    address next to 200 for an unknown one — the enumeration oracle this flow
+    exists to deny, reintroduced by its own diagnostics."""
+    class _NarrowStream:
+        encoding = "ascii"
+
+        def __init__(self): self.written = []
+
+        def write(self, text):
+            if any(ord(c) > 127 for c in text):
+                raise UnicodeEncodeError("ascii", text, 0, 1, "not encodable")
+            self.written.append(text)
+
+        def flush(self): pass
+
+    stream = _NarrowStream()
+    monkeypatch.setattr("sys.stdout", stream)
+    mailer.log("INFO", "reset for χρήστης@παράδειγμα.gr")   # must not raise
+    monkeypatch.undo()
+    assert any("reset for" in chunk for chunk in stream.written)
+
+
 # --- Housekeeping ---------------------------------------------------------
 def test_spent_tokens_are_purged(api):
     raw = _issue(api)
