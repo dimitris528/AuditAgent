@@ -272,6 +272,16 @@ def _forget_devices(session, user):
         session.delete(row)
 
 
+# --- Trusted devices ------------------------------------------------------
+# Everything below reads or writes `trusted_devices`, which is TENANT DATA:
+# scripts/enable_rls.sql gives it the same policy as clients and transactions,
+# keyed on the app.tenant_id set by server/tenancy.py. So every one of these
+# needs a declared tenant, and two of them are reached from the login flow
+# BEFORE there is a session to declare one from — server/main.py wraps those in
+# tenancy.tenant_scope. Called with no tenant against a database with the
+# policies on, the reads find nothing and the writes are refused.
+
+
 def trust_device(session, user, raw_token, expires_at, label=None):
     """Record a device allowed to skip the 2FA prompt until `expires_at`."""
     session.add(TrustedDevice(

@@ -556,8 +556,16 @@ def login(body: LoginRequest, request: Request):
             # A trusted device skips the PROMPT, never the password: the
             # credential above has already been verified by this point.
             cookie = request.cookies.get(mfa.DEVICE_COOKIE)
-            if store.find_trusted_device(session, row, cookie) is not None:
-                return {**_session_payload(user), "device_trusted": True}
+            if cookie:
+                # trusted_devices is tenant data and carries the same RLS
+                # policy as the rest of it, so the lookup has to say whose rows
+                # it may see. Unstamped it matches no policy and finds nothing
+                # — which reads exactly like "this device was never trusted",
+                # so every trusted device would silently be challenged again.
+                with tenancy.tenant_scope(session, row.id):
+                    trusted = store.find_trusted_device(session, row, cookie)
+                if trusted is not None:
+                    return {**_session_payload(user), "device_trusted": True}
     except SQLAlchemyError as exc:
         raise errors.db_error(exc)
 
@@ -604,11 +612,19 @@ def verify_mfa(body: MfaVerify, request: Request, response: Response):
                 # Next route handler. The `user-agent` on this request is that
                 # hop's own, which would label every device "node" and make
                 # the list useless for telling one from another.
-                store.trust_device(
-                    session, row, token, mfa.trust_expiry(),
-                    label=mfa.device_label(
-                        request.headers.get("x-device-agent")
-                        or request.headers.get("user-agent")))
+                #
+                # Written under the tenant, because trusted_devices is tenant
+                # data: the RLS policy's WITH CHECK compares the row's user_id
+                # against the declared tenant, and an undeclared one is NULL,
+                # which never matches. The insert is then REFUSED, and the
+                # whole 2FA login fails with a database error at the last step
+                # — the password given, the code correct, and no session.
+                with tenancy.tenant_scope(session, row.id):
+                    store.trust_device(
+                        session, row, token, mfa.trust_expiry(),
+                        label=mfa.device_label(
+                            request.headers.get("x-device-agent")
+                            or request.headers.get("user-agent")))
                 # Set on the API response, and mirrored onto the browser by
                 # the Next route handler that proxies this call.
                 response.set_cookie(

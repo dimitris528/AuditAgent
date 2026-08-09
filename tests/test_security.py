@@ -12,12 +12,21 @@ current_setting() nor row level security. What IS tested here is the half that
 decides whether those policies can work at all — that the tenant reaches the
 database on every transaction, including after a commit — because a policy
 reading a variable nobody set denies the application every row.
+
+The `rls_enforced` fixture below closes the gap that leaves. Asserting the
+tenant is set is not the same as asserting every statement that NEEDS it runs
+after it, and the difference is not academic: the login flow reached
+trusted_devices with no tenant declared, every test here passed, and the
+feature was broken the moment the policies went on in production. The fixture
+refuses that statement the way Postgres does, so the suite can fail where the
+deployment would.
 """
 
 import datetime as dt
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import SQLAlchemyError
 
 from server import mfa, middleware, store, tenancy
 from server.main import app
@@ -267,6 +276,39 @@ def test_binding_is_a_no_op_with_no_tenant():
     assert session.executed == []
 
 
+def test_declaring_a_tenant_does_both_halves():
+    """The pair that has to happen together, and did not always: the ContextVar
+    governs every transaction from here on, the bind covers the one already
+    open. Either alone is a bug, and both shapes of it are silent."""
+    session = _StubSession("postgresql")
+    tenancy.declare(session, 77)
+    try:
+        assert tenancy.current_tenant() == 77
+        assert len(session.executed) == 1
+    finally:
+        tenancy.set_current_tenant(None)
+
+
+def test_the_pre_auth_scope_gives_the_tenant_back():
+    """login declares a tenant before there is a session token, so it has to
+    take it away again: the request may still fail its second factor, and a
+    tenant left declared on a login that did not complete is a tenant nothing
+    revoked."""
+    session = _StubSession("postgresql")
+    with tenancy.tenant_scope(session, 77):
+        assert tenancy.current_tenant() == 77
+        assert len(session.executed) == 1
+    assert tenancy.current_tenant() is None
+
+
+def test_the_pre_auth_scope_gives_the_tenant_back_after_a_failure():
+    session = _StubSession("postgresql")
+    with pytest.raises(RuntimeError):
+        with tenancy.tenant_scope(session, 77):
+            raise RuntimeError("the code was wrong")
+    assert tenancy.current_tenant() is None
+
+
 def test_resolving_a_user_binds_the_session_it_was_given(api, monkeypatch):
     """The ordering requirement, pinned. resolve_user_state must hand the LIVE
     session to bind_session — setting only the ContextVar leaves the
@@ -493,6 +535,126 @@ def test_a_wrong_code_does_not_complete_the_login(api):
                    json={"challenge": challenge, "code": "000000"})
     assert res.status_code == 401
     assert "access_token" not in res.json()
+
+
+# --- Under the RLS policies -----------------------------------------------
+class _RlsDenied(SQLAlchemyError):
+    """What Postgres raises when a statement matches no policy.
+
+    A SQLAlchemyError specifically, because that is what the endpoints catch
+    and turn into `errors.GENERIC` — the "πρόβλημα στη βάση δεδομένων" a user
+    saw at the last step of a 2FA login, with the password given and the code
+    correct.
+    """
+
+
+#: The tables scripts/enable_rls.sql covers with a TENANT policy. `users` and
+#: `password_reset_tokens` are deliberately not here: they are read before any
+#: tenant exists and carry an open policy for exactly that reason.
+_TENANT_TABLES = ("clients", "transactions", "debt_payments", "invoices",
+                  "trusted_devices")
+
+
+@pytest.fixture()
+def rls_enforced():
+    """Refuse any statement touching tenant data while no tenant is declared.
+
+    This is the one thing SQLite cannot do and the deployment does, so it is
+    done here in Python instead. Not an approximation of the policy — the
+    policy's USING and WITH CHECK both compare user_id against
+    current_setting('app.tenant_id'), which is NULL when nothing set it, and
+    NULL never matches. Reads therefore find nothing and writes are refused.
+    This raises in both cases, which is stricter than a read that returns an
+    empty set, and deliberately: a silent empty read is the harder half of this
+    bug to notice, so the test should not have to guess that finding no rows
+    was the failure.
+    """
+    from sqlalchemy import event
+    from sqlalchemy.engine import Engine
+
+    def guard(conn, cursor, statement, parameters, context, executemany):
+        if tenancy.current_tenant() is not None:
+            return
+        lowered = statement.lower()
+        touched = next((t for t in _TENANT_TABLES if t in lowered), None)
+        if touched is not None:
+            raise _RlsDenied(
+                f'new row violates row-level security policy for table '
+                f'"{touched}"')
+
+    event.listen(Engine, "before_cursor_execute", guard)
+    try:
+        yield
+    finally:
+        event.remove(Engine, "before_cursor_execute", guard)
+
+
+@pytestmark_mfa
+def test_a_2fa_login_completes_under_the_rls_policies(api, rls_enforced):
+    """The reported bug, end to end.
+
+    Setting up 2FA worked because enrolment runs on a request that has already
+    resolved its tenant. Finishing a LOGIN with it did not: the trusted-device
+    write is the one statement in that flow that touches tenant data, and it
+    ran before anything had declared whose data it was. WITH CHECK refused the
+    row, the endpoint answered 502, and the user was told the database had a
+    problem at the exact moment they had proved both factors.
+    """
+    secret = api.post("/api/v1/auth/mfa/setup").json()["secret"]
+    api.post("/api/v1/auth/mfa/enable", json={"code": _totp(secret)})
+    challenge = api.post("/api/auth/login", json={
+        "username": "tester", "password": "correct-horse-battery"}).json()["challenge"]
+
+    res = api.post("/api/v1/auth/mfa/verify", json={
+        "challenge": challenge, "code": _totp(secret), "trust_device": True})
+    assert res.status_code == 200, res.text
+    assert "access_token" in res.json()
+    assert res.json()["device_trusted"] is True
+
+
+@pytestmark_mfa
+def test_a_trusted_device_is_recognised_under_the_rls_policies(api, rls_enforced):
+    """The other half, and the one that fails SILENTLY.
+
+    The lookup on the next login is a read, so an undeclared tenant does not
+    raise in production — it simply matches no rows, which is indistinguishable
+    from a device that was never trusted. The checkbox would have appeared to
+    do nothing at all, forever, with nothing in any log.
+    """
+    secret = api.post("/api/v1/auth/mfa/setup").json()["secret"]
+    api.post("/api/v1/auth/mfa/enable", json={"code": _totp(secret)})
+    challenge = api.post("/api/auth/login", json={
+        "username": "tester", "password": "correct-horse-battery"}).json()["challenge"]
+    api.post("/api/v1/auth/mfa/verify", json={
+        "challenge": challenge, "code": _totp(secret), "trust_device": True})
+
+    again = api.post("/api/auth/login", json={
+        "username": "tester", "password": "correct-horse-battery"})
+    assert again.status_code == 200, again.text
+    body = again.json()
+    assert body.get("device_trusted") is True
+    assert "access_token" in body
+    assert body.get("mfa_required") is not True
+
+
+def test_an_ordinary_request_is_unaffected_by_the_policies(api, rls_enforced):
+    """The fixture has to be able to pass, or the two tests above prove nothing
+    beyond "it raises". An authenticated request declares its tenant in
+    deps.resolve_user_state before it reads a thing."""
+    _mine(api)
+    res = api.get("/api/transactions")
+    assert res.status_code == 200, res.text
+    assert len(res.json()["transactions"]) == 1
+
+
+def test_a_password_only_login_touches_no_tenant_data(api, rls_enforced):
+    """Leg one must not need a tenant it does not have yet. It reads `users`,
+    which carries an open policy precisely because authentication happens
+    before there is anyone to be."""
+    res = api.post("/api/auth/login", json={
+        "username": "tester", "password": "correct-horse-battery"})
+    assert res.status_code == 200, res.text
+    assert "access_token" in res.json()
 
 
 # --- Trust this device ----------------------------------------------------

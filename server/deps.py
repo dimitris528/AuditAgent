@@ -98,13 +98,13 @@ def resolve_user_state(session, username, write=False):
     # forgets its user_id filter returns nothing instead of somebody else's
     # rows — see server/tenancy.py.
     #
-    # BOTH calls are required. The first governs every transaction from here
-    # on; the second stamps the one already open, because the lookup above is
-    # itself a query and opened it while the tenant was still unknown. Without
-    # it the rest of THIS transaction runs unstamped and, under RLS, returns
-    # nothing at all — a dashboard that loads perfectly and is empty.
-    tenancy.set_current_tenant(user.id)
-    tenancy.bind_session(session)
+    # declare() does two things, and both are required. It governs every
+    # transaction from here on, AND stamps the one already open — the lookup
+    # above is itself a query and opened it while the tenant was still unknown.
+    # Without the second, the rest of THIS transaction runs unstamped and,
+    # under RLS, returns nothing at all — a dashboard that loads perfectly and
+    # is empty.
+    tenancy.declare(session, user.id)
     state = store.refresh_subscription(session, user)
     if write and not state.allows_writes:
         raise HTTPException(status_code=402, detail=paywall_detail(state))

@@ -53,6 +53,7 @@ logs, and only then have scripts/enable_rls.sql applied. The reverse order —
 policies first — locks out any code path that has not been taught to set it.
 """
 
+import contextlib
 import contextvars
 
 from sqlalchemy import event, text
@@ -125,6 +126,49 @@ def reset(token):
     except (ValueError, LookupError):
         # Token from another context; the ContextVar is already correct.
         pass
+
+
+def declare(session, tenant_id):
+    """Declare the tenant AND stamp the transaction already in progress.
+
+    The two calls belong together and were being made together in every place
+    that made them at all, so they are one call now: set_current_tenant governs
+    every transaction from here on, bind_session covers the one already open.
+    Making either on its own is a bug, and both shapes of it are silent — see
+    the note on bind_session.
+
+    Returns the ContextVar token, for a caller that has to restore.
+    """
+    token = set_current_tenant(tenant_id)
+    bind_session(session)
+    return token
+
+
+@contextlib.contextmanager
+def tenant_scope(session, tenant_id):
+    """`declare`, undone on the way out.
+
+    For the legs of login that run BEFORE there is a session token: verifying a
+    2FA code, and looking up or recording a trusted device. Those touch
+    trusted_devices, which is tenant-scoped and carries an RLS policy like any
+    other table of tenant data — so they need a declared tenant exactly as much
+    as a dashboard request does, and it was not obvious that they did. What
+    made it non-obvious is that nothing about the failure points here: the
+    lookup returns no rows (so a trusted device is quietly never trusted) and
+    the insert is refused by WITH CHECK (so completing a 2FA login reports a
+    database problem).
+
+    The tenant is legitimate at both call sites: by then the password has been
+    verified, or the challenge token proving it has. What it is NOT is the
+    caller's session — there isn't one yet — so it is scoped to the work that
+    needs it and released after, rather than left declared on a request that
+    may still be about to fail its second factor.
+    """
+    token = declare(session, tenant_id)
+    try:
+        yield
+    finally:
+        reset(token)
 
 
 @event.listens_for(Session, "after_begin")
