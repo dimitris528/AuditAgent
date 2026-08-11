@@ -126,7 +126,7 @@ export default async function SummaryPage({
       <div className="mb-5 flex flex-wrap items-center justify-between gap-3 print:hidden">
         <Link
           href="/"
-          className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-600 transition hover:border-slate-300 hover:text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
+          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-600 transition hover:border-slate-300 hover:text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
         >
           <ArrowLeft className="h-4 w-4" />
           Πίνακας ελέγχου

@@ -1,0 +1,82 @@
+name: CI
+
+# Every push to main and every pull request aimed at it. workflow_dispatch is
+# there so a run can be kicked off by hand from the Actions tab — useful when a
+# failure looks like flakiness rather than a real break.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# A second push to the same branch cancels the first: the older run's verdict is
+# about code nobody will merge, and it holds a runner while it produces it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Matches .python-version, which is what the Render image builds on.
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        # requirements-dev.txt already pulls in requirements.txt (-r), but both
+        # are named so the pip cache key above stays honest about its inputs.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run tests
+        # The suite runs against a throwaway SQLite file (tests/conftest.py) and
+        # needs no Postgres, no Airtable and no API keys — so there are no
+        # secrets here, and a fork's pull request can run it unchanged.
+        run: pytest -q
+
+  web:
+    name: Web (next build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        # `npm ci` rather than `npm install`: it installs the lockfile exactly
+        # and fails if package.json has drifted from it, which is the whole
+        # point of running it in CI.
+        run: npm ci
+
+      - name: Build
+        # This is the type check as well: `next build` runs tsc over the app, so
+        # a broken prop or a missing import fails here rather than in a deploy.
+        # Every app route is force-dynamic, so nothing is prerendered and the
+        # build needs no reachable backend.
+        env:
+          # Prod-shaped values so the build takes the same branches a real one
+          # does. Neither is contacted at build time.
+          API_BASE_URL: http://localhost:8000
+          JWT_SECRET: ci-build-only-not-a-real-secret
+        run: npm run build

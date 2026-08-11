@@ -9,8 +9,11 @@ export function Card({
 }) {
   return (
     <div
+      // rounded-xl, not 2xl: at dashboard density the panels sit close enough
+      // that a 16px corner radius eats visible plot area and softens the grid
+      // into something that reads like a phone app rather than a ledger.
       className={clsx(
-        "rounded-2xl border border-slate-200 bg-white shadow-card transition-colors",
+        "rounded-xl border border-slate-200 bg-white shadow-card transition-colors",
         "dark:border-slate-800 dark:bg-slate-900 dark:shadow-card-dark",
         className,
       )}
@@ -32,17 +35,20 @@ export function CardHeader({
   right?: React.ReactNode;
 }) {
   return (
-    <div className="flex items-start justify-between gap-3 border-b border-slate-100 px-5 py-4 dark:border-slate-800">
-      <div className="flex items-center gap-2.5 min-w-0">
+    // px-3.5/py-2.5, down from px-5/py-4: a header band that costs 60px is
+    // affordable once per page and wasteful six times over. The border stays —
+    // at this spacing the rule is what separates the header from the panel.
+    <div className="flex items-start justify-between gap-2 border-b border-slate-100 px-3.5 py-2.5 dark:border-slate-800">
+      <div className="flex items-center gap-2 min-w-0">
         {icon ? (
           <span className="text-slate-400 dark:text-slate-500">{icon}</span>
         ) : null}
         <div className="min-w-0">
-          <h3 className="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">
+          <h3 className="truncate text-[13px] font-semibold leading-tight text-slate-900 dark:text-slate-100">
             {title}
           </h3>
           {subtitle ? (
-            <p className="truncate text-xs text-slate-500 dark:text-slate-400">
+            <p className="truncate text-[11px] leading-tight text-slate-500 dark:text-slate-400">
               {subtitle}
             </p>
           ) : null}

@@ -1203,6 +1203,68 @@ def update_client(client_id: int, body: ClientUpdate,
         raise errors.db_error(exc)
 
 
+# --------------------------------------------------------------------------
+# Spreadsheet exports
+# --------------------------------------------------------------------------
+# Three sheets over the same data — the ledger, the παραστατικά in it, and the
+# πελατολόγιο — sharing the period parameters, the tenant lookups and the
+# response shape below, so they cannot drift into disagreeing about what a
+# period contains.
+#
+# All READS, and therefore NOT behind the subscription paywall: an account whose
+# trial lapsed must still be able to get its own books out. Locking a customer's
+# data inside the product is how you turn a billing problem into a grievance.
+def _export_lookups(user, client_id=None):
+    """(afm_by_client, paid_by_debt, client_name) for an export.
+
+    `client_name` is None unless `client_id` was given, and a client id that
+    does not belong to this tenant is a 404 — indistinguishable from one that
+    never existed, so ids cannot be probed.
+    """
+    afm_by_client = {}
+    paid_by_debt = {}
+    client_name = None
+    if not database.is_configured():
+        return afm_by_client, paid_by_debt, client_name
+    try:
+        with database.session_scope() as session:
+            tenant = _resolve_user(session, user)
+            if client_id is not None:
+                target = store.get_client(session, tenant, client_id)
+                if target is None:
+                    raise HTTPException(status_code=404,
+                                        detail="Ο πελάτης δεν βρέθηκε.")
+                client_name = target.name
+            for row in store.list_clients(session, tenant):
+                if row.afm:
+                    afm_by_client[exports.client_key(row.name)] = row.afm
+            paid_by_debt = store.paid_by_debt(
+                store.get_debt_payments(session, tenant))
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise errors.db_error(exc)
+    return afm_by_client, paid_by_debt, client_name
+
+
+def _only_client(records, client_name):
+    if client_name is None:
+        return records
+    key = exports.client_key(client_name)
+    return [t for t in records
+            if exports.client_key(t["fields"].get("Category")) == key]
+
+
+def _csv_response(body, name):
+    return Response(
+        # Encoded here rather than left to Starlette: the BOM is part of the
+        # BYTES, and the charset has to be declared or Excel guesses again.
+        content=body.encode("utf-8"),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
+
+
 @app.get("/api/v1/exports/transactions.csv")
 def export_transactions(user: str = Depends(get_current_user),
                         year: int | None = None,
@@ -1216,57 +1278,97 @@ def export_transactions(user: str = Depends(get_current_user),
     on screen when the button was pressed rather than silently exporting the
     whole book. `client_id` narrows it to one client (the drawer's export).
 
-    A READ, and therefore NOT behind the subscription paywall: an account whose
-    trial lapsed must still be able to get its own books out. Locking a
-    customer's data inside the product is how you turn a billing problem into a
-    grievance.
-
     See server/exports.py for why the default dialect is semicolon-delimited
     UTF-8-with-BOM rather than RFC 4180 — in one word, Excel.
     """
-    active, _completed, transactions, _state = _load(user)
+    _active, _completed, transactions, _state = _load(user)
     start, end = finance.period_bounds(year, quarter, month)
     scoped = finance.filter_period(transactions, start, end)
 
-    afm_by_client = {}
-    paid_by_debt = {}
-    client_name = None
-    if database.is_configured():
-        try:
-            with database.session_scope() as session:
-                tenant = _resolve_user(session, user)
-                if client_id is not None:
-                    target = store.get_client(session, tenant, client_id)
-                    if target is None:
-                        raise HTTPException(status_code=404,
-                                            detail="Ο πελάτης δεν βρέθηκε.")
-                    client_name = target.name
-                for row in store.list_clients(session, tenant):
-                    if row.afm:
-                        afm_by_client[exports.client_key(row.name)] = row.afm
-                paid_by_debt = store.paid_by_debt(
-                    store.get_debt_payments(session, tenant))
-        except HTTPException:
-            raise
-        except SQLAlchemyError as exc:
-            raise errors.db_error(exc)
-
-    if client_name is not None:
-        key = exports.client_key(client_name)
-        scoped = [t for t in scoped
-                  if exports.client_key(t["fields"].get("Category")) == key]
-
-    body = exports.transactions_csv(scoped, afm_by_client=afm_by_client,
+    afm_by_client, paid_by_debt, client_name = _export_lookups(user, client_id)
+    body = exports.transactions_csv(_only_client(scoped, client_name),
+                                    afm_by_client=afm_by_client,
                                     paid_by_debt=paid_by_debt, dialect=dialect)
-    name = exports.filename(year=year, quarter=quarter, month=month,
-                            client=client_id)
-    return Response(
-        # Encoded here rather than left to Starlette: the BOM is part of the
-        # BYTES, and the charset has to be declared or Excel guesses again.
-        content=body.encode("utf-8"),
-        media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{name}"'},
-    )
+    return _csv_response(body, exports.filename(
+        "transactions", year=year, quarter=quarter, month=month,
+        client=client_id))
+
+
+@app.get("/api/v1/exports/invoices.csv")
+def export_invoices(user: str = Depends(get_current_user),
+                    year: int | None = None,
+                    quarter: int | None = None,
+                    month: int | None = None,
+                    client_id: int | None = None,
+                    dialect: Literal["excel", "iso"] = "excel"):
+    """The period's παραστατικά — the transactions issued against a document.
+
+    A filtered view of the ledger rather than a separate store; exports.is_invoice
+    is the single definition of what qualifies. This is the sheet that gets
+    reconciled against the ΜΥΦ, which is why it carries the VAT RATE as well as
+    the amount: that reconciliation is done per rate.
+    """
+    _active, _completed, transactions, _state = _load(user)
+    start, end = finance.period_bounds(year, quarter, month)
+    scoped = finance.filter_period(transactions, start, end)
+
+    afm_by_client, paid_by_debt, client_name = _export_lookups(user, client_id)
+    body = exports.invoices_csv(_only_client(scoped, client_name),
+                                afm_by_client=afm_by_client,
+                                paid_by_debt=paid_by_debt, dialect=dialect)
+    return _csv_response(body, exports.filename(
+        "invoices", year=year, quarter=quarter, month=month, client=client_id))
+
+
+@app.get("/api/v1/exports/clients.csv")
+def export_clients(user: str = Depends(get_current_user),
+                   year: int | None = None,
+                   quarter: int | None = None,
+                   month: int | None = None,
+                   dialect: Literal["excel", "iso"] = "excel"):
+    """The πελατολόγιο, with each client's figures for the period.
+
+    Archived clients are INCLUDED and labelled in the Κατάσταση column. This is
+    the contact list as much as it is a report, and a closed client whose ΑΦΜ
+    and history are still needed at tax time must not vanish from it — the
+    dashboard's active/archived split is a working view, not a retention policy.
+
+    No `client_id`: a one-row πελατολόγιο is the Καρτέλα Πελάτη, which is a
+    different document and already has its own page.
+    """
+    _require_db()
+    _active, _completed, transactions, _state = _load(user)
+    start, end = finance.period_bounds(year, quarter, month)
+    scoped = finance.filter_period(transactions, start, end)
+
+    # Grouped ONCE by client key rather than filtered per client: the naive
+    # version is O(clients × transactions), which on a real book is the
+    # difference between an instant download and a timeout.
+    by_key = {}
+    for txn in scoped:
+        key = exports.client_key(txn["fields"].get("Category"))
+        by_key.setdefault(key, []).append(txn)
+
+    try:
+        with database.session_scope() as session:
+            tenant = _resolve_user(session, user)
+            rows = [c.to_detail() for c in store.list_clients(
+                session, tenant, include_archived=True)]
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise errors.db_error(exc)
+
+    # Same helper the drawer's summary uses, so a figure in this sheet and the
+    # figure on the client's card are computed by one function, not two.
+    metrics = {}
+    for row in rows:
+        key = exports.client_key(row["name"])
+        metrics[key] = _client_summary(row["name"], by_key.get(key, []))
+
+    body = exports.clients_csv(rows, metrics_by_key=metrics, dialect=dialect)
+    return _csv_response(body, exports.filename(
+        "clients", year=year, quarter=quarter, month=month))
 
 
 # --------------------------------------------------------------------------

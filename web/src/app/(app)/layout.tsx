@@ -40,8 +40,16 @@ export default async function AppLayout({
           being one unlabelled icon among three — it is the only route back for
           an account whose trial has lapsed, so it should never be the hardest
           link in the header to find. */}
+      {/* max-w-[1600px], not max-w-7xl (1280).
+          The dashboard beneath this is a two-column grid of charts and a client
+          rail, and at 1280 the two bar charts were ~380px wide each — narrow
+          enough that a client name and its bar were competing for the same
+          space. 1600 is roughly what a 1080p browser gives you, so on the
+          screens this is actually used on the shell now ends where the display
+          does; the cap only bites on ultrawides, where a full-bleed line of
+          text is its own readability problem. */}
       <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/80 backdrop-blur print:hidden dark:border-slate-800 dark:bg-slate-950/80">
-        <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-4 sm:px-6">
+        <div className="mx-auto flex h-14 max-w-[1600px] items-center justify-between px-4 sm:px-6">
           <Link href="/" className="flex items-center gap-2.5">
             <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600 text-white">
               <Calculator className="h-5 w-5" />
@@ -64,7 +72,7 @@ export default async function AppLayout({
         {/* Hidden when signed out: the nav would only offer routes the
             middleware bounces straight back to /login. */}
         {authed ? (
-          <div className="mx-auto max-w-7xl px-4 sm:px-6">
+          <div className="mx-auto max-w-[1600px] px-4 sm:px-6">
             {/* overflow-x-auto so three items and their icons never wrap or
                 clip on a narrow phone. */}
             <div className="overflow-x-auto">
@@ -73,7 +81,7 @@ export default async function AppLayout({
           </div>
         ) : null}
       </header>
-      <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 print:max-w-none print:p-0">
+      <main className="mx-auto max-w-[1600px] px-4 py-4 sm:px-6 print:max-w-none print:p-0">
         {children}
       </main>
     </>

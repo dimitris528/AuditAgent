@@ -13,7 +13,7 @@ import { TransactionsTable } from "@/components/TransactionsTable";
 import { QuickAddTransaction } from "@/components/QuickAddTransaction";
 import { PeriodSelector } from "@/components/PeriodSelector";
 import { TrialBanner } from "@/components/TrialBanner";
-import { ExportButton } from "@/components/ExportButton";
+import { ExportMenu } from "@/components/ExportMenu";
 import { PdfExportButton } from "@/components/PdfExportButton";
 
 // Always render fresh — figures reflect the latest database state.
@@ -113,17 +113,27 @@ export default async function Page({
       {/* The 12-column grid. Everything below places itself on it, so the
           breakpoints are declared once here rather than per section:
             mobile  — one column, everything stacked in reading order
-            lg      — 12 columns, charts 7 / alerts 5
-          Sections that are always full width just span 12. */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
-        {/* --- Toolbar ------------------------------------------------- */}
+            lg      — 12 columns, charts 7 / rail 5
+            xl      — charts 8 / rail 4, since the extra width is worth more to
+                      two side-by-side bar charts than to a column of cards
+          Sections that are always full width just span 12.
+
+          gap-3 rather than gap-4: this is a dense financial layout, and 4px per
+          gutter across six rows is most of a metric card's worth of screen. */}
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
+        {/* --- Command bar ---------------------------------------------- */}
+        {/* Title, period filter and every action on ONE line. These used to be
+            three stacked rows — a heading, a toolbar and a filter strip — which
+            cost ~140px of vertical space before a single figure appeared. They
+            belong together anyway: the period governs what the exports contain
+            and what the counts beside the title are counting. */}
         <div className="lg:col-span-12">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <h1 className="text-xl font-bold tracking-tight text-slate-900 dark:text-white">
+          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-xl border border-slate-200 bg-white px-3 py-2 dark:border-slate-800 dark:bg-slate-900">
+            <div className="min-w-0">
+              <h1 className="text-base font-bold leading-tight tracking-tight text-slate-900 dark:text-white">
                 Πίνακας Ελέγχου
               </h1>
-              <p className="text-sm text-slate-500 dark:text-slate-400">
+              <p className="truncate text-[11px] text-slate-500 dark:text-slate-400">
                 {data.counts.active_clients} ενεργοί πελάτες ·{" "}
                 {data.counts.transactions} κινήσεις
                 {data.counts.open_debts > 0
@@ -131,31 +141,33 @@ export default async function Page({
                   : ""}
               </p>
             </div>
-            <QuickAddTransaction
-              vatRates={data.vat_rates}
-              docTypes={data.doc_types}
-              defaultVatRate={0.24}
-              scanEnabled={data.scan_enabled}
-            />
-          </div>
-        </div>
 
-        <div className="lg:col-span-12">
-          <TrialBanner subscription={data.subscription} />
-        </div>
-
-        {/* --- Period filter + exports ---------------------------------- */}
-        {/* The exports sit WITH the filter, not in the page header, because
-            what they export is whatever the filter is showing — putting them
-            side by side is what makes that obvious without a tooltip. */}
-        <div className="lg:col-span-12">
-          <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between dark:border-slate-800 dark:bg-slate-900">
-            <PeriodSelector period={data.period} />
-            <div className="flex shrink-0 items-center gap-2">
-              <ExportButton period={period} />
+            <div className="flex flex-1 flex-wrap items-center justify-end gap-2">
+              <PeriodSelector period={data.period} />
+              {/* A hairline divider, not a gap: at this density the eye needs
+                  something to separate "what am I looking at" from "what can I
+                  do with it". */}
+              <span
+                aria-hidden
+                className="hidden h-5 w-px bg-slate-200 xl:block dark:bg-slate-700"
+              />
+              {/* The exports sit WITH the filter because what they export is
+                  whatever the filter is showing. */}
+              <ExportMenu period={period} />
               <PdfExportButton period={period} />
+              <QuickAddTransaction
+                vatRates={data.vat_rates}
+                docTypes={data.doc_types}
+                defaultVatRate={0.24}
+                scanEnabled={data.scan_enabled}
+              />
             </div>
           </div>
+        </div>
+
+        {/* Renders nothing on a paid account, so it costs no row there. */}
+        <div className="lg:col-span-12 empty:hidden">
+          <TrialBanner subscription={data.subscription} />
         </div>
 
         {/* --- Top row: the four metrics -------------------------------- */}
@@ -163,8 +175,8 @@ export default async function Page({
           <MetricCards header={data.header} alerts={data.debt_alerts} />
         </div>
 
-        {/* --- Middle: charts left (7), alerts + clients right (5) ------- */}
-        <div className="lg:col-span-7">
+        {/* --- Middle: charts left, alerts + clients right --------------- */}
+        <div className="lg:col-span-7 xl:col-span-8">
           <AnalyticsSection analytics={data.analytics} />
         </div>
 
@@ -189,13 +201,14 @@ export default async function Page({
             Everything below `lg` is untouched — on a phone the rail is a normal
             stacked section, and a nested scroll area inside a scrolling page is
             the last thing a small screen needs. */}
-        <div className="lg:relative lg:col-span-5 lg:min-h-[500px]">
-          <div className="rail-scroll flex flex-col gap-4 lg:absolute lg:inset-0 lg:overflow-y-auto lg:pr-1">
+        <div className="lg:relative lg:col-span-5 lg:min-h-[500px] xl:col-span-4">
+          <div className="rail-scroll flex flex-col gap-3 lg:absolute lg:inset-0 lg:overflow-y-auto lg:pr-1">
             <DebtAlerts alerts={data.debt_alerts} />
             <ClientGrid
               clients={data.clients}
               archivedClients={data.archived_clients}
               alerts={data.debt_alerts}
+              period={period}
               compact
             />
           </div>
@@ -203,7 +216,11 @@ export default async function Page({
 
         {/* --- Bottom: the full-width transactions table ----------------- */}
         <div className="lg:col-span-12">
-          <TransactionsTable rows={data.transactions} clientIds={clientIds} />
+          <TransactionsTable
+            rows={data.transactions}
+            clientIds={clientIds}
+            period={period}
+          />
         </div>
       </div>
     </ClientDrawerProvider>

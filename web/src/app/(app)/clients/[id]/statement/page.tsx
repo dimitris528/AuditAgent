@@ -86,6 +86,33 @@ function paymentStatus(t: TransactionRow): string {
   return (t.paid ?? 0) > 0 ? "Μερικώς εξοφλημένο" : "Ανεξόφλητο";
 }
 
+/** Cents, so a hundred additions do not drift into 1.0000000002. */
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+/**
+ * What one row moves the running balance by.
+ *
+ * Amounts are stored signed but rendered as magnitudes everywhere in this app,
+ * so direction is re-derived here from the row's own flags rather than trusted
+ * from the sign:
+ *
+ *   Έσοδο        +  billed and collected
+ *   Χρεωστούμενο +  billed, NOT yet collected — a receivable belongs on the
+ *                   same side as the revenue it turns into
+ *   Έξοδο        −
+ *
+ * No double counting: settling a debt shrinks the debt row and books a separate
+ * Έσοδο for what was paid, so Σ(revenue) + Σ(remaining debt) is total billed,
+ * once.
+ */
+function balanceDelta(t: TransactionRow): number {
+  const magnitude = Math.abs(t.amount);
+  if (t.is_debt) return magnitude;
+  return t.is_revenue ? magnitude : -magnitude;
+}
+
 export default async function StatementPage({
   params,
   searchParams,
@@ -132,6 +159,32 @@ export default async function StatementPage({
     (a.date ?? "").localeCompare(b.date ?? ""),
   );
 
+  // The running balance, carried down the ledger. Computed here rather than in
+  // the row loop because the CLOSING figure is needed above the table too, and
+  // a second pass would be a second chance to disagree with the first.
+  let running = 0;
+  const ledger = transactions.map((t) => {
+    running = round2(running + balanceDelta(t));
+    return { txn: t, balance: running };
+  });
+  const closing = running;
+  // Column totals for the tie-out row. Signed the same way as the balance, so
+  // the Σύνολο column adds up to exactly the last running balance — which is
+  // the check a reader performs on any ledger without being asked to.
+  const totals = transactions.reduce(
+    (acc, t) => {
+      const sign = balanceDelta(t) < 0 ? -1 : 1;
+      const gross = Math.abs(t.amount);
+      const vat = Math.abs(t.vat_amount ?? 0);
+      return {
+        net: acc.net + sign * (t.net_amount != null ? Math.abs(t.net_amount) : gross),
+        vat: acc.vat + sign * vat,
+        gross: acc.gross + sign * gross,
+      };
+    },
+    { net: 0, vat: 0, gross: 0 },
+  );
+
   return (
     // Forced to a light palette even in dark mode: this is printed, and a dark
     // statement either burns a cartridge or comes out unreadable.
@@ -140,19 +193,27 @@ export default async function StatementPage({
       <div className="mb-5 flex flex-wrap items-center justify-between gap-3 print:hidden">
         <Link
           href="/"
-          className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-600 transition hover:border-slate-300 hover:text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
+          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-600 transition hover:border-slate-300 hover:text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
         >
           <ArrowLeft className="h-4 w-4" />
           Πίνακας ελέγχου
         </Link>
         <div className="flex items-center gap-2">
           <ExportButton
+            kind="transactions"
             period={period}
             clientId={client.id}
-            label="Εξαγωγή CSV"
-            title="Λήψη των κινήσεων αυτού του πελάτη σε CSV"
+            label="Κινήσεις CSV"
+            title="Λήψη των κινήσεων αυτού του πελάτη σε CSV (Excel)"
           />
-          <PrintButton auto={autoPrint} />
+          <ExportButton
+            kind="invoices"
+            period={period}
+            clientId={client.id}
+            label="Παραστατικά CSV"
+            title="Λήψη μόνο των παραστατικών αυτού του πελάτη σε CSV (Excel)"
+          />
+          <PrintButton auto={autoPrint} label="Λήψη Καρτέλας (PDF)" />
         </div>
       </div>
 
@@ -246,14 +307,30 @@ export default async function StatementPage({
           />
         </section>
 
-        <div className="mt-3 rounded-lg bg-slate-100 px-4 py-2.5 text-sm">
-          <span className="text-slate-600">Καθαρό αποτέλεσμα περιόδου: </span>
-          <span
-            className={`font-bold tabular-nums ${
-              summary.net_profit >= 0 ? "text-emerald-700" : "text-rose-700"
-            }`}
-          >
-            {money(summary.net_profit)}
+        {/* Two DIFFERENT figures, side by side and labelled as such. The net
+            result is net of VAT and excludes what has not been collected; the
+            closing balance is the gross ledger position including receivables.
+            Printing either one alone is how a statement gets queried. */}
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-x-6 gap-y-1 rounded-lg bg-slate-100 px-4 py-2.5 text-sm">
+          <span>
+            <span className="text-slate-600">Καθαρό αποτέλεσμα περιόδου: </span>
+            <span
+              className={`font-bold tabular-nums ${
+                summary.net_profit >= 0 ? "text-emerald-700" : "text-rose-700"
+              }`}
+            >
+              {money(summary.net_profit)}
+            </span>
+          </span>
+          <span>
+            <span className="text-slate-600">Τελικό υπόλοιπο καρτέλας: </span>
+            <span
+              className={`font-bold tabular-nums ${
+                closing >= 0 ? "text-emerald-700" : "text-rose-700"
+              }`}
+            >
+              {money(closing)}
+            </span>
           </span>
         </div>
 
@@ -275,16 +352,19 @@ export default async function StatementPage({
                   document-number and amount columns. */}
               <table className="w-full table-fixed border-collapse text-[11px]">
                 <colgroup>
-                  <col className="w-[9%]" />
-                  <col className="w-[16%]" />
-                  <col className="w-[17%]" />
+                  <col className="w-[8%]" />
+                  <col className="w-[14%]" />
+                  <col className="w-[15%]" />
                   {/* Wide enough for "Χρεωστούμενο" on one line — at 10% it
                       broke mid-word, which reads as a rendering fault. */}
-                  <col className="w-[13%]" />
-                  <col className="w-[10%]" />
+                  <col className="w-[12%]" />
                   <col className="w-[9%]" />
+                  <col className="w-[8%]" />
+                  <col className="w-[10%]" />
+                  {/* Υπόλοιπο — the widest of the money columns, because it is
+                      the only one that carries a minus sign. */}
                   <col className="w-[11%]" />
-                  <col className="w-[15%]" />
+                  <col className="w-[13%]" />
                 </colgroup>
                 <thead>
                   {/* Repeated on every printed page — a three-page statement
@@ -296,12 +376,13 @@ export default async function StatementPage({
                     <th className="py-1.5 pr-2 font-semibold">Είδος</th>
                     <th className="py-1.5 pr-2 text-right font-semibold">Καθαρή</th>
                     <th className="py-1.5 pr-2 text-right font-semibold">Φ.Π.Α.</th>
-                    <th className="py-1.5 pr-3 text-right font-semibold">Σύνολο</th>
+                    <th className="py-1.5 pr-2 text-right font-semibold">Σύνολο</th>
+                    <th className="py-1.5 pr-3 text-right font-semibold">Υπόλοιπο</th>
                     <th className="py-1.5 pl-1 font-semibold">Κατάσταση</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {transactions.map((t) => (
+                  {ledger.map(({ txn: t, balance }) => (
                     // Kept whole across a page break.
                     <tr
                       key={t.id}
@@ -333,7 +414,7 @@ export default async function StatementPage({
                         {t.vat_amount != null ? moneyAbs(t.vat_amount) : "—"}
                       </td>
                       <td
-                        className={`py-1.5 pr-3 text-right align-top font-semibold tabular-nums ${
+                        className={`py-1.5 pr-2 text-right align-top font-semibold tabular-nums ${
                           t.is_debt
                             ? "text-amber-700"
                             : t.is_revenue
@@ -343,12 +424,48 @@ export default async function StatementPage({
                       >
                         {moneyAbs(t.amount)}
                       </td>
+                      {/* The only SIGNED column in the document: a running
+                          balance that hid its own minus sign would be a number
+                          nobody could act on. */}
+                      <td
+                        className={`py-1.5 pr-3 text-right align-top tabular-nums ${
+                          balance < 0 ? "text-rose-700" : "text-slate-900"
+                        }`}
+                      >
+                        {money(balance)}
+                      </td>
                       <td className="py-1.5 pl-1 align-top break-words">
                         {paymentStatus(t)}
                       </td>
                     </tr>
                   ))}
                 </tbody>
+                {/* The tie-out. Σύνολο totals to exactly the last running
+                    balance, which is the check a reader runs on any ledger. */}
+                <tfoot>
+                  <tr className="border-t-2 border-slate-900 font-semibold break-inside-avoid">
+                    <td className="py-1.5 pr-2" colSpan={4}>
+                      Σύνολα περιόδου ({transactions.length} κινήσεις)
+                    </td>
+                    <td className="py-1.5 pr-2 text-right tabular-nums">
+                      {money(round2(totals.net))}
+                    </td>
+                    <td className="py-1.5 pr-2 text-right tabular-nums">
+                      {money(round2(totals.vat))}
+                    </td>
+                    <td className="py-1.5 pr-2 text-right tabular-nums">
+                      {money(round2(totals.gross))}
+                    </td>
+                    <td
+                      className={`py-1.5 pr-3 text-right tabular-nums ${
+                        closing < 0 ? "text-rose-700" : "text-slate-900"
+                      }`}
+                    >
+                      {money(closing)}
+                    </td>
+                    <td className="py-1.5 pl-1" />
+                  </tr>
+                </tfoot>
               </table>
             </div>
           )}
@@ -400,8 +517,10 @@ export default async function StatementPage({
 
         <footer className="mt-8 border-t border-slate-300 pt-3 text-[10px] text-slate-500">
           Τα ποσά εμφανίζονται ως απόλυτες τιμές· η στήλη «Είδος» δηλώνει την
-          κατεύθυνση (Έσοδο / Έξοδο / Χρεωστούμενο). Η καρτέλα αφορά αποκλειστικά
-          τον παραπάνω πελάτη.
+          κατεύθυνση (Έσοδο / Έξοδο / Χρεωστούμενο). Η στήλη «Υπόλοιπο» είναι το
+          προοδευτικό υπόλοιπο της καρτέλας: τα έσοδα και τα χρεωστούμενα το
+          αυξάνουν, τα έξοδα το μειώνουν. Η καρτέλα αφορά αποκλειστικά τον
+          παραπάνω πελάτη.
         </footer>
       </article>
     </div>

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Receipt, Search, X } from "lucide-react";
 import type { TransactionRow } from "@/lib/types";
 import { bulkDeleteTransactions } from "@/lib/api";
+import type { ExportPeriod } from "@/lib/exports";
 import { money, moneyAbs } from "@/lib/format";
 import { searchHaystack, searchKey } from "@/lib/text";
 import { useSelection } from "@/lib/useSelection";
@@ -12,6 +13,7 @@ import { clsx } from "@/lib/clsx";
 import { Badge } from "./ui/Badge";
 import { BulkActionBar } from "./bulk/BulkActionBar";
 import { SelectCheckbox } from "./bulk/SelectCheckbox";
+import { ExportButton } from "./ExportButton";
 import { ImportDataButton } from "./ImportDataModal";
 import { useClientDrawer } from "./ClientDrawerProvider";
 
@@ -74,11 +76,14 @@ function matches(t: TransactionRow, needle: string): boolean {
 export function TransactionsTable({
   rows,
   clientIds,
+  period,
 }: {
   rows: TransactionRow[];
   /** name-key -> client id, so a row can open the drawer. Rows whose client
    *  has no row (a name-only legacy transaction) simply are not clickable. */
   clientIds: Record<string, number>;
+  /** Passed to the export link so the file covers the period on screen. */
+  period?: ExportPeriod | null;
 }) {
   const { openClient } = useClientDrawer();
   const router = useRouter();
@@ -126,8 +131,12 @@ export function TransactionsTable({
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
           {/* First in the toolbar rather than last: on an empty book the
               filters and the search box have nothing to act on, and this is
-              the control that gives them something. */}
-          <ImportDataButton kind="transactions" />
+              the control that gives them something. Export sits immediately
+              beside it — in and out of the same table, in one place. */}
+          <div className="flex items-center gap-2">
+            <ImportDataButton kind="transactions" />
+            <ExportButton kind="transactions" period={period} compact />
+          </div>
 
           <div className="flex rounded-lg border border-slate-200 p-0.5 dark:border-slate-700">
             {FILTERS.map((f) => (

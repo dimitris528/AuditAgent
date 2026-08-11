@@ -5,12 +5,14 @@ import { useRouter } from "next/navigation";
 import { Search, Users, X } from "lucide-react";
 import type { ClientData, DebtAlerts } from "@/lib/types";
 import { bulkArchiveClients, bulkDeleteClients } from "@/lib/api";
+import type { ExportPeriod } from "@/lib/exports";
 import { searchHaystack, searchKey } from "@/lib/text";
 import { useSelection } from "@/lib/useSelection";
 import { clsx } from "@/lib/clsx";
 import { ClientCard } from "./ClientCard";
 import { BulkActionBar } from "./bulk/BulkActionBar";
 import { SelectCheckbox } from "./bulk/SelectCheckbox";
+import { ExportButton } from "./ExportButton";
 import { ImportDataButton } from "./ImportDataModal";
 import { useClientDrawer } from "./ClientDrawerProvider";
 
@@ -37,6 +39,9 @@ interface Props {
    *  viewport-based column classes below fire on a wide screen even though the
    *  container is ~370px, and the cards collapse. */
   compact?: boolean;
+  /** Passed to the export link so the figures in the file cover the period on
+   *  screen. */
+  period?: ExportPeriod | null;
 }
 
 export function ClientGrid({
@@ -44,6 +49,7 @@ export function ClientGrid({
   archivedClients,
   alerts,
   compact = false,
+  period,
 }: Props) {
   const { openClient } = useClientDrawer();
   const router = useRouter();
@@ -144,8 +150,19 @@ export function ClientGrid({
           {/* Pushed to the far end of the heading row: bulk import is a
               setup-time action, and it must not sit where the eye looks for
               the client count. Compact in the rail, where the whole panel is
-              ~370px wide. */}
-          <ImportDataButton kind="clients" compact={compact} className="ml-auto" />
+              ~370px wide — and the export beside it drops to an icon there for
+              the same reason. */}
+          <div className="ml-auto flex items-center gap-1.5">
+            <ImportDataButton kind="clients" compact={compact} />
+            <ExportButton
+              kind="clients"
+              period={period}
+              compact
+              label={compact ? "" : "Εξαγωγή CSV"}
+              title="Λήψη του πελατολογίου σε CSV (Excel)"
+              className={compact ? "px-1.5" : undefined}
+            />
+          </div>
         </div>
 
         {showScopes ? (

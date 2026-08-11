@@ -39,12 +39,12 @@ export function PdfExportButton({
       rel="noopener noreferrer"
       title={title}
       className={clsx(
-        "inline-flex h-9 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-600 transition hover:border-slate-300 hover:text-slate-900",
+        "inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-600 transition hover:border-slate-300 hover:text-slate-900",
         "dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:border-slate-600 dark:hover:text-white",
         className,
       )}
     >
-      <FileText className="h-4 w-4" />
+      <FileText className="h-3.5 w-3.5" />
       {label}
     </Link>
   );

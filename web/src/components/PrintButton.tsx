@@ -39,7 +39,7 @@ export function PrintButton({
       onClick={() => window.print()}
       // Hidden on the printed page: a screenshot of a button on a statement
       // that was sent to a client looks like a mistake, because it is one.
-      className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-indigo-600 px-3.5 text-xs font-semibold text-white transition hover:bg-indigo-500 print:hidden"
+      className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-indigo-600 px-3 text-xs font-semibold text-white transition hover:bg-indigo-500 print:hidden"
     >
       <Printer className="h-4 w-4" />
       {label}

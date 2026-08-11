@@ -24,6 +24,7 @@ import type {
   PeriodInfo,
   TransactionRow,
 } from "@/lib/types";
+import { exportUrl } from "@/lib/exports";
 import { money, moneyAbs } from "@/lib/format";
 import { clsx } from "@/lib/clsx";
 import { Badge } from "./ui/Badge";
@@ -41,25 +42,27 @@ type Tab = "info" | "transactions";
 const field =
   "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 dark:border-slate-700 dark:bg-slate-800 dark:text-white";
 const labelCls = "mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400";
+/** The secondary document actions beside the primary Καρτέλα button. */
+const docAction =
+  "inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-300 px-2.5 text-xs font-medium text-slate-600 transition hover:border-slate-400 hover:text-slate-900 dark:border-slate-700 dark:text-slate-300 dark:hover:border-slate-600 dark:hover:text-white";
 
 /**
- * The query string the statement and per-client CSV links carry.
+ * The query string the statement link carries.
  *
- * Both honour the period the drawer is showing, so the document a user
- * downloads says the same thing the figures above it do. `print=1` makes the
- * statement open its print dialog on load, which is what turns the link into a
- * "Download PDF" for the user.
+ * It honours the period the drawer is showing, so the document a user prints
+ * says the same thing the figures above it do. `print=1` makes the statement
+ * open its print dialog on load, which is what turns the link into a "Download
+ * PDF" for the user. (The CSV links use lib/exports.exportUrl — same period,
+ * different endpoint.)
  */
 function statementQuery(
   period: Pick<PeriodInfo, "year" | "quarter" | "month">,
   autoPrint: boolean,
-  clientId?: number,
 ): string {
   const qs = new URLSearchParams();
   if (period.year) qs.set("year", String(period.year));
   if (period.quarter) qs.set("quarter", String(period.quarter));
   if (period.month) qs.set("month", String(period.month));
-  if (clientId != null) qs.set("client_id", String(clientId));
   if (autoPrint) qs.set("print", "1");
   return qs.toString() ? `?${qs}` : "";
 }
@@ -328,26 +331,50 @@ export function ClientDrawer({ clientId, period, vatRates, onClose }: Props) {
               </div>
 
               {/* Document actions. On both tabs, because "get this client's
-                  paperwork out" is not a thing you go to a tab for. */}
-              <div className="mb-5 flex flex-wrap gap-2">
+                  paperwork out" is not a thing you go to a tab for.
+
+                  The Καρτέλα is styled as the PRIMARY action and the two CSVs
+                  as secondary: it is the document a client is actually sent —
+                  identity, ledger, παραστατικά and running balance in one
+                  printable page — while a CSV is raw material for a
+                  spreadsheet. Three equally-weighted outline buttons made the
+                  one people wanted the hardest of the three to find. */}
+              <div className="mb-5 flex flex-wrap items-center gap-2">
                 <a
                   href={`/clients/${data.client.id}/statement${statementQuery(period, true)}`}
                   // A new tab: the statement is a document, and printing it
                   // must not throw away the drawer the user was working in.
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-300 px-2.5 text-xs font-medium text-slate-600 transition hover:border-slate-400 hover:text-slate-900 dark:border-slate-700 dark:text-slate-300 dark:hover:border-slate-600 dark:hover:text-white"
+                  title="Εκτυπώσιμη καρτέλα με στοιχεία πελάτη, κινήσεις, παραστατικά και προοδευτικό υπόλοιπο"
+                  className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-indigo-600 px-3 text-xs font-semibold text-white transition hover:bg-indigo-500"
                 >
                   <FileText className="h-3.5 w-3.5" />
-                  Καρτέλα πελάτη (PDF)
+                  Καρτέλα Πελάτη (PDF)
                 </a>
                 <a
-                  href={`/api/exports/transactions${statementQuery(period, false, data.client.id)}`}
+                  href={exportUrl("transactions", {
+                    period,
+                    clientId: data.client.id,
+                  })}
                   download
-                  className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-300 px-2.5 text-xs font-medium text-slate-600 transition hover:border-slate-400 hover:text-slate-900 dark:border-slate-700 dark:text-slate-300 dark:hover:border-slate-600 dark:hover:text-white"
+                  title="Λήψη των κινήσεων αυτού του πελάτη σε CSV (Excel)"
+                  className={docAction}
                 >
                   <Download className="h-3.5 w-3.5" />
-                  Εξαγωγή CSV
+                  Κινήσεις CSV
+                </a>
+                <a
+                  href={exportUrl("invoices", {
+                    period,
+                    clientId: data.client.id,
+                  })}
+                  download
+                  title="Λήψη μόνο των παραστατικών αυτού του πελάτη σε CSV (Excel)"
+                  className={docAction}
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  Παραστατικά CSV
                 </a>
               </div>
 
