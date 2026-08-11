@@ -42,11 +42,35 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt
 
+      - name: Show environment
+        # Cheap, and it is what turns "exit code 4" into a diagnosis: the
+        # collected count says immediately whether a failure is a broken test or
+        # a suite that never loaded at all.
+        #
+        # Written to a file rather than piped into `tail`, because the runner's
+        # shell is `bash -e` WITHOUT pipefail — a pipeline reports the exit code
+        # of its last command, so `pytest ... | tail` would swallow exactly the
+        # collection error this step exists to catch.
+        run: |
+          python --version
+          python -m pytest --version
+          python -m pytest tests --collect-only -q > collected.txt
+          tail -1 collected.txt
+
       - name: Run tests
+        # `python -m pytest`, NOT bare `pytest`: -m prepends the working
+        # directory to sys.path, which is what lets tests/conftest.py import
+        # `server` and `finance` from the repo root. pytest.ini pins the same
+        # thing via pythonpath, so either form works now — this one states the
+        # intent at the call site as well.
+        #
+        # The path is explicit for the same reason: `pytest` with nothing to go
+        # on is one stray config file away from collecting nothing and passing.
+        #
         # The suite runs against a throwaway SQLite file (tests/conftest.py) and
         # needs no Postgres, no Airtable and no API keys — so there are no
         # secrets here, and a fork's pull request can run it unchanged.
-        run: pytest -q
+        run: python -m pytest tests -q
 
   web:
     name: Web (next build)
