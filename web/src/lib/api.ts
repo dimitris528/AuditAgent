@@ -439,15 +439,47 @@ export const MIN_PASSWORD_LENGTH = 8;
  */
 export const TRIAL_DAYS = 14;
 
+/** What the signup form posts. The office first, because that is the tenant
+ *  being created; the person filling it in becomes its first admin. */
+export interface RegistrationRequest {
+  /** Επωνυμία γραφείου / εταιρείας. */
+  company_name: string;
+  /** Ονοματεπώνυμο of the person signing up. */
+  full_name: string;
+  email: string;
+  password: string;
+  /** The Terms/Privacy checkbox. The API refuses the signup without it — a
+   *  checkbox enforced only in the browser is not consent anybody can prove. */
+  accept_terms: boolean;
+  /** Which version of the documents the form displayed, so the stored consent
+   *  records what was actually on screen. See @/lib/legal. */
+  terms_version?: string;
+}
+
+export interface RegistrationResult {
+  ok: boolean;
+  /** Derived from the email by the API — the form never asks for one. */
+  username?: string;
+  email?: string;
+  company_name?: string | null;
+  full_name?: string | null;
+  role?: string;
+}
+
+/**
+ * Create a tenant and sign in as its admin, in one request.
+ *
+ * The session comes back as an httpOnly cookie set by the route handler, so
+ * there is nothing to store here and the caller can navigate straight to the
+ * dashboard.
+ */
 export async function register(
-  username: string,
-  email: string,
-  password: string,
-): Promise<{ ok: boolean; username?: string; email?: string }> {
+  body: RegistrationRequest,
+): Promise<RegistrationResult> {
   const res = await fetch(`/api/auth/register`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username, email, password }),
+    body: JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {

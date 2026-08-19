@@ -103,6 +103,9 @@ export interface DashboardData {
   doc_types: DocTypeInfo[];
   debt_alerts: DebtAlerts;
   username: string;
+  /** Who the office is, for the letterhead of anything printed off the
+   *  dashboard. Optional so an older backend response still typechecks. */
+  issuer?: StatementIssuer | null;
   /** False when the backend has no OPENAI_API_KEY — the scan button is then
    *  hidden rather than offered as a control that can only fail. */
   scan_enabled: boolean;
@@ -472,7 +475,12 @@ export interface ClientSummary {
 
 /** Who issued the statement — the signed-in tenant, for the letterhead. */
 export interface StatementIssuer {
+  /** The office's registered name, collected at signup. Falls back to the
+   *  username for accounts created before public onboarding existed. */
   name: string;
+  /** The person who signed up, for the letterhead's "υπεύθυνος" line. Null on
+   *  those same pre-onboarding accounts. */
+  contact?: string | null;
   email: string | null;
 }
 

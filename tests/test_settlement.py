@@ -152,11 +152,12 @@ def test_settling_an_already_paid_debt_is_refused(api):
     assert again.status_code == 422
 
 
-def test_another_tenants_debt_is_not_settleable(api):
+def test_another_tenants_debt_is_not_settleable(api, signup):
     debt_id = _open_debt(api)
-    api.post("/api/v1/auth/register", json={
-        "username": "intruder", "email": "intruder@example.com",
-        "password": "another-long-password"})
+    api.post("/api/v1/auth/register", json=signup(
+        username="intruder", email="intruder@example.com",
+        company_name="Γραφείο Εισβολέα", full_name="Εισβολέας Εισβολίδης",
+        password="another-long-password"))
     token = api.post("/api/auth/login", json={
         "username": "intruder", "password": "another-long-password"}
     ).json()["access_token"]

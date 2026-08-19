@@ -120,6 +120,27 @@ services:
         sync: false
       - key: FRONTEND_ORIGIN_REGEX
         sync: false
+      # Error monitoring (server/monitoring.py). Unset => nothing is
+      # initialised, no integrations are patched in and no network calls are
+      # made; the API behaves exactly as it did before monitoring existed.
+      #
+      # Take the DSN from Sentry -> Project Settings -> Client Keys. It is
+      # write-only ingest rather than a credential, but it is set per
+      # environment rather than committed so a staging deploy cannot pollute the
+      # production issue stream.
+      - key: SENTRY_DSN
+        sync: false
+      # The tag every event is filed under. Pinned here rather than left to the
+      # derivation in config.py, so the production manifest STATES it — an event
+      # tagged "development" in production is an alert nobody routes.
+      - key: SENTRY_ENVIRONMENT
+        value: production
+      # Fraction of requests traced for performance, 0.0–1.0. 10% is enough to
+      # see a latency regression and cheap enough to leave on permanently;
+      # tracing everything is the fastest way to exhaust a Sentry quota on the
+      # dashboard's own polling.
+      - key: SENTRY_TRACES_SAMPLE_RATE
+        value: "0.1"
 
   # --- Next.js frontend (native Node runtime) -----------------------------
   - type: web
@@ -147,3 +168,32 @@ services:
           property: host
       - key: NODE_ENV
         value: production
+      # Sentry for the browser and for the Next server.
+      #
+      # NEXT_PUBLIC_ is REQUIRED and is the one variable on this service that is
+      # genuinely build-time: Next inlines it into the client bundle when
+      # `npm run build` runs, and the browser can see nothing else. So it must
+      # be set BEFORE a build — setting it afterwards and restarting leaves an
+      # undefined DSN baked into the JavaScript and the browser reports nothing,
+      # silently. Trigger a fresh deploy after adding it.
+      #
+      # This is the opposite of API_BASE_URL, a few lines up, which must NOT be
+      # inlined. Both rules exist for the same reason and point in different
+      # directions; see the note in web/next.config.mjs.
+      - key: NEXT_PUBLIC_SENTRY_DSN
+        sync: false
+      - key: NEXT_PUBLIC_SENTRY_ENVIRONMENT
+        value: production
+      - key: NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE
+        value: "0.1"
+      # OPTIONAL, and only for readable stack traces: with all three set, the
+      # build uploads source maps to Sentry and deletes them from the output
+      # afterwards (so the originals are never served from our own domain).
+      # Without them the build logs one line and skips the upload — no secrets
+      # are needed to deploy.
+      - key: SENTRY_ORG
+        sync: false
+      - key: SENTRY_PROJECT
+        sync: false
+      - key: SENTRY_AUTH_TOKEN
+        sync: false

@@ -37,10 +37,18 @@ import auth
 import finance
 import passwords
 from config import DOCS_ENABLED, STRIPE_WEBHOOK_SECRET
-from server import (billing, database, deps, errors, exports, imports, mailer,
-                    mfa, middleware, ocr, store, subscription, tenancy)
+from server import (billing, database, deps, errors, exports, imports, legal,
+                    mailer, mfa, middleware, monitoring, ocr, password_policy,
+                    store, subscription, tenancy)
 from server.billing import router as billing_router
 from server.webhooks import router as webhooks_router
+
+# BEFORE the app is built, and deliberately at import time rather than in the
+# lifespan hook: an exception raised while FastAPI is constructing routes or
+# while a module below is importing happens before any lifespan runs, and those
+# are precisely the failures that leave a service dead on arrival with nothing
+# in Sentry to say why. No-op without SENTRY_DSN — see server/monitoring.py.
+monitoring.init()
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -150,10 +158,12 @@ app.add_middleware(
 
 TREND_MONTHS = int(os.getenv("DASHBOARD_TREND_MONTHS", "12"))
 # Shortest password we will store, enforced server-side; the UI only mirrors
-# it. (The free-trial length lives in server/subscription.py, which owns both
+# it. Re-exported from server/password_policy.py rather than defined here, so
+# the length gate and the rest of the strength rules cannot disagree about the
+# floor. (The free-trial length lives in server/subscription.py, which owns both
 # granting the trial and expiring it — so the two cannot disagree about how
 # long 14 days is.)
-MIN_PASSWORD_LENGTH = 8
+MIN_PASSWORD_LENGTH = password_policy.MIN_LENGTH
 _TXN_TYPES = {"Έσοδο", "Έξοδο", finance.DEBT_TYPE}
 
 
@@ -179,9 +189,34 @@ class LoginRequest(BaseModel):
 
 
 class RegisterRequest(BaseModel):
-    username: str = Field(..., min_length=3, max_length=120)
+    """What the public signup form posts.
+
+    The TENANT's identity comes first, because that is what is being created: an
+    accounting office, with the person filling the form in as its first admin.
+    """
+    # Επωνυμία γραφείου / εταιρείας — the tenant's own name.
+    company_name: str = Field(..., min_length=2, max_length=200)
+    # Ονοματεπώνυμο — the human being signing up.
+    full_name: str = Field(..., min_length=2, max_length=200)
     email: EmailStr
-    password: str = Field(..., min_length=8, max_length=200)
+    # Bounded here only so an unauthenticated caller cannot make the server
+    # PBKDF2 an unbounded string; the real rule is server/password_policy.py,
+    # which is applied below and gives an actionable reason rather than a
+    # schema error.
+    password: str = Field(..., min_length=1,
+                          max_length=password_policy.MAX_LENGTH)
+    # The Terms/Privacy checkbox. Required and required TRUE — see the endpoint.
+    accept_terms: bool = False
+    # Which version of the documents was on screen. Echoed back by the form so
+    # the record says what was actually displayed rather than what the server
+    # assumes it displayed; falls back to the current version for a caller that
+    # does not send one.
+    terms_version: str | None = Field(default=None, max_length=64)
+    # OPTIONAL, and not collected by the signup form: the username is derived
+    # from the email. It stays accepted because the tenant key predates public
+    # signup — the test suite, scripts/create_admin.py and every existing token
+    # key tenancy on it — so a caller that knows what it wants can still say.
+    username: str | None = Field(default=None, min_length=3, max_length=120)
 
 
 class MfaVerify(BaseModel):
@@ -474,6 +509,9 @@ def status():
         # own rather than inferring from the line above.
         "stripe_portal_configured": billing.portal_is_configured(),
         "trial_days": subscription.TRIAL_DAYS,
+        # Whether crashes are actually being reported anywhere. A boolean, never
+        # the DSN: this endpoint is public and echoes no secrets.
+        "sentry_configured": monitoring.is_configured(),
     }
     if configured:
         try:
@@ -511,6 +549,16 @@ def meta():
         "scan_enabled": ocr.is_configured(),
         "scan_accepts": list(ocr.SUPPORTED_TYPES),
         "scan_max_bytes": ocr.MAX_BYTES,
+        # What the signup form needs to render itself honestly: the trial it is
+        # advertising, the password rule it will be judged by, and the version
+        # of the legal documents whose acceptance it is about to record.
+        "trial_days": subscription.TRIAL_DAYS,
+        "password": {
+            "min_length": password_policy.MIN_LENGTH,
+            "max_length": password_policy.MAX_LENGTH,
+            "passphrase_length": password_policy.PASSPHRASE_LENGTH,
+        },
+        "legal": legal.to_dict(),
     }
 
 
@@ -787,46 +835,89 @@ def me(user: str = Depends(get_current_user)):
 
 @app.post("/api/v1/auth/register", status_code=201)
 def register(body: RegisterRequest):
-    """Self-service signup, writing straight to PostgreSQL.
+    """Public tenant onboarding: an office signs itself up, in one request.
+
+    What gets created
+    -----------------
+    A TENANT (the accounting office, named by `company_name`), its first ADMIN
+    user (the person filling the form in), the default role, and the free-trial
+    metadata — all in a single transaction, so there is no window in which any
+    of it exists without the rest. See store.register_tenant, which owns that
+    guarantee; this function owns deciding whether the request deserves it.
 
     Every new account starts on a free 14-day trial: `subscription_status`
     "trialing" and `trial_ends_at` = now + TRIAL_DAYS. No card, no extra step —
-    the trial is granted by the act of registering.
+    the trial is granted by the act of registering. `trial_ends_at` is what the
+    paywall reads (server/subscription.py): the first request after it passes
+    flips the account to "inactive", and a paid Stripe checkout clears the date
+    entirely (see server/webhooks.py).
 
-    `trial_ends_at` is what the paywall reads (server/subscription.py): the
-    first request after it passes flips the account to "inactive", and a paid
-    Stripe checkout clears the date entirely (see server/webhooks.py).
+    Signing in is part of registering
+    ---------------------------------
+    The response carries a session, exactly as /api/auth/login does, and the
+    Next route handler in front of this puts it in the httpOnly cookie. There is
+    no email-verification step, and that is a decision rather than an omission:
+    a 14-day trial is already a weak-enough grant that gating it behind a click
+    in an inbox costs more signups than it prevents abuse — and the abuse it
+    would prevent is better handled by the rate limit below, which stops the
+    flood at the door rather than after the row is written. Mail delivery is
+    also the least reliable part of this deployment (see server/mailer.py), so
+    requiring it would make signup fail whenever email did.
 
-    Availability is checked first for a friendly 409, but the UNIQUE
-    constraints on username/email are the real guard — two simultaneous
-    signups for the same name both pass the check, and the loser gets an
-    IntegrityError rather than a duplicate account.
+    Uniqueness
+    ----------
+    Availability is checked first for a friendly 409, but the UNIQUE constraints
+    on username/email are the real guard — two simultaneous signups for the same
+    address both pass the check, and the loser gets an IntegrityError rather
+    than a duplicate account.
     """
     _require_db()
 
-    username = body.username.strip()
     email = body.email.strip().lower()
-    if len(body.password) < MIN_PASSWORD_LENGTH:
+    company_name = body.company_name.strip()
+    full_name = body.full_name.strip()
+    username = (body.username or "").strip() or None
+
+    # Consent BEFORE anything is written. A checkbox enforced only in the
+    # browser is not consent anybody can prove afterwards, and "we have a record
+    # of what they agreed to and when" is the entire point of asking — see
+    # server/legal.py.
+    if not body.accept_terms:
         raise HTTPException(
             status_code=422,
-            detail=f"Ο κωδικός πρέπει να έχει τουλάχιστον {MIN_PASSWORD_LENGTH} χαρακτήρες.")
+            detail="Πρέπει να αποδεχθείτε τους Όρους Χρήσης και την Πολιτική "
+                   "Απορρήτου για να δημιουργήσετε λογαριασμό.")
+
+    # The full policy, not just a length — and given the identity, so a password
+    # made out of the office's own name is refused. The message is the one the
+    # form shows, so it has to say what to do differently.
+    weak = password_policy.problem(
+        body.password, email=email, username=username,
+        company_name=company_name, full_name=full_name)
+    if weak:
+        raise HTTPException(status_code=422, detail=weak)
 
     try:
         with database.session_scope() as session:
-            if store.get_user_by_username(session, username):
+            if username and store.get_user_by_username(session, username):
                 raise HTTPException(
                     status_code=409, detail="Το όνομα χρήστη χρησιμοποιείται ήδη.")
             if store.get_user_by_email(session, email):
                 raise HTTPException(
-                    status_code=409, detail="Το email χρησιμοποιείται ήδη.")
-            user = store.create_user(
+                    status_code=409,
+                    detail="Υπάρχει ήδη λογαριασμός με αυτό το email. "
+                           "Συνδεθείτε ή ζητήστε επαναφορά κωδικού.")
+            user = store.register_tenant(
                 session,
-                username=username,
+                company_name=company_name,
+                full_name=full_name,
                 email=email,
                 # Hashed here — a plaintext password never reaches the database.
                 password_hash=passwords.hash_password(body.password),
-                subscription_status=subscription.TRIALING,
-                trial_ends_at=subscription.trial_end(),
+                username=username,
+                # What the form actually displayed, when it said. The server's
+                # own current version otherwise.
+                terms_version=body.terms_version or legal.CONSENT_VERSION,
             )
             token = auth.create_access_token(user.username)
             state = subscription.resolve(user.subscription_status,
@@ -837,13 +928,18 @@ def register(body: RegisterRequest):
                 "token_type": "bearer",
                 "username": user.username,
                 "email": user.email,
+                "company_name": user.company_name,
+                "full_name": user.full_name,
+                "role": user.role,
                 "subscription": state.to_dict(),
                 "expires_hours": auth.JWT_EXPIRE_HOURS,
             }
     except HTTPException:
         raise
     except IntegrityError:
-        # Lost the race against a simultaneous signup.
+        # Lost the race against a simultaneous signup. Nothing was written —
+        # register_tenant is one transaction — so there is no half-made tenant
+        # to clean up before answering.
         raise HTTPException(
             status_code=409, detail="Το όνομα χρήστη ή το email χρησιμοποιείται ήδη.")
     except auth.AuthError as exc:
@@ -921,10 +1017,18 @@ def reset_password(body: ResetPasswordRequest):
     which proves it is the one they think they set.
     """
     _require_db()
-    if len(body.password) < MIN_PASSWORD_LENGTH:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Ο κωδικός πρέπει να έχει τουλάχιστον {MIN_PASSWORD_LENGTH} χαρακτήρες.")
+    # The same rule signup applies. It has to be: a reset is the other way into
+    # setting a password, and a policy enforced on only one of them is a policy
+    # anybody can walk around by asking for a reset link.
+    #
+    # Without the identity arguments, though, so the "must not contain your own
+    # email" clause does not apply here. Not an oversight: the account is not
+    # known until the token is consumed, and consuming it is single-use and
+    # irreversible — checking first would mean spending the user's only reset
+    # link to tell them their password was weak.
+    weak = password_policy.problem(body.password)
+    if weak:
+        raise HTTPException(status_code=422, detail=weak)
     try:
         with database.session_scope() as session:
             user = store.consume_reset_token(session, body.token)
@@ -972,11 +1076,22 @@ def dashboard(user: str = Depends(get_current_user),
     # Settlement progress for the debt rows in the table below. One extra query
     # for the whole page; _serialize_txn needs it to show "paid X of Y".
     paid_by_debt = {}
+    issuer = None
     try:
         with database.session_scope() as session:
             tenant = _resolve_user(session, user)
             paid_by_debt = store.paid_by_debt(
                 store.get_debt_payments(session, tenant))
+            # Same shape the client statement carries, and for the same reason:
+            # the Οικονομική Σύνοψη is printed and sent, and a document with a
+            # login name where the office's name belongs is not one anybody
+            # would put their signature under. Read from the tenant row already
+            # loaded above, so it costs no extra query.
+            issuer = {
+                "name": tenant.company_name or tenant.username,
+                "contact": tenant.full_name,
+                "email": tenant.email,
+            }
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
@@ -988,6 +1103,7 @@ def dashboard(user: str = Depends(get_current_user),
                                       # because a past period is selected.
                                       all_transactions=transactions)
     payload["username"] = user
+    payload["issuer"] = issuer
     payload["scan_enabled"] = ocr.is_configured()
     # The period's rows, newest first, for the dashboard's transactions table.
     # Carried on this payload rather than fetched separately: the table is on
@@ -1153,8 +1269,15 @@ def get_client(client_id: int, user: str = Depends(get_current_user),
                 # printed Καρτέλα Πελάτη that does not say who issued it is not
                 # a document anyone can act on — it went out with a hard-coded
                 # product name and nothing else.
+                #
+                # The COMPANY name leads, now that signup collects it: a
+                # statement is issued by the office, not by a login. The
+                # username remains the fallback for accounts created before
+                # that field existed, which is the only reason it was ever the
+                # letterhead.
                 "issuer": {
-                    "name": tenant.username,
+                    "name": tenant.company_name or tenant.username,
+                    "contact": tenant.full_name,
                     "email": tenant.email,
                 },
                 "summary": _client_summary(client.name, scoped),

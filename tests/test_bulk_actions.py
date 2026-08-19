@@ -272,15 +272,15 @@ def test_bulk_actions_require_a_session(path):
     "/api/clients/bulk-delete",
     "/api/clients/bulk-archive",
 ])
-def test_one_tenant_cannot_touch_anothers_rows(api, path):
+def test_one_tenant_cannot_touch_anothers_rows(api, path, signup):
     """The ids are real — they simply belong to somebody else, and must be
     indistinguishable from ids that do not exist."""
     client = make_client(api, "Νησίδα Café")
     txn = make_txn(api, "Νησίδα Café")
 
-    other = api.post("/api/v1/auth/register", json={
-        "username": "outsider", "email": "outsider@example.com",
-        "password": "correct-horse-battery"})
+    other = api.post("/api/v1/auth/register", json=signup(
+        username="outsider", email="outsider@example.com",
+        company_name="Ξένο Γραφείο", full_name="Ξένος Ξενίδης"))
     token = other.json()["access_token"]
 
     target = txn if "transactions" in path else client

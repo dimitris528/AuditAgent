@@ -3,15 +3,15 @@ Create the owner's account on a freshly wiped production database.
 
 WHAT "ADMIN" MEANS HERE
 -----------------------
-There is no admin ROLE in this application. `users` has no is_admin, no role
-column, and no endpoint checks for one — every account is a tenant that sees
-its own books and nothing else (server/store.py scopes every query by
-user_id). So this script does not grant elevated privileges, because there are
-none to grant. What it creates is the OWNER'S OWN tenant: an ordinary account
-that happens to be the first one in the database, with its subscription set to
-`active` so it is not on a 14-day clock.
+`users.role` exists and defaults to "admin", but it describes a position WITHIN
+one tenant, not across them: every account is the admin of its own books and
+nothing else (server/store.py scopes every query by user_id, and no endpoint
+reads the column to grant privilege). So this script does not grant elevated
+privileges, because there are none to grant. What it creates is the OWNER'S OWN
+tenant: an ordinary account that happens to be the first one in the database,
+with its subscription set to `active` so it is not on a 14-day clock.
 
-If you want a genuine admin role — one account able to read other tenants'
+If you want a genuine SUPER-admin — one account able to read other tenants'
 data — that is a feature, not a setup step, and it does not exist yet.
 
 WHY NOT JUST REGISTER THROUGH THE UI

@@ -118,17 +118,29 @@ class AuthGateMiddleware(BaseHTTPMiddleware):
 #: `write` covers imports and bulk deletes — each one is a file parse or a few
 #: hundred statements, so a handful a minute is generous for a person and a
 #: hard ceiling for a script.
+#:
+#: `register` is the strictest, and metered over an HOUR rather than a minute.
+#: Signup is the one endpoint an anonymous caller can use to CREATE rows, and
+#: each one costs a 600 000-iteration PBKDF2 hash plus a permanent tenant that
+#: somebody has to look at afterwards. A per-minute window is the wrong shape
+#: for that: a script sleeping 61 seconds between attempts would walk straight
+#: through it and still mint 1 400 accounts a day. An hour-long window is one a
+#: real person never notices — nobody registers five offices in an afternoon —
+#: and one that makes bulk signup pointless rather than merely slow.
 LIMITS = {
+    "register": (5, 3600),
     "auth": (10, 60),
     "write": (20, 60),
     "default": (240, 60),
 }
 
 #: Which bucket a path falls in. Longest match wins, so
-#: /api/v1/auth/mfa/verify is `auth` and not merely `default`.
+#: /api/v1/auth/mfa/verify is `auth` and /api/v1/auth/register is `register`,
+#: rather than both falling back to `default`.
 _BUCKETS = (
     ("/api/auth/login", "auth"),
     ("/api/v1/auth/", "auth"),
+    ("/api/v1/auth/register", "register"),
     ("/api/import/", "write"),
     ("/api/clients/bulk-", "write"),
     ("/api/transactions/bulk-", "write"),

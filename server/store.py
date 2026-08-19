@@ -12,6 +12,7 @@ than by remembering to add a Username filter to each query.
 """
 
 import hashlib
+import re
 import secrets
 from datetime import date, datetime, timedelta, timezone
 
@@ -35,7 +36,7 @@ from server.models import (
     TrustedDevice,
     User,
 )
-from server.text import afm_key, doc_key, name_key
+from server.text import afm_key, doc_key, latinise, name_key
 
 # "full" pays the last cent owed; "partial" leaves a balance behind.
 SETTLEMENT_FULL = "full"
@@ -124,14 +125,74 @@ def get_user_by_stripe_customer(session, customer_id):
     return session.exec(stmt).first()
 
 
+#: The only role there is. See server/models.User.role for why it is stored at
+#: all when nothing yet reads it to grant privilege.
+ROLE_ADMIN = "admin"
+
+#: Characters a derived username may contain. Everything else collapses to a
+#: hyphen. Deliberately narrow — the username ends up in a JWT `sub`, in log
+#: lines and in a Stripe customer's metadata, and none of those are places to
+#: discover that an apostrophe needed escaping.
+_USERNAME_SAFE = re.compile(r"[^a-z0-9._-]+")
+_USERNAME_TRIM = re.compile(r"^[._-]+|[._-]+$")
+
+#: Where the numeric suffix search gives up. Reached only if 200 accounts have
+#: already taken every variant of one base, at which point suggesting a 201st is
+#: not the helpful answer — asking for a different email is.
+_USERNAME_ATTEMPTS = 200
+
+
+def slugify_username(raw):
+    """Turn an email local part (or a name) into a usable username.
+
+    Transliterated rather than merely stripped, because this value is not purely
+    internal: it is the JWT `sub`, it appears in logs, and until a tenant has a
+    company name it is what a printed statement puts on its letterhead. Dropping
+    every Greek letter would turn "μαρια" into the generic fallback, so
+    text.latinise renders it "maria" instead.
+    """
+    folded = latinise(raw or "")
+    slug = _USERNAME_SAFE.sub("-", folded)
+    slug = _USERNAME_TRIM.sub("", slug)[:100]
+    # A local part of nothing but symbols, or a name in a script name_key does
+    # not fold, would otherwise produce an empty username and a confusing
+    # constraint violation instead of a working account.
+    return slug or "user"
+
+
+def available_username(session, preferred):
+    """A free username based on `preferred`, with a numeric suffix if taken.
+
+    NOT a guarantee — two simultaneous signups can both be handed the same
+    answer, and the UNIQUE constraint is what actually decides. That is the
+    correct division: this makes the common case pretty, the constraint makes
+    every case correct.
+    """
+    base = slugify_username(preferred)
+    if get_user_by_username(session, base) is None:
+        return base
+    for suffix in range(2, _USERNAME_ATTEMPTS + 2):
+        candidate = f"{base}-{suffix}"
+        if get_user_by_username(session, candidate) is None:
+            return candidate
+    # Nothing systematic left to try. A random tail always terminates, and the
+    # caller still has the constraint behind it.
+    return f"{base}-{secrets.token_hex(4)}"
+
+
 def create_user(session, username, email, password_hash,
-                subscription_status=None, trial_ends_at=None):
+                subscription_status=None, trial_ends_at=None,
+                company_name=None, full_name=None, role=ROLE_ADMIN,
+                terms_version=None, terms_accepted_at=None, commit=True):
     """Insert a new tenant, on a free trial unless told otherwise.
 
     The trial is the DEFAULT rather than something the caller has to remember:
     a signup that silently skipped it would create an account that is inactive
     from its first request. Callers must check availability first; the unique
     constraints on username/email are the real guard against a race.
+
+    `commit=False` leaves the row pending so a caller can make this one step of
+    a larger transaction — which is what register_tenant() does.
     """
     status = subscription.normalize(subscription_status or subscription.TRIALING)
     # A trial with no deadline is not a trial — subscription.resolve reads the
@@ -145,8 +206,69 @@ def create_user(session, username, email, password_hash,
         password_hash=password_hash,
         subscription_status=status,
         trial_ends_at=trial_ends_at,
+        company_name=(company_name or "").strip() or None,
+        full_name=(full_name or "").strip() or None,
+        role=(role or ROLE_ADMIN).strip().lower(),
+        terms_version=terms_version or None,
+        terms_accepted_at=terms_accepted_at,
     )
     session.add(user)
+    if commit:
+        session.commit()
+        session.refresh(user)
+    return user
+
+
+def register_tenant(session, *, company_name, full_name, email, password_hash,
+                    username=None, terms_version=None, terms_accepted_at=None,
+                    trial_ends_at=None):
+    """Create a whole tenant — office, first admin user, trial — atomically.
+
+    ONE transaction and ONE commit, which is the property the endpoint above it
+    depends on. Everything a new tenant is made of lands together or not at all:
+    there is no window in which an office exists with no user, or a user exists
+    with no trial and is therefore locked out of the product from its first
+    request. A failure anywhere rolls the lot back and the caller can report a
+    clean conflict.
+
+    The tenant IS the user row in this schema (server/models.py): clients,
+    transactions, invoices and payments all hang off `users.id`, so "create the
+    tenant and its first admin" is one INSERT rather than two. That is why this
+    function can promise atomicity without a distributed dance — and why it is
+    written as one call anyway, so that when a second row IS needed (an office
+    with several accountants), the guarantee is already in the right place.
+
+    No sample data is seeded. Some products open a fresh account with a demo
+    client and a couple of transactions; in an accounting ledger that is not a
+    friendly touch but a fabricated entry in somebody's books, and the first
+    thing a real user would have to do is work out which rows were invented.
+
+    RLS note: this runs with NO tenant declared, and must. `users` is one of the
+    two tables scripts/enable_rls.sql leaves with an open policy precisely
+    because it is read and written before any tenant exists to be — a chicken
+    and egg the policies cannot resolve. Nothing tenant-scoped is written here,
+    so nothing needs a tenancy.tenant_scope; anything added later that does must
+    take one, after the flush below has given the row its id.
+    """
+    email = str(email).strip().lower()
+    user = create_user(
+        session,
+        username=username or available_username(session, email.split("@", 1)[0]),
+        email=email,
+        password_hash=password_hash,
+        subscription_status=subscription.TRIALING,
+        trial_ends_at=trial_ends_at or subscription.trial_end(),
+        company_name=company_name,
+        full_name=full_name,
+        role=ROLE_ADMIN,
+        terms_version=terms_version,
+        terms_accepted_at=terms_accepted_at or datetime.now(timezone.utc),
+        # Held back so the whole tenant commits once, below.
+        commit=False,
+    )
+    # Assigns the primary key without ending the transaction, so any future
+    # seed row can reference user.id and still be rolled back with it.
+    session.flush()
     session.commit()
     session.refresh(user)
     return user

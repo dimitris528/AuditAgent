@@ -20,7 +20,19 @@ import { SESSION_COOKIE } from "@/lib/constants";
 // is redirected to /login before they can ever sign up.
 // /reset-password is public for the obvious reason: the whole point is that
 // the visitor cannot log in. It carries its own single-use, expiring token.
-const PUBLIC_PATHS = new Set(["/login", "/register", "/reset-password"]);
+//
+// /terms and /privacy are public because they have to be READ BEFORE the
+// checkbox on the signup form is ticked. A legal document you can only reach
+// once you have already agreed to it is not a document anyone consented to —
+// and a redirect to /login here would make the consent link on the form send
+// visitors to a login page instead of the terms.
+const PUBLIC_PATHS = new Set([
+  "/login",
+  "/register",
+  "/reset-password",
+  "/terms",
+  "/privacy",
+]);
 
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;

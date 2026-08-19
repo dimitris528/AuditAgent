@@ -37,6 +37,17 @@ python-multipart==0.0.32   # REQUIRED by FastAPI for UploadFile — without it t
                            # invoice-scan endpoint raises at import time, not on
                            # first request
 
+# --- Error monitoring ------------------------------------------------------
+# server/monitoring.py. OPTIONAL at runtime in the strongest sense: the import
+# is guarded and nothing is initialised without SENTRY_DSN, so the API runs
+# unchanged with the package absent or the variable unset — which is exactly
+# how the test suite runs, so no test ever emits a real event.
+#
+# The [fastapi] extra pulls the Starlette/FastAPI integrations that attach the
+# request to an event; without them a 500 arrives with a stack trace and no
+# indication of which endpoint produced it.
+sentry-sdk[fastapi]==2.20.0
+
 # --- Invoice OCR ----------------------------------------------------------
 # server/ocr.py reads a scanned PDF/photo into the transaction form via OpenAI
 # Vision (Chat Completions + Structured Outputs). Inactive without

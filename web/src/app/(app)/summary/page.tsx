@@ -148,7 +148,14 @@ export default async function SummaryPage({
             </p>
           </div>
           <div className="text-right text-xs text-slate-600">
-            <div className="text-sm font-bold text-slate-900">{data.username}</div>
+            {/* The office's registered name, falling back to the login name for
+                accounts created before signup collected one. This sheet gets
+                printed and sent — a username where the letterhead belongs is
+                not something anybody would sign. */}
+            <div className="text-sm font-bold text-slate-900">
+              {data.issuer?.name || data.username}
+            </div>
+            {data.issuer?.contact ? <div>{data.issuer.contact}</div> : null}
             <div>Ημερομηνία έκδοσης: {formatDate(new Date().toISOString())}</div>
             <div>
               {data.counts.active_clients} ενεργοί πελάτες ·{" "}

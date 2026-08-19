@@ -196,6 +196,22 @@ _ADDITIVE_MIGRATIONS = (
     # is what every existing row genuinely is.
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_secret VARCHAR(64)",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+    # Public tenant onboarding: who the office is, who signed up, and what they
+    # agreed to. All NULLABLE — every account created before self-service signup
+    # existed genuinely has no value for them, and a NOT NULL with an invented
+    # default would put a made-up business name on a printed statement.
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS company_name VARCHAR(200)",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name VARCHAR(200)",
+    # DEFAULT 'admin' and NOT NULL, unlike the three above: every existing row
+    # IS the owner of its own tenant, so backfilling that is stating a fact
+    # rather than guessing one. See server/models.User.role.
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(32) "
+    "NOT NULL DEFAULT 'admin'",
+    # Consent. Left NULL for accounts that predate the consent checkbox: nobody
+    # asked them, so recording that they agreed would be a fabricated record —
+    # exactly the thing this column exists to make impossible.
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMPTZ",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_version VARCHAR(64)",
     # trusted_devices needs nothing here: create_all() issues CREATE TABLE for
     # a table that does not exist yet. The indexes are listed because a
     # database that somehow had the table without them would do a sequential

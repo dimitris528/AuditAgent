@@ -50,6 +50,41 @@ def name_key(value):
     return _SPACES.sub(" ", _PUNCT.sub("", folded)).strip()
 
 
+# Greek → Latin, for the one place a Greek string has to become an ASCII
+# identifier: the username derived from an email at signup (store.slugify_username).
+# Only there — names are never transliterated for display or comparison, where
+# doing so would be both wrong and rude.
+#
+# The digraphs come first and are applied first, because ΜΠ/ΝΤ/ΓΓ are single
+# sounds ("b", "d", "ng") and a letter-by-letter pass would render "Μπάμπης" as
+# "mpampis" rather than "bampis". This is the ELOT 743 / passport convention,
+# which is what a Greek user expects to see their own name spelled as.
+_DIGRAPHS = (("μπ", "b"), ("ντ", "d"), ("γγ", "ng"), ("γκ", "g"), ("γχ", "nch"),
+             ("γξ", "nx"), ("ου", "ou"), ("αυ", "av"), ("ευ", "ev"), ("ηυ", "iv"))
+
+_GREEK_LETTERS = str.maketrans({
+    "α": "a", "β": "v", "γ": "g", "δ": "d", "ε": "e", "ζ": "z", "η": "i",
+    "θ": "th", "ι": "i", "κ": "k", "λ": "l", "μ": "m", "ν": "n", "ξ": "x",
+    "ο": "o", "π": "p", "ρ": "r", "σ": "s", "ς": "s", "τ": "t", "υ": "y",
+    "φ": "f", "χ": "ch", "ψ": "ps", "ω": "o",
+})
+
+
+def latinise(value):
+    """Transliterate Greek text to ASCII. Non-Greek characters pass through.
+
+    Accents are folded first (via name_key's own normalisation) so ά and α map
+    to the same letter — otherwise every accented vowel would survive the
+    translation table untouched and land in the output as a non-ASCII character.
+    """
+    if not value:
+        return ""
+    folded = strip_accents(str(value).casefold())
+    for digraph, latin in _DIGRAPHS:
+        folded = folded.replace(digraph, latin)
+    return folded.translate(_GREEK_LETTERS)
+
+
 def afm_key(value):
     """The canonical form two ΑΦΜ / VAT numbers are compared by.
 

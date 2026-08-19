@@ -128,6 +128,58 @@ OPENAI_API_KEY = _env("OPENAI_API_KEY")
 OPENAI_MODEL = _env("OPENAI_MODEL", "gpt-4o")
 
 
+# --- Sentry (error monitoring) ---------------------------------------------
+# server/monitoring.py initialises the SDK from these. Leave SENTRY_DSN empty
+# and nothing is initialised at all: no integrations are patched in, no network
+# calls are made, and the process behaves exactly as it did before monitoring
+# existed. That is the intended state for local development and for the test
+# suite — an error reporter that phones home from a developer's laptop is a
+# privacy problem, not a feature.
+#
+# The DSN is not a secret in the way an API key is (it is write-only ingest and
+# ships in the browser bundle of every site using Sentry), but it is still set
+# per environment rather than committed, so a staging deploy cannot pollute the
+# production issue stream.
+SENTRY_DSN = _env("SENTRY_DSN")
+
+# The tag every event is filed under. Explicit when set; otherwise derived, and
+# the derivation matters: an event tagged "development" in production is an
+# alert nobody routes. RENDER is set by Render's own runtime on every service,
+# so a deployed process identifies itself without anyone remembering to.
+SENTRY_ENVIRONMENT = (_env("SENTRY_ENVIRONMENT")
+                      or _env("APP_ENV")
+                      or ("production" if _env("RENDER") else "development"))
+
+# Fraction of requests traced for performance (0.0–1.0). Traces are the
+# expensive half of a Sentry quota and the dashboard makes several calls per
+# page, so production samples rather than recording everything; development
+# records all of it, where the volume is one person.
+#
+# Parsed defensively: a typo here must not take the process down at import.
+def _sample_rate(name, default):
+    raw = _env(name)
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        print(f"[WARN] {name}={raw!r} is not a number — using {default}.")
+        return default
+    if not 0.0 <= value <= 1.0:
+        print(f"[WARN] {name}={raw!r} is outside 0.0–1.0 — using {default}.")
+        return default
+    return value
+
+
+SENTRY_TRACES_SAMPLE_RATE = _sample_rate(
+    "SENTRY_TRACES_SAMPLE_RATE",
+    0.1 if SENTRY_ENVIRONMENT == "production" else 1.0)
+
+# Which deploy an error came from, so a spike can be tied to the change that
+# caused it. Render exposes the commit SHA as RENDER_GIT_COMMIT.
+SENTRY_RELEASE = _env("SENTRY_RELEASE") or _env("RENDER_GIT_COMMIT")
+
+
 # Removed with the Streamlit retirement, because nothing read them any more:
 # AIRTABLE_TABLE_NAME (the publisher), SMTP_* (the Streamlit password-reset
 # mail), and the WHATSAPP_* block (which already had no consumer anywhere in

@@ -220,12 +220,10 @@ def test_registration_starts_a_14_day_trial(api):
     assert dt.timedelta(days=13) < left <= dt.timedelta(days=14)
 
 
-def test_registration_response_reports_the_trial(api):
-    res = api.post("/api/v1/auth/register", json={
-        "username": "second",
-        "email": "second@example.com",
-        "password": "correct-horse-battery",
-    })
+def test_registration_response_reports_the_trial(api, signup):
+    res = api.post("/api/v1/auth/register", json=signup(
+        username="second", email="second@example.com",
+        company_name="Δεύτερο Γραφείο", full_name="Δεύτερος Δευτερίδης"))
     assert res.status_code == 201, res.text
     sub = res.json()["subscription"]
     assert sub["status"] == "trialing"

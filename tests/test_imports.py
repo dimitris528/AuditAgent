@@ -783,16 +783,15 @@ def test_import_requires_a_session(path):
     assert res.status_code == 401
 
 
-def test_an_import_lands_only_in_the_callers_own_book(api):
+def test_an_import_lands_only_in_the_callers_own_book(api, signup):
     """Tenancy comes from the token, and there is no field in the file that
     could point the rows anywhere else."""
     upload(api, "/api/import/clients",
            csv_bytes([CLIENT_HEADER, ("Νησίδα Café", "123456789", "", "")]))
 
-    other = api.post("/api/v1/auth/register", json={
-        "username": "outsider", "email": "outsider@example.com",
-        "password": "correct-horse-battery",
-    })
+    other = api.post("/api/v1/auth/register", json=signup(
+        username="outsider", email="outsider@example.com",
+        company_name="Ξένο Γραφείο", full_name="Ξένος Ξενίδης"))
     token = other.json()["access_token"]
     listed = api.get("/api/v1/clients",
                      headers={"Authorization": f"Bearer {token}"}).json()

@@ -230,6 +230,9 @@ export default async function StatementPage({
             <div className="text-sm font-bold text-slate-900">
               {issuer?.name || "ΛογιστήριοPro"}
             </div>
+            {/* The person, under the office. A printed statement is signed by
+                somebody, and the recipient needs to know who to call back. */}
+            {issuer?.contact ? <div>{issuer.contact}</div> : null}
             {issuer?.email ? <div>{issuer.email}</div> : null}
             <div>Ημερομηνία έκδοσης: {formatDate(new Date().toISOString())}</div>
           </div>

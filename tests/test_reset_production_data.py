@@ -47,13 +47,11 @@ def _table_counts():
         }
 
 
-def _second_tenant(api):
+def _second_tenant(api, signup):
     """Register a second account and return a client authenticated as them."""
-    res = api.post("/api/v1/auth/register", json={
-        "username": "other",
-        "email": "other@example.com",
-        "password": "correct-horse-battery",
-    })
+    res = api.post("/api/v1/auth/register", json=signup(
+        username="other", email="other@example.com",
+        company_name="Δεύτερο Γραφείο", full_name="Δεύτερος Δευτερίδης"))
     assert res.status_code == 201, res.text
     other = api.__class__(api.app)
     other.headers["Authorization"] = f"Bearer {res.json()['access_token']}"
@@ -123,10 +121,10 @@ def test_the_wiped_app_still_works(api):
     }).status_code == 201
 
 
-def test_a_scoped_wipe_leaves_other_tenants_alone(api):
+def test_a_scoped_wipe_leaves_other_tenants_alone(api, signup):
     """Deleting one tenant's rehearsal must not touch the neighbour's books."""
     _seed(api)
-    other = _second_tenant(api)
+    other = _second_tenant(api, signup)
     _seed(other, client_name="Πελάτης Β")
 
     with database.session_scope() as session:

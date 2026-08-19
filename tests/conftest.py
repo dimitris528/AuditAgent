@@ -44,7 +44,7 @@ import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlmodel import delete  # noqa: E402
 
-from server import database  # noqa: E402
+from server import database, middleware  # noqa: E402
 from server.main import app  # noqa: E402
 from server.models import (Client, DebtPayment, Invoice,  # noqa: E402
                           Transaction, TrustedDevice, User)
@@ -52,6 +52,75 @@ from server.models import (Client, DebtPayment, Invoice,  # noqa: E402
 # Children first: transactions reference clients and users, debt_payments
 # references all three, and trusted_devices references users.
 _TABLES = (DebtPayment, Invoice, Transaction, Client, TrustedDevice, User)
+
+
+def signup_payload(**overrides):
+    """A complete, VALID registration body.
+
+    Every test that needs a tenant builds on this rather than writing the fields
+    out again, so adding a required field to the signup contract is one edit
+    here instead of one per call site — and a test that breaks on it breaks for
+    the right reason.
+
+    Reached through the `signup` fixture below rather than imported: tests/ has
+    no __init__.py (see pytest.ini), so `from conftest import ...` works under
+    one pytest invocation and not the other.
+    """
+    body = {
+        "company_name": "Λογιστικό Γραφείο Δοκιμών",
+        "full_name": "Δοκιμαστής Δοκιμίδης",
+        "username": "tester",
+        "email": "tester@example.com",
+        "password": "correct-horse-battery",
+        "accept_terms": True,
+    }
+    body.update(overrides)
+    return body
+
+
+@pytest.fixture()
+def signup():
+    """The builder above, as a fixture. `signup(email=...)` in any test."""
+    return signup_payload
+
+
+def _live_rate_limiter():
+    """The RateLimitMiddleware instance actually serving requests.
+
+    Not the class: `app.add_middleware` constructs ONE instance when the stack
+    is built, and it owns its counter store as an instance attribute. Patching
+    the class would leave the live object untouched — and a rate-limit test that
+    silently metered against the real counters would pass or fail depending on
+    what ran before it.
+    """
+    if app.middleware_stack is None:
+        # Exactly what Starlette does on the first request; doing it here means
+        # a test that never sent one still finds the stack.
+        app.middleware_stack = app.build_middleware_stack()
+    node = app.middleware_stack
+    while node is not None:
+        if isinstance(node, middleware.RateLimitMiddleware):
+            return node
+        node = getattr(node, "app", None)
+    return None
+
+
+@pytest.fixture()
+def fresh_rate_limiter():
+    """Meter this test against EMPTY counters, and put the old ones back.
+
+    Needed because the limiter's windows outlive a test: the signup bucket is
+    metered over an hour, so the second rate-limit test in a session would start
+    already throttled by the first one's requests and assert nothing at all.
+    """
+    limiter = _live_rate_limiter()
+    assert limiter is not None, "the rate limiter is no longer in the stack"
+    previous = limiter.backend
+    limiter.backend = middleware.MemoryWindow()
+    try:
+        yield limiter
+    finally:
+        limiter.backend = previous
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -74,11 +143,7 @@ def api():
         session.commit()
 
     with TestClient(app) as client:
-        res = client.post("/api/v1/auth/register", json={
-            "username": "tester",
-            "email": "tester@example.com",
-            "password": "correct-horse-battery",
-        })
+        res = client.post("/api/v1/auth/register", json=signup_payload())
         assert res.status_code == 201, res.text
         token = res.json()["access_token"]
         client.headers["Authorization"] = f"Bearer {token}"

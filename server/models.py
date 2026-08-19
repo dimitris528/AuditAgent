@@ -71,6 +71,34 @@ class User(SQLModel, table=True):
     # invalidate every live session.
     username: str = Field(index=True, unique=True, max_length=120)
     password_hash: str = Field(max_length=255)
+    # --- Who this tenant is ----------------------------------------------
+    # The accounting office or company the account belongs to. This is the
+    # TENANT's name: everything in clients/transactions/invoices hangs off this
+    # one row, so the row is the tenant and this column is what it is called.
+    # Nullable because every account created before public signup existed has
+    # no value for it, and inventing one from the username would put a made-up
+    # business name on a printed statement's letterhead.
+    company_name: Optional[str] = Field(default=None, max_length=200)
+    # The human being who signed up — the office's own contact name, shown on
+    # the Καρτέλα Πελάτη letterhead and used when addressing them by email.
+    # Separate from `company_name` because "Μαρία Παπαδοπούλου" and "Λογιστικό
+    # Γραφείο Παπαδοπούλου Α.Ε." are different things and a statement needs both.
+    full_name: Optional[str] = Field(default=None, max_length=200)
+    # The account's role WITHIN its own tenant. Today there is exactly one:
+    # `admin`, the account that registered and therefore owns the books. It is
+    # a column rather than an implicit truth so that (a) registration states
+    # what it granted instead of leaving it to be inferred, and (b) a later
+    # member/viewer role has somewhere to live without a migration on a table
+    # holding live subscriptions. Nothing reads it to grant privilege yet —
+    # there is only one tenant-member per tenant to grant it over.
+    role: str = Field(default="admin", max_length=32)
+    # --- Consent (GDPR) ----------------------------------------------------
+    # WHEN the Terms and Privacy Policy were accepted, and WHICH version was on
+    # screen at the time. Both, not a boolean: consent is to a specific text at
+    # a specific moment, and a bare "accepted = true" cannot answer what was
+    # actually agreed to when someone asks a year later. See server/legal.py.
+    terms_accepted_at: Optional[dt.datetime] = Field(default=None, sa_column=_tstz())
+    terms_version: Optional[str] = Field(default=None, max_length=64)
     # "trialing" | "active" | "inactive" — see server/subscription.py, which
     # owns what each one is allowed to do. The default fails CLOSED: a row
     # inserted without a status has no trial date either, so it is not a trial,

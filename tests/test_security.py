@@ -47,11 +47,11 @@ def _no_inherited_tenant():
 
 
 @pytest.fixture()
-def other(api):
+def other(api, signup):
     """A second registered tenant, with their own token and their own data."""
-    res = api.post("/api/v1/auth/register", json={
-        "username": "outsider", "email": "outsider@example.com",
-        "password": "correct-horse-battery"})
+    res = api.post("/api/v1/auth/register", json=signup(
+        username="outsider", email="outsider@example.com",
+        company_name="Ξένο Γραφείο", full_name="Ξένος Ξενίδης"))
     assert res.status_code == 201, res.text
     token = res.json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
