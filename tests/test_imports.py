@@ -285,7 +285,7 @@ def test_a_greek_windows_csv_is_decoded_rather_than_mojibaked():
 def test_all_three_delimiters_are_detected(delimiter):
     parsed = imports.parse_clients(
         csv_bytes([CLIENT_HEADER, ("Νησίδα Café", "123456789", "2101234567",
-                                   "info@nisida.gr")], delimiter=delimiter))
+                                   "nisida@example.gr")], delimiter=delimiter))
     assert len(parsed.rows) == 1
     assert parsed.rows[0]["afm"] == "123456789"
 
@@ -423,11 +423,11 @@ def test_headers_are_matched_through_their_aliases():
     has to survive."""
     parsed = imports.parse_clients(csv_bytes([
         ("Name", "VAT Number", "Phone", "E-mail"),
-        ("Νησίδα Café", "EL123456789", "2101234567", "info@nisida.gr"),
+        ("Νησίδα Café", "EL123456789", "2101234567", "nisida@example.gr"),
     ]))
     assert parsed.rows[0] == {
         "row": 2, "name": "Νησίδα Café", "afm": "EL123456789",
-        "contact": "2101234567 · info@nisida.gr", "notes": None,
+        "contact": "2101234567 · nisida@example.gr", "notes": None,
     }
 
 
@@ -566,8 +566,8 @@ def test_the_transaction_template_shows_a_debt_with_its_due_date():
 def test_importing_clients_reports_what_it_did(api):
     res = upload(api, "/api/import/clients", csv_bytes([
         CLIENT_HEADER,
-        ("Νησίδα Café", "123456789", "2101234567", "info@nisida.gr"),
-        ("Παπαδόπουλος Α.Ε.", "987654321", "6941234567", "info@papadopoulos.gr"),
+        ("Νησίδα Café", "123456789", "2101234567", "nisida@example.gr"),
+        ("Παπαδόπουλος Α.Ε.", "987654321", "6941234567", "papadopoulos@example.gr"),
         ("", "", "", ""),
     ]))
     assert res.status_code == 200, res.text
@@ -581,7 +581,7 @@ def test_importing_clients_reports_what_it_did(api):
     assert sorted(c["name"] for c in listed) == ["Νησίδα Café", "Παπαδόπουλος Α.Ε."]
     nisida = next(c for c in listed if c["name"] == "Νησίδα Café")
     assert nisida["afm"] == "123456789"
-    assert nisida["contact"] == "2101234567 · info@nisida.gr"
+    assert nisida["contact"] == "2101234567 · nisida@example.gr"
 
 
 def test_one_imported_client_reads_as_singular_greek(api):
