@@ -1,5 +1,16 @@
 # Secrets — never track these
 .env
+.env.*
+*.env
+!.env.example
+!**/.env.example
+!**/.env.local.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+secrets/
 
 # Python
 __pycache__/
@@ -7,8 +18,37 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+env/
+ENV/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+
+# Logs
+*.log
+
+# Local tooling
+.claude/
 
 # OS / editor cruft
 .DS_Store
 Thumbs.db
+.idea/
+.vscode/
