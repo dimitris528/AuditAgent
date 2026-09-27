@@ -5,20 +5,26 @@
 ![FastAPI](https://img.shields.io/badge/FastAPI-Production%20Ready-009688?logo=fastapi)
 ![Next.js](https://img.shields.io/badge/Next.js-15-black?logo=next.js)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Supabase%20RLS-336791?logo=postgresql)
-![Tests](https://img.shields.io/badge/Tests-818%20Passed-brightgreen?logo=pytest)
+![Tests](https://img.shields.io/badge/Tests-838%20Passed-brightgreen?logo=pytest)
 
 A production-grade, multi-tenant B2B financial platform designed for high data density, real-time client ledger auditing, and zero-trust security. Built with a desktop-like UX focus, automated CI/CD pipelines, and enterprise-grade tenant isolation.
 
 ---
 
-<!--
 ## 🚀 Live Demo Environment
 
-- **Live Application:** [https://YOUR-APP-URL.onrender.com](https://YOUR-APP-URL.onrender.com)
-- **Demo Access:** `demo@auditagent.io` / `<demo-password>`
+- **Live Application:** [https://accounting-web-oeh3.onrender.com](https://accounting-web-oeh3.onrender.com)
+- **1-Click Demo Login:** use the **1-Click Demo Login** button directly on the login screen — no typing required.
+- **Demo Credentials** (shared, public sandbox account):
+
+  | Field    | Value                |
+  | -------- | -------------------- |
+  | Email    | `demo@auditagent.io` |
+  | Password | `DemoPass2026!`      |
+
+> **Note:** The UI is localized in Greek, tailored for Greek accounting & VAT compliance standards. Browser auto-translation (e.g. Google Chrome translate) works seamlessly for exploring the dashboard workflows.
 
 ---
--->
 
 ## 🏛 Architecture & Tech Stack
 
@@ -26,7 +32,7 @@ A production-grade, multi-tenant B2B financial platform designed for high data d
 - **Database & Multi-Tenancy:** PostgreSQL on Supabase protected by **Row-Level Security (RLS)** ensuring isolated tenant partitions.
 - **Frontend:** Next.js 15, React 19, TailwindCSS, custom horizontal data visualisations.
 - **Security & Caching:** Redis rate limiter (sliding window), TOTP 2FA, salted PBKDF2 hashing, context-aware password policy engine.
-- **Observability & Ops:** Sentry error tracking (FastAPI + Next.js) with PII scrubbing, Resend API for transactional email, GitHub Actions CI/CD with **818 automated tests**.
+- **Observability & Ops:** Sentry error tracking (FastAPI + Next.js) with PII scrubbing, Resend API for transactional email, GitHub Actions CI/CD with **838 automated backend tests**.
 - **Compliance:** GDPR privacy & terms pages with recorded, timestamped terms acceptance per account.
 
 ---
@@ -39,7 +45,7 @@ A production-grade, multi-tenant B2B financial platform designed for high data d
    - Multi-tenant isolation enforced directly at the SQL level (Supabase RLS).
    - Dedicated registration rate limits (`5/hour/IP`) against automated abuse.
    - Sentry tracing with strict regex-based PII/secret scrubbing.
-4. **Resilient Testing Suite:** 818 unit and integration tests covering business edge cases, security exploits, and concurrency collisions.
+4. **Resilient Testing Suite:** 838 passing backend unit and integration tests covering business edge cases, security exploits, concurrency collisions, and demo-account sandboxing.
 
 ---
 
