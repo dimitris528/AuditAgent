@@ -40,6 +40,7 @@ from config import DOCS_ENABLED, STRIPE_WEBHOOK_SECRET
 from server import (billing, database, deps, errors, exports, imports, legal,
                     mailer, mfa, middleware, monitoring, ocr, password_policy,
                     store, subscription, tenancy)
+from server import demo_account as demo
 from server.billing import router as billing_router
 from server.webhooks import router as webhooks_router
 
@@ -709,7 +710,7 @@ def mfa_status(user: str = Depends(get_current_user)):
 
 
 @app.post("/api/v1/auth/mfa/setup")
-def setup_mfa(user: str = Depends(get_current_user)):
+def setup_mfa(user: str = Depends(demo.forbid_demo_user)):
     """Mint a TOTP secret and return the otpauth URI to scan.
 
     Turns NOTHING on. The secret is staged until a code proves the user can
@@ -746,7 +747,7 @@ def setup_mfa(user: str = Depends(get_current_user)):
 
 
 @app.post("/api/v1/auth/mfa/enable")
-def enable_mfa(body: MfaCode, user: str = Depends(get_current_user)):
+def enable_mfa(body: MfaCode, user: str = Depends(demo.forbid_demo_user)):
     """Turn 2FA on, once a code minted from the staged secret verifies."""
     _require_db()
     try:
@@ -899,10 +900,13 @@ def register(body: RegisterRequest):
 
     try:
         with database.session_scope() as session:
-            if username and store.get_user_by_username(session, username):
+            # The demo identity is reserved for scripts/seed_demo.py, and reads
+            # as taken — it is, by the account on the login page.
+            if username and (demo.is_demo_username(username)
+                             or store.get_user_by_username(session, username)):
                 raise HTTPException(
                     status_code=409, detail="Το όνομα χρήστη χρησιμοποιείται ήδη.")
-            if store.get_user_by_email(session, email):
+            if demo.is_demo_email(email) or store.get_user_by_email(session, email):
                 raise HTTPException(
                     status_code=409,
                     detail="Υπάρχει ήδη λογαριασμός με αυτό το email. "
@@ -987,6 +991,14 @@ def forgot_password(body: ForgotPasswordRequest):
                                    f"— nothing sent.")
                 # Same shape, same work, same answer.
                 return neutral
+            if demo.is_demo_username(user.username):
+                # The shared demo account's password is set by
+                # scripts/seed_demo.py alone: a reset link would hand it to
+                # whoever reads the demo mailbox. Still the neutral answer —
+                # the one property this endpoint keeps for every address.
+                mailer.log("INFO", "password reset requested for the demo "
+                                   "account — refused, nothing sent.")
+                return neutral
             raw = store.create_reset_token(session, user)
             store.purge_expired_reset_tokens(session)
             link = mailer.reset_link(raw)
@@ -1037,6 +1049,10 @@ def reset_password(body: ResetPasswordRequest):
                     status_code=400,
                     detail="Ο σύνδεσμος επαναφοράς δεν είναι έγκυρος ή έχει λήξει. "
                            "Ζητήστε νέο.")
+            if demo.is_demo_username(user.username):
+                # Only reachable with a token minted before the forgot-password
+                # guard existed; it has just been spent, so it cannot retry.
+                raise demo.blocked()
             store.update_password(session, user,
                                   passwords.hash_password(body.password))
             print(f"[INFO] Password reset completed for username={user.username!r}.")
@@ -2062,7 +2078,7 @@ def debt_payments(record_id: str, user: str = Depends(get_current_user)):
 # --------------------------------------------------------------------------
 @app.post("/api/v1/documents/scan")
 async def scan_document(file: UploadFile = File(...),
-                        user: str = Depends(get_current_user)):
+                        user: str = Depends(demo.forbid_demo_user)):
     """Read a PDF / photo of an invoice into the transaction form.
 
     Writes NOTHING. The extraction comes back for the user to review and save

@@ -168,8 +168,15 @@ def available_username(session, preferred):
     correct division: this makes the common case pretty, the constraint makes
     every case correct.
     """
+    # Imported here, not at the top: server.demo_account depends on
+    # server.deps, which imports this module.
+    from server import demo_account as demo
+
     base = slugify_username(preferred)
-    if get_user_by_username(session, base) is None:
+    # The demo tenant's username is reserved even before seed_demo.py has
+    # created it: a signup as demo@gmail.com must not become `demo`, or it
+    # would inherit the demo account's restrictions and block the seed.
+    if not demo.is_demo_username(base) and get_user_by_username(session, base) is None:
         return base
     for suffix in range(2, _USERNAME_ATTEMPTS + 2):
         candidate = f"{base}-{suffix}"

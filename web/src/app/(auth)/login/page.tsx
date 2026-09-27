@@ -3,7 +3,7 @@
 import { Suspense, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Loader2, LogIn, AlertCircle, ShieldCheck } from "lucide-react";
+import { Loader2, LogIn, AlertCircle, ShieldCheck, Sparkles } from "lucide-react";
 import { login, verifyMfa } from "@/lib/api";
 import { PasswordField } from "@/components/PasswordField";
 import {
@@ -14,6 +14,18 @@ import {
   authLink,
 } from "@/components/auth/AuthCard";
 
+// The public demo tenant provisioned by scripts/seed_demo.py. Not a secret —
+// the button below hands it to anyone — but only shown where
+// NEXT_PUBLIC_DEMO_LOGIN=1, so a deployment without a seeded demo account
+// never offers a login that cannot work. Inlined at BUILD time, like every
+// NEXT_PUBLIC_ variable.
+const DEMO_ENABLED = process.env.NEXT_PUBLIC_DEMO_LOGIN === "1";
+const DEMO_EMAIL = "demo@auditagent.io";
+const DEMO_PASSWORD = "DemoPass2026!";
+
+const demoButton =
+  "inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-emerald-300/30 bg-emerald-400/10 px-3 py-2.5 text-sm font-semibold text-emerald-200 shadow-lg shadow-emerald-950/30 transition hover:border-emerald-300/50 hover:bg-emerald-400/20 hover:text-emerald-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300 disabled:cursor-not-allowed disabled:opacity-60";
+
 function LoginForm() {
   const router = useRouter();
   const params = useSearchParams();
@@ -22,6 +34,8 @@ function LoginForm() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [status, setStatus] = useState<"idle" | "loading" | "error">("idle");
+  // Which button started the request, so only that one shows the spinner.
+  const [pending, setPending] = useState<"form" | "demo" | null>(null);
   const [message, setMessage] = useState("");
   // Set when the password was right but a second factor is still owed. Holding
   // the challenge here rather than navigating keeps the whole login on one
@@ -36,23 +50,39 @@ function LoginForm() {
     router.refresh();
   }
 
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
+  async function signIn(user: string, pass: string, source: "form" | "demo") {
     setStatus("loading");
+    setPending(source);
     setMessage("");
     try {
-      const result = await login(username.trim(), password);
+      const result = await login(user.trim(), pass);
       if (result.mfa_required && result.challenge) {
         setChallenge(result.challenge);
         setTrustDays(result.trust_days ?? 30);
         setStatus("idle");
+        setPending(null);
         return;
       }
       done();
     } catch (err) {
       setStatus("error");
+      setPending(null);
       setMessage(err instanceof Error ? err.message : "Αποτυχία σύνδεσης.");
     }
+  }
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    void signIn(username, password, "form");
+  }
+
+  function demoLogin() {
+    // Filled in visibly so the visitor sees which account they are entering,
+    // but signed in with the constants: the state updates above have not
+    // rendered yet when signIn runs.
+    setUsername(DEMO_EMAIL);
+    setPassword(DEMO_PASSWORD);
+    void signIn(DEMO_EMAIL, DEMO_PASSWORD, "demo");
   }
 
   async function submitCode(e: React.FormEvent) {
@@ -214,13 +244,39 @@ function LoginForm() {
         ) : null}
 
         <button type="submit" disabled={status === "loading"} className={authButton}>
-          {status === "loading" ? (
+          {pending === "form" ? (
             <Loader2 className="h-4 w-4 animate-spin" />
           ) : (
             <LogIn className="h-4 w-4" />
           )}
           Σύνδεση
         </button>
+
+        {DEMO_ENABLED ? (
+          <>
+            <div className="flex items-center gap-3 text-[11px] uppercase tracking-wider text-slate-400">
+              <span className="h-px flex-1 bg-white/10" />
+              ή
+              <span className="h-px flex-1 bg-white/10" />
+            </div>
+            <button
+              type="button"
+              onClick={demoLogin}
+              disabled={status === "loading"}
+              className={demoButton}
+            >
+              {pending === "demo" ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Sparkles className="h-4 w-4" />
+              )}
+              1-Click Demo Login
+            </button>
+            <p className="text-center text-[11px] text-slate-400">
+              Κοινόχρηστος λογαριασμός επίδειξης με δείγματα δεδομένων
+            </p>
+          </>
+        ) : null}
       </form>
     </AuthCard>
   );

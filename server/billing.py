@@ -72,7 +72,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.exc import SQLAlchemyError
 
 from config import APP_BASE_URL, STRIPE_PRICE_ID, STRIPE_SECRET_KEY
-from server import database, deps, errors, store, subscription
+from server import database, demo_account as demo, deps, errors, store, subscription
 
 router = APIRouter(prefix="/api/v1/billing", tags=["billing"])
 
@@ -164,7 +164,7 @@ def billing_status(user: str = Depends(deps.get_current_user)):
 
 
 @router.post("/checkout")
-def create_checkout_session(user: str = Depends(deps.get_current_user)):
+def create_checkout_session(user: str = Depends(demo.forbid_demo_user)):
     """Open a Stripe Checkout session and hand back the URL to redirect to.
 
     Idempotent enough for a button: Stripe sessions are cheap and expire on
@@ -281,7 +281,7 @@ def _ensure_customer(username, email, customer_id):
 
 
 @router.post("/portal")
-def create_portal_session(user: str = Depends(deps.get_current_user)):
+def create_portal_session(user: str = Depends(demo.forbid_demo_user)):
     """Open Stripe's hosted customer portal and hand back the URL.
 
     Open to EVERY signed-in tenant, whatever their subscription says. Someone
@@ -363,7 +363,7 @@ def _find_subscription(customer_id):
 
 
 @router.post("/cancel")
-def cancel_subscription(user: str = Depends(deps.get_current_user)):
+def cancel_subscription(user: str = Depends(demo.forbid_demo_user)):
     """Schedule the tenant's subscription to end when the paid period does.
 
     `cancel_at_period_end`, never an immediate delete — see the module
