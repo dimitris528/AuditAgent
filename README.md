@@ -22,6 +22,8 @@ A production-grade, multi-tenant B2B financial platform designed for high data d
   | Email    | `demo@auditagent.io` |
   | Password | `DemoPass2026!`      |
 
+> **Hosting note:** The demo runs on Render's free tier. If it has been idle for more than 15 minutes, the first request may take ~30–50 seconds (cold start) while the containers spin up. Once awake, the app is fully operational.
+
 > **Note:** The UI is localized in Greek, tailored for Greek accounting & VAT compliance standards. Browser auto-translation (e.g. Google Chrome translate) works seamlessly for exploring the dashboard workflows.
 
 ---
